@@ -5,6 +5,7 @@ authoritative.** This is not an app-instance or QEMU recipe.
 
 Related: [Architecture.md](Architecture.md) (PhyIo / NOHYPER),
 [VirtualDrivers.md](VirtualDrivers.md) (vsock + ivshmem),
+[ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [poc/](../poc/README.md) (transport PoC).
 
 Brand **Ambarella** is `ORIGIN_LOCAL`. Two models exist. Do not invent a third.
@@ -18,8 +19,10 @@ Both are ARM64, 4 CPUs, 32G memory, 32G storage, watchdog on, HSM/LEDs off.
 DTS `model` is `n1-655 cooper pro`. Source JSON:
 [models/N1-655-Cooper-Pro.json](../models/N1-655-Cooper-Pro.json),
 [models/N1-655-Cooper-Devkit.json](../models/N1-655-Cooper-Devkit.json).
-Refresh those files from the controller with [`scripts/get_models.sh`](../scripts/get_models.sh)
+Refresh those files from the controller with
+[`scripts/get_models.sh`](../scripts/get_models.sh)
 (`ZCLI_TOKEN` already in the environment; `--dry-run` prints without writing).
+All ZedControl wrappers: [ZedControl-scripts.md](ZedControl-scripts.md).
 
 ## ztype map
 
@@ -74,10 +77,13 @@ The model only **publishes** adapters. No app gets `/dev/cavalry` until the
 **edge-app instance** lists that `assigngrp`. Attach `cavalry`, `gpio`, and
 `iav` to the NOHYPER container only. Keep them off the HVM.
 
+Wrappers: [ZedControl-scripts.md](ZedControl-scripts.md). `$ZCLI_TOKEN` must
+already be in the environment.
+
 ```mermaid
 flowchart LR
   model["Model ioMemberList"]
-  inst["NOHYPER instance --adapter"]
+  inst["NOHYPER set_adapters"]
   oci["OCI devices in container"]
   model -->|"available"| inst
   inst -->|"assigngrp cavalry/gpio/iav"| oci
@@ -85,10 +91,10 @@ flowchart LR
 
 ### 1. Find both instances
 
-```text
-zcli edge-app-instance show
-zcli --format=json edge-app-instance show <NOHYPER_NAME> --detail
-zcli --format=json edge-app-instance show <HVM_NAME> --detail
+```bash
+./scripts/show_instances.sh
+./scripts/show_instances.sh ubuntu_24_04_container.n1-655-pro
+./scripts/show_instances.sh ubuntu_24_04.n1-655-pro
 ```
 
 | Role | Typical name | Adapters |
@@ -96,58 +102,53 @@ zcli --format=json edge-app-instance show <HVM_NAME> --detail
 | NOHYPER container | `ubuntu_24_04_container.n1-655-pro` | cavalry, gpio, iav |
 | HVM | `ubuntu_24_04.n1-655-pro` | **none** of those |
 
-Cloud instance names may differ slightly. Note the container’s **edge-app**
-bundle name and any adapters already attached. `--adapter` **replaces** the
-instance adapter list; re-specify attachments you want to keep.
+Cloud instance names may differ. `zcli update --adapter=` **replaces** all
+interfaces (including networks). `set_adapters.sh` keeps current networks.
 
 ### 2. Edge-app interfaces (if missing)
 
-`zcli edge-app-instance update --adapter=` takes `interfaceName:adapterName`
-(zcli example: `eth0:USB`). The left name must exist on the **edge-app**
-manifest. The right name is the model phylabel / `assigngrp` (`cavalry`,
-`gpio`, `iav`). Group `cavalry` covers both `/dev/cavalry` and
+The left side of `--adapter=intfname:assigngrp` must exist on the
+**edge-app** manifest. Group `cavalry` covers both `/dev/cavalry` and
 `/dev/cavalry_profile`.
 
-```text
-zcli edge-app export-manifest <NOHYPER_EDGE_APP>
+```bash
+./scripts/show_app.sh ubuntu_24_04_container
 ```
 
-If the manifest has no Other / direct-attach interfaces for those groups,
-add them (names matching the left side of `--adapter`), then:
-
-```text
-zcli edge-app update <NOHYPER_EDGE_APP> --manifest=<file> --version=<new>
-zcli edge-app-instance refresh <NOHYPER_INSTANCE>
-```
-
-Do not add Cavalry / GPIO / IAV interfaces to the HVM edge-app.
+If those interfaces are missing, add them on the bundle (`edge-app update
+--manifest` + version bump), then
+`./scripts/restart_instance.sh <INSTANCE> --refresh`. That bundle edit is
+not wrapped yet. Do not add Cavalry / GPIO / IAV interfaces to the HVM
+edge-app.
 
 ### 3. Attach on the NOHYPER instance
 
-```text
-zcli edge-app-instance update <NOHYPER_INSTANCE> \
-  --adapter=cavalry:cavalry \
-  --adapter=gpio0:gpio \
-  --adapter=iav:iav
+```bash
+./scripts/set_adapters.sh ubuntu_24_04_container.n1-655-pro \
+  --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
+  --allow-visorc --dry-run
+./scripts/set_adapters.sh ubuntu_24_04_container.n1-655-pro \
+  --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
+  --allow-visorc --restart
 ```
 
-Use the real `intfname` from the manifest on the left. Then recreate OCI
-devices:
-
-```text
-zcli edge-app-instance restart <NOHYPER_INSTANCE>
-```
-
-GUI: instance → I/O Adapters → add `cavalry`, `gpio`, `iav` → save → restart.
+Use the real `intfname` from `show_app.sh` on the left. `--restart`
+recreates OCI devices. GUI: instance → I/O Adapters → add those groups →
+save → restart.
 
 ### 4. Confirm the HVM is clean
 
-```text
-zcli --format=json edge-app-instance show <HVM_INSTANCE> --detail
+```bash
+./scripts/show_instances.sh ubuntu_24_04.n1-655-pro
 ```
 
-If cavalry / gpio / iav appear, update that instance without them and
-restart. HVMs must not own VisORC.
+If cavalry / gpio / iav appear:
+
+```bash
+./scripts/set_adapters.sh ubuntu_24_04.n1-655-pro --clear-adapters --restart
+```
+
+HVMs must not own VisORC.
 
 ### 5. Verify on the node
 
