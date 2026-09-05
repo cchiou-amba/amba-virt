@@ -1,0 +1,118 @@
+{
+  "arch": "ARM64",
+  "productURL": "https://www.ambarella.com/",
+  "productStatus": "production",
+  "attr": {
+    "Cpus": "4",
+    "hsm": "0",
+    "leds": "0",
+    "memory": "32G",
+    "storage": "32G",
+    "watchdog": "true"
+  },
+  "ioMemberList": [
+    {
+      "ztype": "IO_TYPE_USB_CONTROLLER",
+      "phylabel": "USB",
+      "phyaddrs": {},
+      "logicallabel": "USB",
+      "assigngrp": "USB",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "iav",
+      "phyaddrs": {
+        "Ifname": "/dev/iav"
+      },
+      "logicallabel": "iav",
+      "assigngrp": "iav",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_COM",
+      "phylabel": "COM1",
+      "phyaddrs": {
+        "Serial": "/dev/ttyS0"
+      },
+      "logicallabel": "COM1",
+      "assigngrp": "COM1",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_ETH",
+      "phylabel": "eth0",
+      "phyaddrs": {
+        "Ifname": "eth0"
+      },
+      "logicallabel": "eth0",
+      "assigngrp": "eth0",
+      "usage": "ADAPTER_USAGE_MANAGEMENT",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "gpio0",
+      "phyaddrs": {
+        "Ifname": "/dev/gpiochip0"
+      },
+      "logicallabel": "gpio0",
+      "assigngrp": "gpio",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "cavalry",
+      "phyaddrs": {
+        "Ifname": "/dev/cavalry"
+      },
+      "logicallabel": "cavalry",
+      "assigngrp": "cavalry",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "cavalry_profile",
+      "phyaddrs": {
+        "Ifname": "/dev/cavalry_profile"
+      },
+      "logicallabel": "cavalry_profile",
+      "assigngrp": "cavalry",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    }
+  ]
+}

@@ -7,6 +7,7 @@ KVM guests talk to a privileged container over **virtio-vsock** (control) and
 
 Related: [VirtualDrivers.md](VirtualDrivers.md) (transport),
 [CavalryVirtualization.md](CavalryVirtualization.md) (Cavalry proxy),
+[EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (cloud PhyIo models),
 [poc/](../poc/README.md) (transport PoC).
 
 ## Diagram
@@ -110,7 +111,8 @@ Build HVM modules against Ubuntu `linux-headers`. Do not give the guest the
 Ambarella kernel tree.
 
 Zedcontroller assigns devices (PhyIo / assigngrp) to the NOHYPER app so it can
-open `/dev/cavalry` and similar nodes. HVMs must not own VisORC.
+open `/dev/cavalry` and similar nodes. HVMs must not own VisORC. Cloud model
+inventory: [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md).
 
 ---
 
