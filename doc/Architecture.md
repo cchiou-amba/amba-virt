@@ -8,6 +8,7 @@ KVM guests talk to a privileged container over **virtio-vsock** (control) and
 Related: [VirtualDrivers.md](VirtualDrivers.md) (transport),
 [CavalryVirtualization.md](CavalryVirtualization.md) (Cavalry proxy),
 [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (cloud PhyIo models),
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (new VisORC app),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [poc/](../poc/README.md) (transport PoC).
 

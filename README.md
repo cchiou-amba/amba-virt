@@ -10,7 +10,8 @@ container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
 | [doc/](doc/) | Architecture, transport, Cavalry, cloud models, zcli scripts |
 | [poc/](poc/) | Matching `amba_virt` kernel modules and userspace on both sides |
 | [models/](models/) | Hardware-details JSON for the two Cooper cloud models |
-| [scripts/](scripts/) | `zcli` wrappers (token in `$ZCLI_TOKEN`, never committed) |
+| [apps/](apps/) | Pulled edge-app manifests (`pull_app.sh`; local JSON) |
+| [scripts/](scripts/) | `zcli` wrappers (token in `$ZCLI_TOKEN`, never committed). In-place update attempts: [scripts/failed/](scripts/failed/README.md) |
 
 ## Documentation
 
@@ -24,6 +25,9 @@ container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
 - [doc/EVE-Ambarella-Models.md](doc/EVE-Ambarella-Models.md) — ZEDEDA Cloud
   hardware models (`ioMemberList`), PhyIo rules, and how to assign adapters
   to the NOHYPER instance only.
+- [doc/EVE-ReconfigureEdgeApps.md](doc/EVE-ReconfigureEdgeApps.md) —
+  do not edit `ubuntu_24_04-container` in place; create a new VisORC
+  container with adapters at instance create.
 - [doc/ZedControl-scripts.md](doc/ZedControl-scripts.md) — every wrapper
   under `scripts/` (zcli, pull models, show/set instance adapters, restart).
 - [poc/README.md](poc/README.md) — build and load the transport PoC

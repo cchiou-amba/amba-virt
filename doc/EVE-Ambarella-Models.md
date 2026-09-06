@@ -6,6 +6,7 @@ authoritative.** This is not an app-instance or QEMU recipe.
 Related: [Architecture.md](Architecture.md) (PhyIo / NOHYPER),
 [VirtualDrivers.md](VirtualDrivers.md) (vsock + ivshmem),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (Devkit recipe),
 [poc/](../poc/README.md) (transport PoC).
 
 Brand **Ambarella** is `ORIGIN_LOCAL`. Two models exist. Do not invent a third.
@@ -77,13 +78,17 @@ The model only **publishes** adapters. No app gets `/dev/cavalry` until the
 **edge-app instance** lists that `assigngrp`. Attach `cavalry`, `gpio`, and
 `iav` to the NOHYPER container only. Keep them off the HVM.
 
+Worked example (cannot edit `ubuntu_24_04-container` in place; create
+`ubuntu_24_04-container-visorc`):
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
+
 Wrappers: [ZedControl-scripts.md](ZedControl-scripts.md). `$ZCLI_TOKEN` must
 already be in the environment.
 
 ```mermaid
 flowchart LR
   model["Model ioMemberList"]
-  inst["NOHYPER set_adapters"]
+  inst["NOHYPER instance create --adapter"]
   oci["OCI devices in container"]
   model -->|"available"| inst
   inst -->|"assigngrp cavalry/gpio/iav"| oci
@@ -99,7 +104,8 @@ flowchart LR
 
 | Role | Typical name | Adapters |
 |---|---|---|
-| NOHYPER container | `ubuntu_24_04_container.n1-655-pro` | cavalry, gpio, iav |
+| Old NOHYPER | `ubuntu_24_04_container.n1-655-pro` | eth0 only |
+| New NOHYPER | `ubuntu_24_04_container_visorc.n1-655-pro` | cavalry, gpio, iav |
 | HVM | `ubuntu_24_04.n1-655-pro` | **none** of those |
 
 Cloud instance names may differ. `zcli update --adapter=` **replaces** all
@@ -112,22 +118,24 @@ The left side of `--adapter=intfname:assigngrp` must exist on the
 `/dev/cavalry_profile`.
 
 ```bash
-./scripts/show_app.sh ubuntu_24_04_container
+./scripts/show_app.sh ubuntu_24_04-container
 ```
 
-If those interfaces are missing, add them on the bundle (`edge-app update
---manifest` + version bump), then
-`./scripts/restart_instance.sh <INSTANCE> --refresh`. That bundle edit is
-not wrapped yet. Do not add Cavalry / GPIO / IAV interfaces to the HVM
-edge-app.
+gmwtus will not add those names to a bundle that already has instances
+(Halted included). Create `ubuntu_24_04-container-visorc` instead:
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md). Do not add
+Cavalry / GPIO / IAV interfaces to the HVM edge-app.
 
 ### 3. Attach on the NOHYPER instance
 
+Prefer `--adapter=` at **instance create**. For an instance whose
+template already lists the ifs:
+
 ```bash
-./scripts/set_adapters.sh ubuntu_24_04_container.n1-655-pro \
+./scripts/set_adapters.sh ubuntu_24_04_container_visorc.n1-655-pro \
   --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
   --allow-visorc --dry-run
-./scripts/set_adapters.sh ubuntu_24_04_container.n1-655-pro \
+./scripts/set_adapters.sh ubuntu_24_04_container_visorc.n1-655-pro \
   --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
   --allow-visorc --restart
 ```

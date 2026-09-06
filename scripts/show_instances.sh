@@ -4,6 +4,7 @@
 #
 #   ./scripts/show_instances.sh
 #   ./scripts/show_instances.sh --edge-node=NAME
+#   ./scripts/show_instances.sh --edge-app=NAME
 #   ./scripts/show_instances.sh ubuntu_24_04_container.n1-655-pro
 
 set -eu
@@ -11,11 +12,12 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 ZCLI="$ROOT/scripts/zcli"
 EDGE_NODE=
+EDGE_APP=
 RAW_JSON=0
 NAME=
 
 usage() {
-	echo "usage: scripts/show_instances.sh [--edge-node=NAME] [--format=json] [INSTANCE]" >&2
+	echo "usage: scripts/show_instances.sh [--edge-node=NAME] [--edge-app=NAME] [--format=json] [INSTANCE]" >&2
 }
 
 if [ -z "${ZCLI_TOKEN:-}" ]; then
@@ -43,6 +45,18 @@ while [ "$#" -gt 0 ]; do
 			exit 1
 		fi
 		EDGE_NODE=$2
+		shift 2
+		;;
+	--edge-app=*)
+		EDGE_APP=${1#--edge-app=}
+		shift
+		;;
+	--edge-app)
+		if [ "$#" -lt 2 ]; then
+			echo "scripts/show_instances.sh: --edge-app needs a name" >&2
+			exit 1
+		fi
+		EDGE_APP=$2
 		shift 2
 		;;
 	-*)
@@ -75,17 +89,17 @@ if [ -n "$NAME" ]; then
 		exit 1
 	}
 else
+	set -- edge-app-instance show
 	if [ -n "$EDGE_NODE" ]; then
-		raw=$("$ZCLI" -- --format=json edge-app-instance show --edge-node="$EDGE_NODE") || {
-			echo "scripts/show_instances.sh: failed to list instances" >&2
-			exit 1
-		}
-	else
-		raw=$("$ZCLI" -- --format=json edge-app-instance show) || {
-			echo "scripts/show_instances.sh: failed to list instances" >&2
-			exit 1
-		}
+		set -- "$@" --edge-node="$EDGE_NODE"
 	fi
+	if [ -n "$EDGE_APP" ]; then
+		set -- "$@" --edge-app="$EDGE_APP"
+	fi
+	raw=$("$ZCLI" -- --format=json "$@") || {
+		echo "scripts/show_instances.sh: failed to list instances" >&2
+		exit 1
+	}
 fi
 
 if [ "$RAW_JSON" -eq 1 ]; then

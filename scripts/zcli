@@ -10,6 +10,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+mkdir -p "$ROOT/models" "$ROOT/apps"
 # Must export: docker -e NAME only reads the process environment.
 export ZCLI_SERVER="${ZCLI_SERVER:-zedcontrol.gmwtus.zededa.net}"
 
@@ -44,6 +45,7 @@ if [ "$ONESHOT" -eq 0 ]; then
 		-e ZCLI_TOKEN \
 		-e "ZCLI_SERVER=$ZCLI_SERVER" \
 		-v "$ROOT/models:/home/zcli/models:ro" \
+		-v "$ROOT/apps:/home/zcli/apps:ro" \
 		zededa/zcli:latest \
 		-c 'zcli configure --server="$ZCLI_SERVER" --token="$ZCLI_TOKEN" --output=text && exec /bin/bash --rcfile /zcli/zcli.bash'
 fi
@@ -55,6 +57,8 @@ exec docker run --rm \
 	--entrypoint sh \
 	-e ZCLI_TOKEN \
 	-e "ZCLI_SERVER=$ZCLI_SERVER" \
+	-v "$ROOT/models:/home/zcli/models:ro" \
+	-v "$ROOT/apps:/home/zcli/apps:ro" \
 	zededa/zcli:latest \
 	-c 'zcli configure --server="$ZCLI_SERVER" --token="$ZCLI_TOKEN" --output=text >&2 && exec zcli "$@"' \
 	zcli "$@"

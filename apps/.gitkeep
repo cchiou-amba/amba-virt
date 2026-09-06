@@ -1,0 +1,1 @@
+# pull_app.sh writes <Name>.json here (gitignored). zcli mounts this :ro.
