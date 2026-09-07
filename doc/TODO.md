@@ -62,4 +62,4 @@ Firmware build and OTA procedures: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Fir
 - [ ] **EVE In-Tree Host Module Integration**:
   - [ ] Evaluate packaging `amba_virt.ko` host module directly within `eve-kernel` (or EVE dom0 packages) so host driver is built-in and auto-loaded on boot without manual `insmod`.
 - [ ] **Container Device Auto-Permissioning**:
-  - [ ] Add major 506 to standard device rules in EVE pillar container runtime configurations so NOHYPER containers do not require manual cgroup whitelisting.
+  - [ ] Declare `/dev/amba_virt` as an `IO_TYPE_OTHER` member (`Ifname=/dev/amba_virt`, `assigngrp amba_virt`) in the N1-655 models and assign it to the NOHYPER app. EVE then injects the node and its cgroup device rule from the model, so neither a manual `mknod` nor a hand-edited whitelist is needed, and neither is a hardcoded major number.

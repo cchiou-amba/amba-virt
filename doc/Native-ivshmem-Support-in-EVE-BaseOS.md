@@ -28,11 +28,11 @@ Attempts to inject `ivshmem` into an already-running EVE node without modifying 
 1. **`domainmgr` Dynamic Config Overwriting**:
    EVE's `domainmgr` daemon generates the QEMU configuration file (`/run/domainmgr/xen/xen<AppNum>.cfg`) dynamically on every domain lifecycle event (activation, restart, boot retry). Any manual additions appended to `xen<AppNum>.cfg` are truncated and overwritten with stock templates upon the next instance start.
 2. **Containerd Supervision & 10-Minute Boot Backoff**:
-   QEMU processes are supervised as containerd tasks. If QEMU is terminated out-of-band (e.g. `kill -9`), `domainmgr` detects an abnormal transition to `HALTED` / `BROKEN`. Rather than immediately restarting QEMU, `domainmgr` enters a hardcoded 10-minute backoff timer:
+   QEMU processes are supervised as containerd tasks. If QEMU is terminated out-of-band (e.g. `kill -9`), `domainmgr` detects an abnormal transition to `HALTED` / `BROKEN` and waits before restarting it:
    ```go
    domainBootRetryTime: 600 // 10 minutes in seconds
    ```
-   This prevents rapid respawn and requires either a lengthy wait or a manual hardware power-cycle.
+   This is a default rather than a hardcoded constant — it is overridable through `GlobalConfig` — but at its default value it means a failed experiment costs ten minutes or a power-cycle.
 3. **ARM PCIe Architecture Limitations (No Root Complex Hotplug)**:
    Attempting to hot-add `ivshmem-plain` via QEMU Monitor Protocol (QMP) over unix socket fails immediately:
    ```json
@@ -40,7 +40,9 @@ Attempts to inject `ivshmem` into an already-running EVE node without modifying 
    ```
    On ARM `mach-virt`, the root PCIe bus (`pcie.0`) is non-hotpluggable. PCI devices must either be instantiated at initial QEMU launch or attached beneath pre-allocated `pcie-root-port` bridges.
 4. **Controller & zcli Abstraction Boundary**:
-   In ZEDEDA Cloud and `zcli`, the `--adapter` option only assigns physical hardware entries defined in the edge node's `ioMemberList` (such as physical Ethernet `eth0`, USB controllers, serial COM ports, or physical passthrough devices). `ivshmem` is an emulated hypervisor memory device with no representation in `ioMemberList`.
+   In ZEDEDA Cloud and `zcli`, the `--adapter` option only assigns entries defined in the edge node's `ioMemberList`. The guest-side `ivshmem` PCI device is emulated and has no such representation, so it cannot be assigned directly.
+
+   That boundary is real but narrower than it first appears, and it is the hinge of the design. The host-side character device `/dev/amba_virt` *is* expressible as an `IO_TYPE_OTHER` member, which is how the NOHYPER container gets it. And an `IO_TYPE_OTHER` member that carries no physical resource at all is inert everywhere on the KVM path, so it can be attached to the HVM purely as a marker: EVE sees an adapter to reserve, and the patched `kvm.go` sees a request for a window. Its `cbattr` carries the parameters. So while `ivshmem` itself is not assignable, the decision to give a given app instance a window is fully controller-driven.
 
 Therefore, the only clean, robust, and permanent solution is adding native `ivshmem` support to EVE's hypervisor template generator.
 
@@ -96,57 +98,96 @@ func init() {
 
 ### 3.3 Backing Memory File Lifecycle
 
-QEMU will abort startup if `memory-backend-file` points to a non-existent or unallocated path. In `CreateDomConfig()`, ensure the backing file is allocated in host memory before writing the configuration:
+QEMU's `memory-backend-file` opens the path with `O_CREAT` and sizes it itself, so it would not actually abort on a missing file. `ensureSharedMemoryFile` exists for three other reasons: to pin the size and mode explicitly, to reject a size that cannot become a PCI BAR, and to turn a bad configuration into a clear error *before* QEMU launches rather than a `BROKEN` domain afterwards, which would then sit in the boot-retry backoff.
+
+The size check matters because the window is mapped as BAR2 and QEMU enforces `PCI region size must be a power of two`. 256M and 512M are fine; 384M is not.
+
+The file is deliberately never shrunk and never unlinked on teardown. A NOHYPER container may already hold a mapping of it, and leaving it in place means an HVM restart reuses the same region instead of invalidating the other end.
 
 ```go
-func ensureSharedMemoryFile(path string, sizeBytes int64) error {
-    fi, err := os.Stat(path)
-    if os.IsNotExist(err) || (err == nil && fi.Size() < sizeBytes) {
-        f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0666)
-        if err != nil {
-            return fmt.Errorf("failed to create shm file %s: %w", path, err)
-        }
-        defer f.Close()
-        if err := f.Truncate(sizeBytes); err != nil {
-            return fmt.Errorf("failed to allocate %d bytes for %s: %w", sizeBytes, path, err)
-        }
-        if err := os.Chmod(path, 0666); err != nil {
-            return fmt.Errorf("failed to chmod %s: %w", path, err)
+func ensureSharedMemoryFile(w ivshmemWindow) error {
+    if w.size < ivshmemMinSize {
+        return logError("ivshmem window %s: size %d is below the %d byte minimum",
+            w.id, w.size, ivshmemMinSize)
+    }
+    if w.size&(w.size-1) != 0 {
+        return logError("ivshmem window %s: size %d is not a power of two",
+            w.id, w.size)
+    }
+    f, err := os.OpenFile(w.memPath, os.O_RDWR|os.O_CREATE, 0600)
+    if err != nil {
+        return logError("ivshmem window %s: cannot open %s: %v", w.id, w.memPath, err)
+    }
+    defer f.Close()
+    st, err := f.Stat()
+    if err != nil {
+        return logError("ivshmem window %s: cannot stat %s: %v", w.id, w.memPath, err)
+    }
+    if uint64(st.Size()) < w.size {
+        if err := f.Truncate(int64(w.size)); err != nil {
+            return logError("ivshmem window %s: cannot size %s to %d: %v",
+                w.id, w.memPath, w.size, err)
         }
     }
     return nil
 }
 ```
 
+Note the error is returned rather than logged and swallowed. Continuing past a failure here would emit a config referring to a file that is missing or the wrong size, and the domain would fail at launch instead of at configuration time.
+
 ### 3.4 Template Execution in `CreateDomConfig()`
 
-In `CreateDomConfig()`, append the `ivshmem` stanza to the domain configuration file (`xen<AppNum>.cfg`):
+The stanza is appended to the domain configuration file (`xen<AppNum>.cfg`), but the path and size are **not** constants. They come from the adapters the controller assigned to this app instance, so an app with no `amba_shm` adapter gets no window and an unchanged config:
 
 ```go
-    // Ensure the 16MB backing store exists in host tmpfs
-    const shmPath = "/dev/shm/amba-virt"
-    const shmSize = 16 * 1024 * 1024 // 16MB
-
-    if err := ensureSharedMemoryFile(shmPath, shmSize); err != nil {
-        logError("failed to ensure shared memory file: %v", err)
+    // Uses the same collector as the VMM overhead estimator so the cgroup
+    // limit and the emitted devices cannot disagree. Goes before the vsock
+    // block below so that vsock stays last.
+    ivshmemWindows, err := collectIvshmemWindows(domainName, aa,
+        config.IoAdapterList, config.UUIDandVersion.UUID)
+    if err != nil {
+        return err
     }
-
-    // Render ivshmem device configuration
-    ivshmemContext := tQemuIvshmemContext{
-        MemPath: shmPath,
-        Size:    "16M",
-    }
-    if err := tQemuIvshmem.Execute(file, ivshmemContext); err != nil {
-        return logError("can't write ivshmem to config file %s (%v)", file.Name(), err)
+    for _, w := range ivshmemWindows {
+        if err := ensureSharedMemoryFile(w); err != nil {
+            return err
+        }
+        ivshmemContext := tQemuIvshmemContext{
+            ID:      w.id,
+            MemPath: w.memPath,
+            Size:    w.size,
+        }
+        if err := tQemuIvshmem.Execute(file, ivshmemContext); err != nil {
+            return logError("can't write ivshmem assignment to config file %s (%v)",
+                file.Name(), err)
+        }
     }
 ```
+
+A bundle is recognised as a window request by `ivshmemWindowFromBundle`: an `IO_TYPE_OTHER` member with no `PciLong`, `Ifname`, `Serial` or `UsbAddr`. Parameters come from `cbattr` (`shmpath`, `shmsize`), falling back to `/dev/shm/<logicallabel>` at 16M if the controller ever drops unknown `cbattr` keys. Ordering matters: the stanza must precede the vsock block, which `CreateDomConfig` keeps last on purpose so QEMU assigns its PCI ID without conflicts.
+
+### 3.4.1 Memory Accounting
+
+Adding the device is not sufficient on its own. The window is real tmpfs memory, charged in full to whichever cgroup first faults the pages in — normally the QEMU container. EVE sizes that container's memory cgroup from `vmmOverhead`, which knows nothing about ivshmem, so a window larger than the default headroom (roughly 130 MiB) would get the domain OOM-killed. The same number flows through `CountMemOverhead` into `zedmanager`'s admission control, which would otherwise admit an app whose real footprint it had underestimated by the size of the window.
+
+So `estimatedVMMOverhead` gains an `ivshmemVMMOverhead` term that adds the **whole** window, not a fraction of it. This differs deliberately from `mmioVMMOverhead`, which counts 1% of a passthrough aperture because it is modelling page-table cost rather than resident pages.
+
+One caveat: `vmmOverhead` consults `VMMMaxMem` and the global `memory.vmm.limit.MiB` *before* falling back to the estimator. On a node where that global override is set, the ivshmem term is bypassed and the operator has to size the override to include the window.
 
 ### 3.5 Memory and Namespace Permissions
 
 1. **QEMU Containment**:
-   EVE mounts `/dev/shm` into the containerd container running QEMU. The file permissions `0666` ensure the QEMU process can read and write the memory map.
+   Verified on the node: the QEMU container, `pillar` and `xen-tools` all share the *host's* `/dev/shm`, because EVE bind-mounts it `rbind,rshared`. A file created there by `domainmgr` is the same inode QEMU opens. Mode `0600` is sufficient — QEMU runs as root — and is tighter than the `0666` originally proposed.
+
 2. **NOHYPER Container Access**:
-   The host container shares `/dev/shm` or accesses the host-side device node `/dev/amba_virt` (major 506) created by `kmod/nohyper/amba_virt.ko`.
+   NOHYPER containers **do not** share the host's `/dev/shm`. Containerd's default OCI spec gives each one a private `tmpfs`, so a NOHYPER app cannot reach the backing file by path. This invalidates any design in which both ends open `/dev/shm/amba-virt` directly.
+
+   The container's only route to the window is the host-side character device `/dev/amba_virt`, created by `kmod/nohyper/amba_virt.ko`, which holds the backing file open and hands out mappings of it via `mmap`. That node is injected into the container by assigning the `amba_virt` `IO_TYPE_OTHER` adapter, which also supplies the cgroup device permission — so no manual `mknod` and no manual cgroup whitelisting.
+
+3. **Load Ordering**:
+   These two facts pull in opposite directions. `/dev/amba_virt` must exist *before* the NOHYPER container is created, because EVE resolves the device node at container-create time and a failed lookup only logs — the app would come up silently missing the device. But the backing file does not exist until the HVM domain starts, which is later and not ordered against it.
+
+   So the module is loaded at boot from `/etc/init.d/000-mod-params` and no longer requires its backing file at load time. It registers the character device immediately and attaches the window on first use, re-reading the size each time. That also means a window grown by a model change is picked up on the next open rather than needing a module reload.
 
 ---
 
@@ -229,12 +270,18 @@ After the node reports `Online` following the update:
 | Step | Verification Command | Expected Result |
 |---|---|---|
 | **1. Node Firmware** | `./scripts/zcli -- edge-node show n1-655-devkit` | Active Image matches `$EVE_VER` |
-| **2. Backing File** | EVE host: `ls -la /dev/shm/amba-virt` | File exists with size 16777216 bytes |
-| **3. QEMU Config** | EVE host: `cat /run/domainmgr/xen/xen1.cfg` | Contains `[object "amba_shm"]` and `[device "amba-ivshmem"]` |
-| **4. Guest PCI Bus** | Ubuntu HVM: `lspci -nn \| grep -E "1af4\|1110\|1053"` | Both `1af4:1053` (vsock) AND `1af4:1110` (ivshmem) are listed |
-| **5. Guest Driver** | Ubuntu HVM: `insmod amba_virt.ko && ls -l /dev/amba_virt` | Driver probes successfully; `/dev/amba_virt` created |
-| **6. Vsock Ping** | Ubuntu HVM: `./bin/amba-virt-cli ping` | Server returns `PONG` |
-| **7. Shared DRAM** | Ubuntu HVM: `./bin/amba-virt-cli shm` | Zero-copy data integrity verified with `SHM_ACK` |
+| **2. Host Module** | EVE host: `lsmod \| grep amba_virt && ls -l /dev/amba_virt` | Loaded at boot; node present *before* any app starts |
+| **3. Backing File** | EVE host: `ls -la /dev/shm/amba-virt` | Created once the HVM starts, size matches the model `shmsize` |
+| **4. QEMU Config** | EVE host: `cat /run/domainmgr/xen/xen1.cfg` | Contains `[object "amba_shm"]` and `[device "amba_shm-dev"]`, both before `[device "eve-vsock0"]` |
+| **5. Cgroup Limit** | EVE host: QEMU container `memory.limit_in_bytes` | Exceeds guest RAM by at least the window size |
+| **6. Host Attach** | EVE host: `dmesg \| grep amba_virt` | `attached /dev/shm/amba-virt size N` after first open |
+| **7. Guest PCI Bus** | Ubuntu HVM: `lspci -nn \| grep -E "1af4:1110\|1af4:1053"` | Both `1af4:1053` (vsock) AND `1af4:1110` (ivshmem) are listed |
+| **8. Guest Driver** | Ubuntu HVM: `insmod amba_virt.ko && ls -l /dev/amba_virt` | Driver probes successfully; `/dev/amba_virt` created |
+| **9. Container Device** | NOHYPER container: `ls -l /dev/amba_virt` | Present without any manual `mknod` and without a cgroup whitelist edit |
+| **10. Vsock Ping** | Ubuntu HVM: `./bin/amba-virt-cli ping` | Server returns `PONG` |
+| **11. Shared DRAM** | Ubuntu HVM: `./bin/amba-virt-cli shm` | Zero-copy data integrity verified with `SHM_ACK` |
+
+Step 9 is the one that distinguishes a working integration from the earlier manual setup: if `/dev/amba_virt` only appears after a hand-run `mknod`, the model entry is not doing its job and the device will vanish on the next container recreate.
 
 ---
 

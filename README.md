@@ -28,6 +28,11 @@ container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
 - [doc/EVE-ReconfigureEdgeApps.md](doc/EVE-ReconfigureEdgeApps.md) —
   do not edit `ubuntu_24_04-container` in place; create a new VisORC
   container with adapters at instance create.
+- [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md)
+  — the `kvm.go` change that emits the ivshmem device, how the model drives
+  it, and the memory accounting it pulls in.
+- [doc/EVE-Multiple-HVM.md](doc/EVE-Multiple-HVM.md) — what breaks when
+  scaling the transport past one HVM/NOHYPER pair. Deferred, not implemented.
 - [doc/ZedControl-scripts.md](doc/ZedControl-scripts.md) — every wrapper
   under `scripts/` (zcli, pull models, show/set instance adapters, restart).
 - [poc/README.md](poc/README.md) — build and load the transport PoC
