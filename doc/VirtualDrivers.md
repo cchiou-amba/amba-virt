@@ -40,9 +40,9 @@ flowchart LR
 
 | Side | Binary | Role | Build against |
 |---|---|---|---|
-| HVM | `amba_virt.ko` (guest) | PCI ivshmem BAR mmap + kernel vsock client → CID 2:5555 | Ubuntu `linux-headers` (`KDIR_GUEST`) |
+| HVM | `amba_virt.ko` (hvm) | PCI ivshmem BAR mmap + kernel vsock client → CID 2:5555 | Ubuntu `linux-headers` (`KDIR_HVM`) |
 | HVM | `amba-virt-cli` | Userspace smoke test via `/dev/amba_virt` | — |
-| NOHYPER | `amba_virt.ko` (host) | mmap ivshmem backing file + kernel vsock listen | `eve-kernel` / EVE (`KDIR_HOST`) |
+| NOHYPER | `amba_virt.ko` (nohyper) | mmap ivshmem backing file + kernel vsock listen | `eve-kernel` / EVE (`KDIR_NOHYPER`) |
 | NOHYPER | `amba-virt-server` | Echo / shm verify; later Cavalry arbitrator | — |
 
 Same UAPI on both chardevs: `open`, `mmap`, `AMBA_VIRT_IOC_{GET_INFO,SEND,RECV}`.
@@ -71,7 +71,7 @@ Ambarella tree.
   guest, `insmod` will register the driver but `/dev/amba_virt` will not be
   created.
 - **Host module signing:** The EVE host kernel verifies module signatures.
-  Out-of-tree builds of `kmod/host/amba_virt.ko` must be signed with the kernel
+  Out-of-tree builds of `kmod/nohyper/amba_virt.ko` must be signed with the kernel
   build certificate (`certs/signing_key.pem`) to avoid vermagic or signature
   rejection on load.
 - **Dynamic device nodes & container cgroups:** Both `amba-virt-cli` and

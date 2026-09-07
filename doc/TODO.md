@@ -43,7 +43,7 @@ Firmware build and OTA procedures: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Fir
   - [ ] Confirm both `1af4:1053` (`vhost-vsock-pci`) AND `1af4:1110` (`ivshmem-plain`) are detected.
 - [ ] **Guest Driver Probe & Device Node**:
   - [ ] Load `virtio_vsock` (`modprobe virtio_vsock`).
-  - [ ] Insert guest driver (`insmod kmod/guest/amba_virt.ko`).
+  - [ ] Insert guest driver (`insmod kmod/hvm/amba_virt.ko`).
   - [ ] Confirm PCI probe succeeds: `dmesg | grep amba_virt` reports BAR 2 physical address and size.
   - [ ] Confirm `/dev/amba_virt` is automatically created and accessible.
 - [ ] **Container Host Server**:

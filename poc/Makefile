@@ -2,152 +2,152 @@
 #
 # Copyright (C) 2026, Ambarella International LLC
 
-# Two kernels, two KDIRs. Do not share eve-kernel with the guest.
+# Two kernels, two KDIRs. Do not share eve-kernel with the HVM.
 #
-#   KDIR_GUEST  Ubuntu HVM (EL1). linux-headers of the kernel that boots
-#               in the VM. Never eve-kernel (wrong vermagic / CONFIG, and
-#               Ambarella cavalry.ko must not load in the HVM).
-#   KDIR_HOST   NOHYPER on the EVE host (EL2). From eve-flags.mk (extracted
-#               linux-headers). On the device, override to
-#               /lib/modules/$(uname -r)/build. A mismatch can panic the host.
+#   KDIR_HVM      Ubuntu HVM (EL1). linux-headers of the kernel that boots
+#                 in the VM. Never eve-kernel (wrong vermagic / CONFIG, and
+#                 Ambarella cavalry.ko must not load in the HVM).
+#   KDIR_NOHYPER  NOHYPER on the EVE host (EL2). From eve-flags.mk (extracted
+#                 linux-headers). On the device, override to
+#                 /lib/modules/$(uname -r)/build. A mismatch can panic the host.
 #
 # Local QEMU on a generic kernel:
-#   make kmod-host KDIR_HOST=/lib/modules/$(uname -r)/build CROSS_COMPILE=
+#   make kmod-nohyper KDIR_NOHYPER=/lib/modules/$(uname -r)/build CROSS_COMPILE=
 #
-# Guest UAPI lives in this repo (include/uapi/). Do not mount eve-kernel
-# into the HVM; copy headers here if a guest frontend needs them.
+# HVM UAPI lives in this repo (include/uapi/). Do not mount eve-kernel
+# into the HVM; copy headers here if an HVM frontend needs them.
 
 ifdef KDIR
-$(error KDIR is no longer used. Set KDIR_GUEST (Ubuntu HVM) and/or KDIR_HOST (eve-kernel / EVE).)
+$(error KDIR is no longer used. Set KDIR_HVM (Ubuntu HVM) and/or KDIR_NOHYPER (eve-kernel / EVE).)
 endif
 
 include eve-flags.mk
 
-KDIR_GUEST ?= /lib/modules/$(shell uname -r)/build
+KDIR_HVM ?= /lib/modules/$(shell uname -r)/build
 
 PREFIX ?= .
 BINDIR := $(PREFIX)/bin
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Iinclude/uapi
 
-.PHONY: all help on-guest on-host userspace userspace-guest userspace-host \
-	kmod-guest kmod-host maybe-kmod-guest maybe-kmod-host \
-	clean clean-guest clean-host distclean distclean-guest distclean-host
+.PHONY: all help build-hvm build-nohyper userspace userspace-hvm userspace-nohyper \
+	kmod-hvm kmod-nohyper maybe-kmod-hvm maybe-kmod-nohyper \
+	clean clean-hvm clean-nohyper distclean distclean-hvm distclean-nohyper
 
 all: userspace
-	@$(MAKE) --no-print-directory maybe-kmod-guest
-	@$(MAKE) --no-print-directory maybe-kmod-host
+	@$(MAKE) --no-print-directory maybe-kmod-hvm
+	@$(MAKE) --no-print-directory maybe-kmod-nohyper
 
-# Build on the Ubuntu HVM (native). Guest CLI + guest kmod only.
-on-guest: userspace-guest kmod-guest
+# Build for the Ubuntu HVM. HVM CLI + HVM kmod.
+build-hvm: userspace-hvm kmod-hvm
 
-# Build or cross-compile the host/NOHYPER side (eve-flags.mk: ARCH, CROSS_COMPILE, KDIR_HOST).
-on-host: userspace-host kmod-host
+# Build or cross-compile the NOHYPER side (eve-flags.mk: ARCH, CROSS_COMPILE, KDIR_NOHYPER).
+build-nohyper: userspace-nohyper kmod-nohyper
 
 help:
 	@echo "Targets:"
-	@echo "  on-guest      Ubuntu HVM: amba-virt-cli + kmod-guest"
-	@echo "  on-host       NOHYPER / cross: amba-virt-server + kmod-host"
-	@echo "  userspace     both userspace binaries"
-	@echo "  kmod-guest    amba_virt.ko for the Ubuntu HVM (KDIR_GUEST)"
-	@echo "  kmod-host     amba_virt.ko for NOHYPER / EVE (KDIR_HOST)"
-	@echo "  clean-guest / distclean-guest   HVM objects + amba-virt-cli"
-	@echo "  clean-host / distclean-host     host objects + amba-virt-server"
-	@echo "  all           userspace + whichever kmods have a usable KDIR"
+	@echo "  build-hvm         Ubuntu HVM: amba-virt-cli + kmod-hvm"
+	@echo "  build-nohyper     NOHYPER / cross: amba-virt-server + kmod-nohyper"
+	@echo "  userspace         both userspace binaries"
+	@echo "  kmod-hvm          amba_virt.ko for the Ubuntu HVM (KDIR_HVM)"
+	@echo "  kmod-nohyper      amba_virt.ko for NOHYPER / EVE (KDIR_NOHYPER)"
+	@echo "  clean-hvm / distclean-hvm         HVM objects + amba-virt-cli"
+	@echo "  clean-nohyper / distclean-nohyper NOHYPER objects + amba-virt-server"
+	@echo "  all               userspace + whichever kmods have a usable KDIR"
 	@echo
-	@echo "KDIR_GUEST=$(KDIR_GUEST)"
+	@echo "KDIR_HVM=$(KDIR_HVM)"
 	@echo "EVE=$(EVE)"
 	@echo "EVE_KERNEL=$(EVE_KERNEL)"
-	@echo "KDIR_HOST=$(KDIR_HOST)"
-	@echo "ARCH=$(ARCH)  CROSS_COMPILE=$(CROSS_COMPILE)  HOST_CC=$(HOST_CC)"
+	@echo "KDIR_NOHYPER=$(KDIR_NOHYPER)"
+	@echo "ARCH=$(ARCH)  CROSS_COMPILE=$(CROSS_COMPILE)  NOHYPER_CC=$(NOHYPER_CC)"
 	@echo
-	@echo "Guest: Ubuntu linux-headers. Host: eve-flags.mk (NOHYPER / EVE)."
+	@echo "HVM: Ubuntu linux-headers. NOHYPER: eve-flags.mk (EVE BaseOS)."
 
-userspace: userspace-guest userspace-host
-userspace-guest: $(BINDIR)/amba-virt-cli
-userspace-host: $(BINDIR)/amba-virt-server
+userspace: userspace-hvm userspace-nohyper
+userspace-hvm: $(BINDIR)/amba-virt-cli
+userspace-nohyper: $(BINDIR)/amba-virt-server
 
-$(BINDIR)/amba-virt-cli: userspace/guest/amba-virt-cli.c include/uapi/amba_virt.h
+$(BINDIR)/amba-virt-cli: userspace/hvm/amba-virt-cli.c include/uapi/amba_virt.h
 	mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ userspace/guest/amba-virt-cli.c
+	$(CC) $(CFLAGS) -o $@ userspace/hvm/amba-virt-cli.c
 
-$(BINDIR)/amba-virt-server: userspace/host/amba-virt-server.c include/uapi/amba_virt.h
+$(BINDIR)/amba-virt-server: userspace/nohyper/amba-virt-server.c include/uapi/amba_virt.h
 	mkdir -p $(BINDIR)
-	$(HOST_CC) $(CFLAGS) -o $@ userspace/host/amba-virt-server.c
+	$(NOHYPER_CC) $(CFLAGS) -o $@ userspace/nohyper/amba-virt-server.c
 
-# Fail hard: explicit guest build must not use eve-kernel.
-kmod-guest:
-	@if [ ! -d "$(KDIR_GUEST)" ]; then \
-		echo "kmod-guest: KDIR_GUEST=$(KDIR_GUEST) not found." >&2; \
-		echo "Install Ubuntu linux-headers or set KDIR_GUEST to that guest kernel." >&2; \
+# Fail hard: explicit HVM build must not use eve-kernel.
+kmod-hvm:
+	@if [ ! -d "$(KDIR_HVM)" ]; then \
+		echo "kmod-hvm: KDIR_HVM=$(KDIR_HVM) not found." >&2; \
+		echo "Install Ubuntu linux-headers or set KDIR_HVM to that HVM kernel." >&2; \
 		exit 1; \
 	fi
-	@if [ -d "$(KDIR_GUEST)/ambarella" ]; then \
-		echo "kmod-guest: refusing eve-kernel / Ambarella tree ($(KDIR_GUEST))." >&2; \
-		echo "The HVM runs Ubuntu. Set KDIR_GUEST to that kernel's linux-headers." >&2; \
+	@if [ -d "$(KDIR_HVM)/ambarella" ]; then \
+		echo "kmod-hvm: refusing eve-kernel / Ambarella tree ($(KDIR_HVM))." >&2; \
+		echo "The HVM runs Ubuntu. Set KDIR_HVM to that kernel's linux-headers." >&2; \
 		exit 1; \
 	fi
-	$(MAKE) -C kmod/guest KDIR=$(KDIR_GUEST)
+	$(MAKE) -C kmod/hvm KDIR=$(KDIR_HVM)
 
-# Fail hard: explicit host build needs a prepared kbuild tree.
-kmod-host:
-	@if [ ! -d "$(KDIR_HOST)" ]; then \
-		echo "kmod-host: KDIR_HOST=$(KDIR_HOST) not found." >&2; \
+# Fail hard: explicit NOHYPER build needs a prepared kbuild tree.
+kmod-nohyper:
+	@if [ ! -d "$(KDIR_NOHYPER)" ]; then \
+		echo "kmod-nohyper: KDIR_NOHYPER=$(KDIR_NOHYPER) not found." >&2; \
 		echo "Set EVE to the EVE source tree (sibling of amba-virt), then:" >&2; \
 		echo "  make -C \$$(EVE)/build eve-kernel-headers" >&2; \
-		echo "Or: make on-host EVE=/path/to/eve" >&2; \
-		echo "On device / local QEMU: KDIR_HOST=/lib/modules/\$$(uname -r)/build" >&2; \
+		echo "Or: make build-nohyper EVE=/path/to/eve" >&2; \
+		echo "On device / local QEMU: KDIR_NOHYPER=/lib/modules/\$$(uname -r)/build" >&2; \
 		exit 1; \
 	fi
-	@if [ ! -f "$(KDIR_HOST)/.config" ] && [ ! -f "$(KDIR_HOST)/include/generated/autoconf.h" ]; then \
-		echo "kmod-host: $(KDIR_HOST) is not a prepared kbuild tree (no .config)." >&2; \
-		echo "On EVE/NOHYPER: KDIR_HOST=/lib/modules/\$$(uname -r)/build" >&2; \
+	@if [ ! -f "$(KDIR_NOHYPER)/.config" ] && [ ! -f "$(KDIR_NOHYPER)/include/generated/autoconf.h" ]; then \
+		echo "kmod-nohyper: $(KDIR_NOHYPER) is not a prepared kbuild tree (no .config)." >&2; \
+		echo "On EVE/NOHYPER: KDIR_NOHYPER=/lib/modules/\$$(uname -r)/build" >&2; \
 		echo "From eve-kernel: make ARCH=arm64 modules_prepare, or set EVE_KERNEL." >&2; \
-		echo "Local QEMU: make kmod-host KDIR_HOST=/lib/modules/\$$(uname -r)/build" >&2; \
+		echo "Local QEMU: make kmod-nohyper KDIR_NOHYPER=/lib/modules/\$$(uname -r)/build" >&2; \
 		exit 1; \
 	fi
-	$(MAKE) -C kmod/host all KDIR=$(KDIR_HOST) KSRC=$(EVE_KERNEL) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE)
+	$(MAKE) -C kmod/nohyper all KDIR=$(KDIR_NOHYPER) KSRC=$(EVE_KERNEL) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE)
 
 # Used by 'all': skip a side that is missing or the wrong tree.
-maybe-kmod-guest:
-	@if [ ! -d "$(KDIR_GUEST)" ]; then \
-		echo "Skipping kmod-guest: KDIR_GUEST=$(KDIR_GUEST) not found (install Ubuntu linux-headers or set KDIR_GUEST)."; \
-	elif [ -d "$(KDIR_GUEST)/ambarella" ]; then \
-		echo "Skipping kmod-guest: $(KDIR_GUEST) is eve-kernel. Guest modules need Ubuntu headers (KDIR_GUEST)."; \
+maybe-kmod-hvm:
+	@if [ ! -d "$(KDIR_HVM)" ]; then \
+		echo "Skipping kmod-hvm: KDIR_HVM=$(KDIR_HVM) not found (install Ubuntu linux-headers or set KDIR_HVM)."; \
+	elif [ -d "$(KDIR_HVM)/ambarella" ]; then \
+		echo "Skipping kmod-hvm: $(KDIR_HVM) is eve-kernel. HVM modules need Ubuntu headers (KDIR_HVM)."; \
 	else \
-		$(MAKE) kmod-guest; \
+		$(MAKE) kmod-hvm; \
 	fi
 
-maybe-kmod-host:
-	@if [ ! -d "$(KDIR_HOST)" ]; then \
-		echo "Skipping kmod-host: KDIR_HOST=$(KDIR_HOST) not found (set EVE= to the EVE tree; make -C \$$(EVE)/build eve-kernel-headers)."; \
-	elif [ ! -f "$(KDIR_HOST)/.config" ] && [ ! -f "$(KDIR_HOST)/include/generated/autoconf.h" ]; then \
-		echo "Skipping kmod-host: $(KDIR_HOST) is not prepared (no .config). On device use KDIR_HOST=/lib/modules/\$$(uname -r)/build; for local QEMU use that path on this machine."; \
+maybe-kmod-nohyper:
+	@if [ ! -d "$(KDIR_NOHYPER)" ]; then \
+		echo "Skipping kmod-nohyper: KDIR_NOHYPER=$(KDIR_NOHYPER) not found (set EVE= to the EVE tree; make -C \$$(EVE)/build eve-kernel-headers)."; \
+	elif [ ! -f "$(KDIR_NOHYPER)/.config" ] && [ ! -f "$(KDIR_NOHYPER)/include/generated/autoconf.h" ]; then \
+		echo "Skipping kmod-nohyper: $(KDIR_NOHYPER) is not prepared (no .config). On device use KDIR_NOHYPER=/lib/modules/\$$(uname -r)/build; for local QEMU use that path on this machine."; \
 	else \
-		$(MAKE) kmod-host; \
+		$(MAKE) kmod-nohyper; \
 	fi
 
-clean-guest:
-	$(MAKE) -C kmod/guest clean KDIR=$(KDIR_GUEST)
+clean-hvm:
+	$(MAKE) -C kmod/hvm clean KDIR=$(KDIR_HVM)
 	rm -f $(BINDIR)/amba-virt-cli
 
-distclean-guest: clean-guest
-	rm -f kmod/guest/.*.o.d kmod/guest/*.o.d
+distclean-hvm: clean-hvm
+	rm -f kmod/hvm/.*.o.d kmod/hvm/*.o.d
 	rmdir $(BINDIR) 2>/dev/null || true
 
-clean-host:
-	$(MAKE) -C kmod/host clean KDIR=$(KDIR_HOST) KSRC=$(EVE_KERNEL) \
+clean-nohyper:
+	$(MAKE) -C kmod/nohyper clean KDIR=$(KDIR_NOHYPER) KSRC=$(EVE_KERNEL) \
 		ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE)
 	rm -f $(BINDIR)/amba-virt-server
 
-distclean-host: clean-host
-	rm -f kmod/host/.*.o.d kmod/host/*.o.d
+distclean-nohyper: clean-nohyper
+	rm -f kmod/nohyper/.*.o.d kmod/nohyper/*.o.d
 	rmdir $(BINDIR) 2>/dev/null || true
 
-clean: clean-guest clean-host
+clean: clean-hvm clean-nohyper
 	rmdir $(BINDIR) 2>/dev/null || true
 
-distclean: distclean-guest distclean-host
+distclean: distclean-hvm distclean-nohyper
 	rm -rf $(BINDIR)
 
 -include local.install.mk

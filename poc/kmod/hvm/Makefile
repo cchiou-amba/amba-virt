@@ -5,9 +5,10 @@
 ifneq ($(KERNELRELEASE),)
 ccflags-y += -I$(src)/../../include/uapi -I$(src)/../common
 obj-m := amba_virt.o
-amba_virt-y := amba_virt_guest.o amba_virt_core.o
+amba_virt-y := amba_virt_hvm.o amba_virt_core.o
 else
-# Ubuntu HVM kernel only. Never eve-kernel (see ../../Makefile KDIR_GUEST).
+# Ubuntu HVM kernel only. Never eve-kernel (see ../../Makefile KDIR_HVM).
+KDIR ?= $(KDIR_HVM)
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(CURDIR)
 
@@ -15,12 +16,12 @@ PWD  := $(CURDIR)
 
 all:
 	@if [ ! -d "$(KDIR)" ]; then \
-		echo "kmod/guest: KDIR=$(KDIR) not found (Ubuntu linux-headers)." >&2; \
+		echo "kmod/hvm: KDIR=$(KDIR) not found (Ubuntu linux-headers)." >&2; \
 		exit 1; \
 	fi
 	@if [ -d "$(KDIR)/ambarella" ]; then \
-		echo "kmod/guest: refusing Ambarella eve-kernel ($(KDIR))." >&2; \
-		echo "Build the guest module against the Ubuntu HVM kernel (KDIR_GUEST)." >&2; \
+		echo "kmod/hvm: refusing Ambarella eve-kernel ($(KDIR))." >&2; \
+		echo "Build the HVM module against the Ubuntu HVM kernel (KDIR_HVM)." >&2; \
 		exit 1; \
 	fi
 	ln -sfn ../common/amba_virt_core.c amba_virt_core.c

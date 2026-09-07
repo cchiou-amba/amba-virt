@@ -5,11 +5,11 @@
 ifneq ($(KERNELRELEASE),)
 ccflags-y += -I$(src)/../../include/uapi -I$(src)/../common
 obj-m := amba_virt.o
-amba_virt-y := amba_virt_host.o amba_virt_core.o
+amba_virt-y := amba_virt_nohyper.o amba_virt_core.o
 else
-# NOHYPER / EVE host kernel. Defaults from ../../eve-flags.mk.
+# NOHYPER / EVE BaseOS kernel. Defaults from ../../eve-flags.mk.
 -include $(CURDIR)/../../eve-flags.mk
-KDIR ?= $(KDIR_HOST)
+KDIR ?= $(KDIR_NOHYPER)
 KDIR ?= /lib/modules/$(shell uname -r)/build
 KSRC ?= $(EVE_KERNEL)
 ARCH ?= arm64
@@ -26,6 +26,10 @@ endif
 endif
 KBUILD_C ?= $(KDIR)
 
+KEY_PEM ?= $(firstword $(wildcard $(KDIR)/certs/signing_key.pem $(EVE_BUILD)/certs/signing_key.pem))
+KEY_X509 ?= $(firstword $(wildcard $(KDIR)/certs/signing_key.x509 $(EVE_BUILD)/certs/signing_key.x509))
+SIGN_FILE ?= $(firstword $(wildcard $(KDIR)/scripts/sign-file $(EVE_BUILD)/usr/src/linux-headers-*/scripts/sign-file))
+
 .PHONY: all prepare clean
 .DEFAULT_GOAL := all
 
@@ -33,9 +37,9 @@ all: prepare
 	ln -sfn ../common/amba_virt_core.c amba_virt_core.c
 	ln -sfn ../common/amba_virt_core.h amba_virt_core.h
 	$(MAKE) -C $(KBUILD_C) $(KBUILD_O) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
-	@if [ -f "$(KDIR)/certs/signing_key.pem" ] && [ -f "$(KDIR)/certs/signing_key.x509" ] && [ -x "$(KDIR)/scripts/sign-file" ]; then \
-		echo "Signing amba_virt.ko with $(KDIR)/certs/signing_key.pem..."; \
-		$(KDIR)/scripts/sign-file sha256 $(KDIR)/certs/signing_key.pem $(KDIR)/certs/signing_key.x509 amba_virt.ko; \
+	@if [ -n "$(KEY_PEM)" ] && [ -n "$(KEY_X509)" ] && [ -x "$(SIGN_FILE)" ]; then \
+		echo "Signing amba_virt.ko with $(KEY_PEM)..."; \
+		$(SIGN_FILE) sha256 $(KEY_PEM) $(KEY_X509) amba_virt.ko; \
 	fi
 
 # kernel-dev.tar omits Docker host tools (or ships Alpine/musl binaries).

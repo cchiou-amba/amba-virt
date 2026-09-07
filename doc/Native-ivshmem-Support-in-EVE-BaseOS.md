@@ -146,7 +146,7 @@ In `CreateDomConfig()`, append the `ivshmem` stanza to the domain configuration 
 1. **QEMU Containment**:
    EVE mounts `/dev/shm` into the containerd container running QEMU. The file permissions `0666` ensure the QEMU process can read and write the memory map.
 2. **NOHYPER Container Access**:
-   The host container shares `/dev/shm` or accesses the host-side device node `/dev/amba_virt` (major 506) created by `kmod/host/amba_virt.ko`.
+   The host container shares `/dev/shm` or accesses the host-side device node `/dev/amba_virt` (major 506) created by `kmod/nohyper/amba_virt.ko`.
 
 ---
 
