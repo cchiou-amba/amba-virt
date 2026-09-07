@@ -93,7 +93,10 @@ kmod-guest:
 kmod-host:
 	@if [ ! -d "$(KDIR_HOST)" ]; then \
 		echo "kmod-host: KDIR_HOST=$(KDIR_HOST) not found." >&2; \
-		echo "Set KDIR_HOST to eve-kernel or EVE /lib/modules/\$$(uname -r)/build." >&2; \
+		echo "Set EVE to the EVE source tree (sibling of amba-virt), then:" >&2; \
+		echo "  make -C \$$(EVE)/build eve-kernel-headers" >&2; \
+		echo "Or: make on-host EVE=/path/to/eve" >&2; \
+		echo "On device / local QEMU: KDIR_HOST=/lib/modules/\$$(uname -r)/build" >&2; \
 		exit 1; \
 	fi
 	@if [ ! -f "$(KDIR_HOST)/.config" ] && [ ! -f "$(KDIR_HOST)/include/generated/autoconf.h" ]; then \
@@ -117,7 +120,7 @@ maybe-kmod-guest:
 
 maybe-kmod-host:
 	@if [ ! -d "$(KDIR_HOST)" ]; then \
-		echo "Skipping kmod-host: KDIR_HOST=$(KDIR_HOST) not found (set KDIR_HOST to eve-kernel or EVE /lib/modules/\$$(uname -r)/build)."; \
+		echo "Skipping kmod-host: KDIR_HOST=$(KDIR_HOST) not found (set EVE= to the EVE tree; make -C \$$(EVE)/build eve-kernel-headers)."; \
 	elif [ ! -f "$(KDIR_HOST)/.config" ] && [ ! -f "$(KDIR_HOST)/include/generated/autoconf.h" ]; then \
 		echo "Skipping kmod-host: $(KDIR_HOST) is not prepared (no .config). On device use KDIR_HOST=/lib/modules/\$$(uname -r)/build; for local QEMU use that path on this machine."; \
 	else \

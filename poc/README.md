@@ -51,6 +51,23 @@ Two kernels, two `KDIR`s. `make help` prints the paths in use.
 The guest target **refuses** a tree that contains `ambarella/` (eve-kernel).
 The old single `KDIR` override is rejected so one tree cannot be used for both.
 
+### Builder (`make on-host`)
+
+Cross-compile the host kmod against EVE linux-headers, not Ubuntu.
+
+1. EVE tree with `eve-kernel/Makefile.eve`. Default: sibling of this repo
+   (`../eve` from `amba-virt`, `../../eve` from `poc`). Override: `EVE=/path/to/eve`.
+2. Once per kernel build (needs a prior `make eve-kernel` so the image is in
+   the linuxkit cache):
+
+```bash
+make -C $EVE/build eve-kernel-headers
+```
+
+3. `make help` — `EVE_KERNEL` exists (not `poc/eve-kernel`); `KDIR_HOST` is
+   `…/build/usr/src/linux-headers-*-linuxkit-*`.
+4. `make on-host` (or `make on-host EVE=/path/to/eve`).
+
 ```bash
 cd poc
 make help

@@ -23,12 +23,17 @@ CROSS_COMPILE ?= aarch64-linux-gnu-
 HOST_CC ?= $(CROSS_COMPILE)gcc
 
 _eve_mk := $(dir $(lastword $(MAKEFILE_LIST)))
-EVE ?= $(abspath $(_eve_mk)/../../eve)  # Point to your own EVE source path!
+EVE ?= $(abspath $(_eve_mk)/../../eve)
 EVE_KERNEL ?= $(EVE)/eve-kernel
 EVE_BUILD ?= $(EVE)/build
 
+ifeq ($(wildcard $(EVE_KERNEL)/Makefile.eve),)
+EVE_KVER :=
+EVE_KREV :=
+else
 EVE_KVER := $(patsubst v%,%,$(shell sed -n 's/^KERNEL_TAG=//p' $(EVE_KERNEL)/Makefile.eve))
 EVE_KREV := $(shell git -C $(EVE_KERNEL) rev-parse --short=12 HEAD 2>/dev/null)
+endif
 
 # Same layout eve-kernel-headers unpacks: usr/src/linux-headers-$(uname -r)
 EVE_HDR_PREFIX := $(EVE_BUILD)/usr/src/linux-headers-$(EVE_KVER)-linuxkit-$(EVE_KREV)
