@@ -207,6 +207,20 @@ Walkthrough: [EVE-Create-NOHYPER-EdgeApp-Instance.md](EVE-Create-NOHYPER-EdgeApp
 
 Walkthrough (legacy clone recipe): [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
+## scripts/power_cycle_node.sh (alias: scripts/reboot_node.sh)
+
+Power cycle (remotely reboot) or prepare an Ambarella edge node for power off
+via ZEDEDA Cloud controller. Supports `--wait` to monitor reboot progress
+until the node transitions back to `Online`.
+
+```bash
+./scripts/power_cycle_node.sh n1-655-devkit
+./scripts/power_cycle_node.sh n1-655-pro --wait
+./scripts/power_cycle_node.sh n1-655-devkit --status
+./scripts/power_cycle_node.sh n1-655-devkit --poweroff
+./scripts/power_cycle_node.sh n1-655-devkit --dry-run
+```
+
 ## scripts/failed/
 
 Do **not** run. `push_app.sh` (`edge-app update` extra ifs) and
