@@ -27,21 +27,33 @@ endif
 KBUILD_C ?= $(KDIR)
 
 .PHONY: all prepare clean
-
-# kernel-dev.tar omits Docker host tools (or ships Alpine/musl binaries).
-# modules_prepare builds fixdep/modpost with this machine's HOSTCC.
-ifneq ($(KBUILD_O),)
-prepare:
-	$(MAKE) -C $(KBUILD_C) $(KBUILD_O) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) olddefconfig
-	$(MAKE) -C $(KBUILD_C) $(KBUILD_O) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules_prepare
-else
-prepare:
-endif
+.DEFAULT_GOAL := all
 
 all: prepare
 	ln -sfn ../common/amba_virt_core.c amba_virt_core.c
 	ln -sfn ../common/amba_virt_core.h amba_virt_core.h
 	$(MAKE) -C $(KBUILD_C) $(KBUILD_O) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+	@if [ -f "$(KDIR)/certs/signing_key.pem" ] && [ -f "$(KDIR)/certs/signing_key.x509" ] && [ -x "$(KDIR)/scripts/sign-file" ]; then \
+		echo "Signing amba_virt.ko with $(KDIR)/certs/signing_key.pem..."; \
+		$(KDIR)/scripts/sign-file sha256 $(KDIR)/certs/signing_key.pem $(KDIR)/certs/signing_key.x509 amba_virt.ko; \
+	fi
+
+# kernel-dev.tar omits Docker host tools (or ships Alpine/musl binaries).
+# modules_prepare builds fixdep/modpost with this machine's HOSTCC.
+ifneq ($(KBUILD_O),)
+prepare:
+	@if [ ! -x "$(KDIR)/scripts/mod/modpost" ]; then \
+		rel=$$(basename $(KDIR) | sed 's|^linux-headers-||'); \
+		$(MAKE) -C $(KBUILD_C) $(KBUILD_O) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) olddefconfig && \
+		$(MAKE) -C $(KBUILD_C) $(KBUILD_O) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules_prepare && \
+		if [ -n "$$rel" ]; then \
+			echo "#define UTS_RELEASE \"$$rel\"" > $(KDIR)/include/generated/utsrelease.h; \
+			echo "$$rel" > $(KDIR)/include/config/kernel.release; \
+		fi; \
+	fi
+else
+prepare:
+endif
 
 clean:
 	$(MAKE) -C $(KBUILD_C) $(KBUILD_O) M=$(PWD) clean || true

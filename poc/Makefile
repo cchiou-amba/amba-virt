@@ -106,7 +106,7 @@ kmod-host:
 		echo "Local QEMU: make kmod-host KDIR_HOST=/lib/modules/\$$(uname -r)/build" >&2; \
 		exit 1; \
 	fi
-	$(MAKE) -C kmod/host KDIR=$(KDIR_HOST) KSRC=$(EVE_KERNEL) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE)
+	$(MAKE) -C kmod/host all KDIR=$(KDIR_HOST) KSRC=$(EVE_KERNEL) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE)
 
 # Used by 'all': skip a side that is missing or the wrong tree.
 maybe-kmod-guest:
@@ -149,3 +149,5 @@ clean: clean-guest clean-host
 
 distclean: distclean-guest distclean-host
 	rm -rf $(BINDIR)
+
+-include local.install.mk

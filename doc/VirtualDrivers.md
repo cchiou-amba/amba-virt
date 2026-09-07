@@ -62,20 +62,26 @@ Ambarella tree.
 - **Do not use port 2000** (EVE VComLink). The transport uses **5555**.
 - **ivshmem is not stock.** QEMU needs
   `-object memory-backend-file,...,share=on` and `-device ivshmem-plain`.
-  The same file must be visible in the NOHYPER container. That is
-  device-model / Zedcontroller work, not an in-tree EVE default.
-- **Host `insmod` loads into the EVE kernel.** Build the host kmod against
-  `eve-kernel` (`../eve/eve-kernel` from `amba-virt`) or, on the device,
-  `/lib/modules/$(uname -r)/build`. A mismatched module can fail to load
-  or panic the host. Guest kmods use `KDIR_GUEST` (Ubuntu). See
-  [poc/README.md](../poc/README.md).
-- `socket(AF_VSOCK)` from a container is typically allowed on EVE
-  (`oci.WithDefaultSpec()`, not Docker’s vsock-blocking seccomp). Still
-  verify on the node. The kmod uses in-kernel vsock, so the container needs
-  permission to `insmod` and the host kernel needs `CONFIG_VSOCKETS`.
-
-vhost-user (UNIX socket into a container) is a possible later backend. It is
-not required for this transport.
+  Adding this natively to EVE's hypervisor template generator (`kvm.go`) and
+  performing an A/B partition BaseOS OTA update is the production architecture.
+  See full design in [Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md).
+- **Guest device lifecycle:** The guest module `amba_virt.ko` is a PCI driver
+  for device `1af4:1110`. The character device `/dev/amba_virt` is instantiated
+  inside `amba_virt_pci_probe()`. If QEMU does not present `1af4:1110` to the
+  guest, `insmod` will register the driver but `/dev/amba_virt` will not be
+  created.
+- **Host module signing:** The EVE host kernel verifies module signatures.
+  Out-of-tree builds of `kmod/host/amba_virt.ko` must be signed with the kernel
+  build certificate (`certs/signing_key.pem`) to avoid vermagic or signature
+  rejection on load.
+- **Dynamic device nodes & container cgroups:** Both `amba-virt-cli` and
+  `amba-virt-server` automatically inspect `/sys/class/amba_virt/amba_virt/dev`
+  and `/proc/devices` to create `/dev/amba_virt` via `mknod()` if absent.
+  Running `amba-virt-server` inside a NOHYPER container requires whitelisting the
+  allocated major (e.g. 506) in the container's device cgroup:
+  ```bash
+  echo "c 506:* rwm" > /sys/fs/cgroup/devices/eve-user-apps/<container-id>/devices.allow
+  ```
 
 ---
 
@@ -83,3 +89,4 @@ not required for this transport.
 
 See [poc/README.md](../poc/README.md) for a concrete
 command line: `vhost-vsock-pci` + `ivshmem-plain` + shared `memory-backend-file`.
+
