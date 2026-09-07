@@ -7,6 +7,7 @@ or store the token. Override the controller with `$ZCLI_SERVER` if needed.
 
 Catalog of wrappers in [`scripts/`](../scripts/). Hardware-model
 inventory: [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md).
+Firmware updates: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
 Architecture: [Architecture.md](Architecture.md). **Do not** add
 interfaces to `ubuntu_24_04-container` in place; create a new VisORC
 container: [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
@@ -220,6 +221,19 @@ until the node transitions back to `Online`.
 ./scripts/power_cycle_node.sh n1-655-devkit --poweroff
 ./scripts/power_cycle_node.sh n1-655-devkit --dry-run
 ```
+
+## scripts/pub_eve_datastore.sh
+
+Stage an EVE `rootfs.img` into a versioned subdirectory on a datastore and
+register/uplink the image in ZedControl via `zcli`.
+
+```bash
+./scripts/pub_eve_datastore.sh ~/public_html/eve-images/
+./scripts/pub_eve_datastore.sh ~/public_html/eve-images/ --dry-run
+./scripts/pub_eve_datastore.sh ~/public_html/eve-images/ --datastore=LocalHTTP
+```
+
+Walkthrough: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
 
 ## scripts/failed/
 
