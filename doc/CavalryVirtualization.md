@@ -246,7 +246,7 @@ treats as **HPA** is a **token** on the wire.
 
 ### Token vs HPA
 
-```text
+```console
 token (u64, e.g. 0xC0DE0000_00000000 | seq)
   → host_hpa
   → host_len

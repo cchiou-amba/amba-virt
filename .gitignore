@@ -1,4 +1,5 @@
 .cursor
+.agents
 apps/*.json
 *.o
 *.o.d
@@ -16,4 +17,5 @@ poc/kmod/guest/amba_virt_core.c
 poc/kmod/guest/amba_virt_core.h
 poc/kmod/host/amba_virt_core.c
 poc/kmod/host/amba_virt_core.h
+__pycache__/
 

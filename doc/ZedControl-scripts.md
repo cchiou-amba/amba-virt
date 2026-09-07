@@ -182,7 +182,30 @@ bundle that already lists Cavalry interfaces. Does not `update`.
   --allow-visorc --dry-run
 ```
 
-Walkthrough: [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
+## scripts/push_app.sh
+
+Update an existing edge-app manifest on ZEDEDA Cloud from local
+`apps/<Name>.json`. Requires `appInstCount == 0` if adding new interfaces.
+
+```bash
+./scripts/push_app.sh ubuntu_24_04-container
+./scripts/push_app.sh ubuntu_24_04-container --dry-run
+```
+
+## scripts/create_nohyper.sh
+
+Create a NOHYPER edge-app instance on an Ambarella edge node with all
+Ambarella model adapters attached (`cavalry`, `gpio0`, `iav`, `USB`).
+
+```bash
+./scripts/create_nohyper.sh n1-655-devkit
+./scripts/create_nohyper.sh n1-655-pro
+./scripts/create_nohyper.sh n1-655-devkit --dry-run
+```
+
+Walkthrough: [EVE-Create-NOHYPER-EdgeApp-Instance.md](EVE-Create-NOHYPER-EdgeApp-Instance.md).
+
+Walkthrough (legacy clone recipe): [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
 ## scripts/failed/
 
