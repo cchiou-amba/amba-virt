@@ -24,8 +24,6 @@ static struct amba_virt_dev gdev;
 
 static int __init amba_virt_host_init(void)
 {
-	struct file *f;
-	loff_t size;
 	int ret;
 
 	if (vsock_port == 2000) {
@@ -33,29 +31,12 @@ static int __init amba_virt_host_init(void)
 		return -EINVAL;
 	}
 
-	f = filp_open(shm_path, O_RDWR, 0);
-	if (IS_ERR(f)) {
-		pr_err("amba_virt: open %s failed (%ld); create/truncate the file first\n",
-		       shm_path, PTR_ERR(f));
-		return PTR_ERR(f);
-	}
-	size = i_size_read(file_inode(f));
-	if (size <= 0) {
-		filp_close(f, NULL);
-		pr_err("amba_virt: %s has size %lld\n", shm_path, (long long)size);
-		return -EINVAL;
-	}
-
 	memset(&gdev, 0, sizeof(gdev));
-	gdev.shm_file = f;
-	gdev.shm_size = (size_t)size;
+	gdev.shm_path = shm_path;
 
 	ret = amba_virt_core_init(&gdev, true);
-	if (ret) {
-		filp_close(f, NULL);
-		gdev.shm_file = NULL;
+	if (ret)
 		return ret;
-	}
 	gdev.vsock_port = vsock_port;
 
 	ret = amba_virt_vsock_listen(&gdev);
@@ -64,8 +45,17 @@ static int __init amba_virt_host_init(void)
 		amba_virt_core_exit(&gdev);
 		return ret;
 	}
-	pr_info("amba_virt host: shm %s size %zu, vsock port %u\n",
-		shm_path, gdev.shm_size, vsock_port);
+
+	/*
+	 * The backing file is created by the hypervisor when the HVM domain
+	 * starts, so at boot it usually does not exist yet. Loading must still
+	 * succeed: /dev/amba_virt has to be present before the NOHYPER
+	 * container is created, otherwise EVE injects nothing and the app comes
+	 * up silently missing the device. The window is picked up on first use.
+	 */
+	amba_virt_attach_shm(&gdev);
+	pr_info("amba_virt host: shm %s (%s), vsock port %u\n",
+		shm_path, gdev.shm_file ? "attached" : "pending", vsock_port);
 	return 0;
 }
 

@@ -26,6 +26,8 @@ struct amba_virt_dev {
 	phys_addr_t shm_phys;	/* guest BAR; 0 on host */
 	void __iomem *shm_iomem; /* guest optional */
 	struct file *shm_file;	/* host backing file */
+	const char *shm_path;	/* host: attached lazily, see amba_virt_attach_shm */
+	struct mutex shm_lock;	/* serialises the lazy attach */
 
 	struct socket *listen_sock;
 	struct socket *conn_sock;
@@ -38,6 +40,8 @@ struct amba_virt_dev {
 
 int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host);
 void amba_virt_core_exit(struct amba_virt_dev *dev);
+
+int amba_virt_attach_shm(struct amba_virt_dev *dev);
 
 int amba_virt_vsock_listen(struct amba_virt_dev *dev);
 int amba_virt_vsock_connect(struct amba_virt_dev *dev);

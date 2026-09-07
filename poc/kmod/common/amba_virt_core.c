@@ -215,12 +215,70 @@ err:
 	return ret;
 }
 
+/*
+ * Attach the host backing file.
+ *
+ * The file is created and sized by the hypervisor when the HVM domain starts,
+ * which is well after this module loads: the module has to be resident early so
+ * that /dev/amba_virt exists before the NOHYPER container is created, but the
+ * window itself only shows up once the peer VM is running. So attach on first
+ * use rather than at load, and re-read the size each time in case the window
+ * was grown by a model change and an app restart.
+ *
+ * Missing file is not an error: the control plane stays usable and only mmap
+ * is refused until the window appears.
+ */
+int amba_virt_attach_shm(struct amba_virt_dev *dev)
+{
+	struct file *f;
+	loff_t size;
+	int ret = 0;
+
+	if (!dev || !dev->is_host || !dev->shm_path)
+		return 0;
+
+	mutex_lock(&dev->shm_lock);
+	if (dev->shm_file) {
+		size = i_size_read(file_inode(dev->shm_file));
+		if (size > 0)
+			dev->shm_size = (size_t)size;
+		goto out;
+	}
+	f = filp_open(dev->shm_path, O_RDWR, 0);
+	if (IS_ERR(f)) {
+		ret = PTR_ERR(f);
+		pr_debug("amba_virt: %s not available yet (%d)\n",
+			 dev->shm_path, ret);
+		goto out;
+	}
+	size = i_size_read(file_inode(f));
+	if (size <= 0) {
+		filp_close(f, NULL);
+		pr_err("amba_virt: %s has size %lld\n",
+		       dev->shm_path, (long long)size);
+		ret = -EINVAL;
+		goto out;
+	}
+	dev->shm_file = f;
+	dev->shm_size = (size_t)size;
+	pr_info("amba_virt: attached %s size %zu\n",
+		dev->shm_path, dev->shm_size);
+out:
+	mutex_unlock(&dev->shm_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(amba_virt_attach_shm);
+
 static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct amba_virt_dev *dev = filp->private_data;
 	unsigned long size = vma->vm_end - vma->vm_start;
 
-	if (!dev || !dev->shm_size)
+	if (!dev)
+		return -ENODEV;
+	/* The window may have appeared since open. */
+	amba_virt_attach_shm(dev);
+	if (!dev->shm_size)
 		return -ENODEV;
 	if (size > dev->shm_size)
 		return -EINVAL;
@@ -253,6 +311,12 @@ static int amba_virt_open(struct inode *inode, struct file *filp)
 
 	dev = container_of(inode->i_cdev, struct amba_virt_dev, cdev);
 	filp->private_data = dev;
+	/*
+	 * Best effort. Opening has to succeed even without a window so the
+	 * control plane and AMBA_VIRT_IOC_GET_INFO stay reachable; GET_INFO
+	 * reports shm_size 0 and mmap returns -ENODEV until it attaches.
+	 */
+	amba_virt_attach_shm(dev);
 	return 0;
 }
 
@@ -384,6 +448,7 @@ int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
 	dev->vsock_cid = AMBA_VIRT_VSOCK_CID;
 	dev->vsock_port = AMBA_VIRT_VSOCK_PORT;
 	mutex_init(&dev->sock_lock);
+	mutex_init(&dev->shm_lock);
 
 	ret = alloc_chrdev_region(&dev->devt, 0, 1, AMBA_VIRT_DEV_NAME);
 	if (ret)
