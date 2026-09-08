@@ -354,11 +354,63 @@ And its `/dev` held `cavalry`, `cavalry_profile` and `gpiochip0` but no
 assigned to that instance and `amba_virt` was not. EVE injects the node and its
 cgroup device rule strictly from the assigned adapters.
 
-Steps 8–11 remain open: they need `amba_virt` assigned to a NOHYPER instance,
-which the controller will not allow on `ubuntu_24_04-container` because it
-already has instance records. See
-[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) — a new container
-edge-app is required, as was done on the HVM side with `ubuntu_24_04-ivshmem`.
+Steps 8–11 were then completed against a new NOHYPER instance,
+`ubuntu_24_04_container_amba.n1-655-devkit`, on edge-app
+`ubuntu_24_04-container-amba`. A new app was needed for the same reason as on
+the HVM side, and the old devkit container instance had to be deleted first
+because an `assigngrp` cannot be held by two instances at once. See
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
+
+**Step 9 is the one that matters, and it passes.** EVE injected the node *and*
+the matching cgroup rule purely from the assigned adapter, with no `mknod` and
+no hand-edited `devices.allow`:
+
+```
+crw-rw-rw-  1 root root  507, 0  /dev/amba_virt     # in the container
+c 507:0 rwm                                         # its devices.list
+```
+
+The major is the dynamically allocated 507, which nothing in the model,
+the app or the container hardcodes.
+
+Inside the HVM both transports are present, and the guest driver binds the
+window at the same address and size QMP reported from the host:
+
+```
+00:06.0 RAM memory [0500]: Red Hat, Inc. Inter-VM shared memory [1af4:1110]
+00:07.0 Communication controller [0780]: Red Hat, Inc. Virtio 1.0 socket [1af4:1053]
+
+amba_virt 0000:00:06.0: amba_virt guest: shm phys 0x8000000000 size 16777216
+```
+
+The guest module must be built against the HVM's own headers — that guest is
+`6.8.0-137-generic`, and `modversions` means a near-miss vermagic will not load.
+Build it in the VM with `make build-hvm`, per [poc/README.md](../poc/README.md).
+
+Both planes then completed end to end, with `amba-virt-server` running in the
+NOHYPER container against its injected `/dev/amba_virt`:
+
+```
+$ sudo ./bin/amba-virt-cli ping
+proto=1 role=0 shm=16777216 connected=1 cid=2 port=5555
+PONG seq=1
+
+$ sudo ./bin/amba-virt-cli shm
+SHM_ACK seq=7 off=0 len=256 first=7
+```
+
+The data plane is genuinely zero-copy rather than a relayed round trip: the
+bytes the guest wrote into its ivshmem BAR are directly readable in the host's
+backing file, with `first=7` matching `seq=7`.
+
+```
+# od -An -tx1 -N16 /dev/shm/amba-virt
+ 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16
+```
+
+All eleven steps pass. Shared DRAM between an HVM and a NOHYPER container on
+stock-configured EVE, with the window and its memory accounting driven entirely
+from the controller model.
 
 ---
 
