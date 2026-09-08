@@ -283,6 +283,83 @@ After the node reports `Online` following the update:
 
 Step 9 is the one that distinguishes a working integration from the earlier manual setup: if `/dev/amba_virt` only appears after a hand-run `mknod`, the model entry is not doing its job and the device will vanish on the next container recreate.
 
+### 6.1 Measured results on n1-655-devkit
+
+Steps 1–7 were confirmed on the devkit against EVE
+`0.0.0-amba-ivshmem-fa7d9904` with `ubuntu_24_04_ivshmem.n1-655-devkit`
+(`amba_shm` assigned, `shmsize` 16 MiB), using the pre-existing
+`ubuntu_24_04.n1-655-devkit` as an unmodified baseline.
+
+The chrdev major is allocated dynamically and came up as **507**, not the 506 an
+earlier run saw. Nothing may hardcode it.
+
+`domainmgr` rendered the window ahead of vsock, as intended:
+
+```
+[object "amba_shm"]
+  qom-type = "memory-backend-file"
+  mem-path = "/dev/shm/amba-virt"
+  size = "16777216"
+  share = "on"
+
+[device "amba_shm-dev"]
+  driver = "ivshmem-plain"
+  memdev = "amba_shm"
+
+[device "eve-vsock0"]
+```
+
+The guest sees the window as a RAM controller at `1af4:1110`, with BAR 0 (256 B)
+for registers and BAR 2 carrying the 16 MiB region, alongside `eve-vsock0`. Read
+back over QMP `query-pci`, which avoids needing guest credentials:
+
+```
+"device": 4368, "vendor": 6900   # 0x1110, 0x1af4
+"bar": 0, "size": 256
+"bar": 2, "size": 16777216
+```
+
+Memory accounting tracked the window exactly. Both the admission figure and the
+QEMU container's cgroup ceiling rose by precisely 16,777,216 bytes against the
+baseline HVM, which is what keeps `zedmanager` from over-admitting and the
+kernel from OOM-killing QEMU:
+
+| Quantity | Baseline HVM | ivshmem HVM | Delta |
+|---|---|---|---|
+| `AppInstanceStatus.MemOverhead` | 421,108,121 | 437,885,337 | +16,777,216 |
+| QEMU container `memory.limit_in_bytes` | 1,494,847,488 | 1,511,624,704 | +16,777,216 |
+
+Lazy attach resolved the load-order problem in practice. The module came up at
+boot with the backing file still absent, and picked it up on first open once
+`domainmgr` had created it:
+
+```
+[    7.624306] amba_virt host: shm /dev/shm/amba-virt (pending), vsock port 5555
+[ 2650.651002] amba_virt: attached /dev/shm/amba-virt size 16777216
+```
+
+The original init-time `filp_open` would have failed the `modprobe` outright.
+
+Two findings from the same run reinforce why the container must go through
+`/dev/amba_virt` and why the device has to come from the model. The NOHYPER
+container's `/dev/shm` is a private, empty 64 MiB tmpfs — it cannot see the
+host's backing file at all:
+
+```
+/dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k
+```
+
+And its `/dev` held `cavalry`, `cavalry_profile` and `gpiochip0` but no
+`amba_virt`, the difference being that the first three are model bundles
+assigned to that instance and `amba_virt` was not. EVE injects the node and its
+cgroup device rule strictly from the assigned adapters.
+
+Steps 8–11 remain open: they need `amba_virt` assigned to a NOHYPER instance,
+which the controller will not allow on `ubuntu_24_04-container` because it
+already has instance records. See
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) — a new container
+edge-app is required, as was done on the HVM side with `ubuntu_24_04-ivshmem`.
+
 ---
 
 ## 7. Next Steps & Recommendations
