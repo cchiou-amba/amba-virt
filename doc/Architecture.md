@@ -5,7 +5,7 @@ app types and device assignment. Hardware stays on the hypervisor side.
 KVM guests talk to a privileged container over **virtio-vsock** (control) and
 **ivshmem** (bulk).
 
-Related: [VirtualDrivers.md](VirtualDrivers.md) (transport),
+Related: [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport),
 [CavalryVirtualization.md](CavalryVirtualization.md) (Cavalry proxy),
 [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (cloud PhyIo models),
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),

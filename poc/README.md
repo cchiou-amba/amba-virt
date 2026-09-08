@@ -9,7 +9,7 @@ Matching kernel modules and userspace on both ends of the EVE split:
 
 Not Cavalry. Same `/dev/amba_virt` UAPI on both sides: `mmap` of shared memory
 plus framed vsock send/recv. Background: [../doc/Architecture.md](../doc/Architecture.md),
-[../doc/VirtualDrivers.md](../doc/VirtualDrivers.md).
+[../doc/PoCVirtualDrivers.md](../doc/PoCVirtualDrivers.md).
 
 **vsock:** HVM guest → host **CID 2**, port **5555**. Never port **2000** (EVE VComLink).
 

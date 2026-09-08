@@ -17,7 +17,7 @@ container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
 
 - [doc/Architecture.md](doc/Architecture.md) — EVE split (HVM + NOHYPER),
   device assignment, vsock/ivshmem placement.
-- [doc/VirtualDrivers.md](doc/VirtualDrivers.md) — virtio-vsock + ivshmem
+- [doc/PoCVirtualDrivers.md](doc/PoCVirtualDrivers.md) — virtio-vsock + ivshmem
   path and `/dev/amba_virt` on both ends.
 - [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — why
   Cavalry stays in NOHYPER and how a later ioctl frontend sits on the

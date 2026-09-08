@@ -11,7 +11,7 @@ vsock + ivshmem transport ([poc/](../poc/README.md)) and a later
 frontend that preserves the v3 ioctl ABI.
 
 System picture: [Architecture.md](Architecture.md). Transport details:
-[VirtualDrivers.md](VirtualDrivers.md). Deploy:
+[PoCVirtualDrivers.md](PoCVirtualDrivers.md). Deploy:
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 Guest ABI to preserve:

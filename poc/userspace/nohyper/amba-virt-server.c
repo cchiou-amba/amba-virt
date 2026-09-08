@@ -1,6 +1,9 @@
 /*
  * amba-virt-server.c
  *
+ * Userspace daemon on NOHYPER host container.
+ * Handles vsock control messages, shared memory validation, and benchmark bursts.
+ *
  * Copyright (C) 2026, Ambarella International LLC
  */
 
@@ -18,6 +21,7 @@
 #include <unistd.h>
 
 #include "amba_virt.h"
+#include "amba_virt_test.h"
 
 static int ensure_dev_node(const char *path)
 {
@@ -105,7 +109,11 @@ int main(void)
 {
 	struct amba_virt_info info;
 	unsigned char *map = MAP_FAILED;
+	uint64_t msg_count = 0;
 	int fd;
+
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
 
 	if (ensure_dev_node(AMBA_VIRT_DEV_PATH) < 0)
 		return 1;
@@ -117,7 +125,7 @@ int main(void)
 	}
 	if (xioctl(fd, AMBA_VIRT_IOC_GET_INFO, &info, "GET_INFO") < 0)
 		return 1;
-	printf("amba-virt-server proto=%u role=%u shm=%u port=%u (waiting)\n",
+	printf("amba-virt-server proto=%u role=%u shm=%u port=%u (listening)\n",
 	       info.proto, info.role, info.shm_size, info.vsock_port);
 
 	if (info.shm_size) {
@@ -134,43 +142,82 @@ int main(void)
 
 		memset(&rx, 0, sizeof(rx));
 		if (ioctl(fd, AMBA_VIRT_IOC_RECV, &rx) < 0) {
-			if (errno == ENOTCONN) {
-				sleep(1);
+			if (errno == ENOTCONN || errno == ECONNRESET || errno == ECONNABORTED ||
+			    errno == ETIMEDOUT || errno == EPIPE) {
+				usleep(10000);
 				continue;
 			}
-			perror("RECV");
-			return 1;
+			fprintf(stderr, "RECV error (%d: %s), retrying...\n", errno, strerror(errno));
+			usleep(50000);
+			continue;
 		}
 		if (rx.len < sizeof(*in)) {
 			fprintf(stderr, "short msg %u\n", rx.len);
 			continue;
 		}
+
 		in = (struct amba_virt_msg *)rx.data;
 		memset(&tx, 0, sizeof(tx));
-		out = (struct amba_virt_msg *)tx.data;
-		out->seq = in->seq;
-		out->shm_off = in->shm_off;
-		out->shm_len = in->shm_len;
-		tx.len = sizeof(*out);
+		msg_count++;
 
 		if (in->type == AMBA_VIRT_MSG_PING) {
+			out = (struct amba_virt_msg *)tx.data;
 			out->type = AMBA_VIRT_MSG_PONG;
-			printf("PING seq=%u -> PONG\n", in->seq);
+			out->seq = in->seq;
+			out->shm_off = in->shm_off;
+			out->shm_len = in->shm_len;
+			tx.len = sizeof(*out);
+			if (msg_count <= 5 || (msg_count % 1000 == 0))
+				printf("PING seq=%u -> PONG\n", in->seq);
 		} else if (in->type == AMBA_VIRT_MSG_SHM_NOTIFY) {
+			out = (struct amba_virt_msg *)tx.data;
 			out->type = AMBA_VIRT_MSG_SHM_ACK;
+			out->seq = in->seq;
+			out->shm_off = in->shm_off;
+			out->shm_len = in->shm_len;
+			tx.len = sizeof(*out);
+
 			if (map != MAP_FAILED &&
 			    (uint64_t)in->shm_off + in->shm_len <= info.shm_size) {
-				printf("SHM_NOTIFY seq=%u off=%u len=%u first=%u\n",
-				       in->seq, in->shm_off, in->shm_len,
-				       map[in->shm_off]);
-			} else {
-				printf("SHM_NOTIFY seq=%u (no map or OOB)\n", in->seq);
+				// Memory touch/verification
+				volatile uint8_t *p = map + in->shm_off;
+				uint8_t first_byte = p[0];
+				if (msg_count <= 5 || (msg_count % 1000 == 0)) {
+					printf("SHM_NOTIFY seq=%u off=%u len=%u first=%u\n",
+					       in->seq, in->shm_off, in->shm_len, first_byte);
+				}
 			}
+		} else if (in->type == AMBA_VIRT_MSG_ECHO_REQ) {
+			// Variable-length echo: copy exact payload back
+			memcpy(tx.data, rx.data, rx.len);
+			out = (struct amba_virt_msg *)tx.data;
+			out->type = AMBA_VIRT_MSG_ECHO_RESP;
+			tx.len = rx.len;
+		} else if (in->type == AMBA_VIRT_MSG_BENCH_BURST) {
+			// Fast benchmark echo
+			memcpy(tx.data, rx.data, rx.len);
+			out = (struct amba_virt_msg *)tx.data;
+			out->type = AMBA_VIRT_MSG_BENCH_ACK;
+			tx.len = rx.len;
+		} else if (in->type == AMBA_VIRT_MSG_CAVALRY_MOCK_REQ) {
+			struct amba_virt_cavalry_mock *job =
+				(struct amba_virt_cavalry_mock *)(rx.data + sizeof(struct amba_virt_msg));
+			if (job->execution_delay_us > 0)
+				usleep(job->execution_delay_us);
+			job->status = 0; // success
+			memcpy(tx.data, rx.data, rx.len);
+			out = (struct amba_virt_msg *)tx.data;
+			out->type = AMBA_VIRT_MSG_CAVALRY_MOCK_RESP;
+			tx.len = rx.len;
 		} else {
 			fprintf(stderr, "unknown type %u\n", in->type);
 			continue;
 		}
-		if (xioctl(fd, AMBA_VIRT_IOC_SEND, &tx, "SEND") < 0)
-			return 1;
+
+		if (ioctl(fd, AMBA_VIRT_IOC_SEND, &tx) < 0) {
+			if (errno != ENOTCONN && errno != ECONNRESET && errno != EPIPE) {
+				perror("SEND");
+			}
+		}
 	}
 }

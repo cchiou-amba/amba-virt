@@ -32,6 +32,8 @@ struct amba_virt_dev {
 	struct socket *listen_sock;
 	struct socket *conn_sock;
 	struct mutex sock_lock;
+	struct mutex send_lock;
+	struct mutex recv_lock;
 	struct task_struct *accept_thread;
 
 	unsigned int vsock_cid;

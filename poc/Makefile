@@ -29,16 +29,20 @@ PREFIX ?= .
 BINDIR := $(PREFIX)/bin
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Iinclude/uapi
+CXX ?= g++
+CXXFLAGS ?= -O2 -Wall -Wextra -std=c++17 -Iinclude -Iinclude/uapi
+CPPUTEST_LDFLAGS ?= -lCppUTest -lCppUTestExt -lpthread
 
 .PHONY: all help build-hvm build-nohyper userspace userspace-hvm userspace-nohyper \
 	kmod-hvm kmod-nohyper maybe-kmod-hvm maybe-kmod-nohyper \
+	test bench \
 	clean clean-hvm clean-nohyper distclean distclean-hvm distclean-nohyper
 
 all: userspace
 	@$(MAKE) --no-print-directory maybe-kmod-hvm
 	@$(MAKE) --no-print-directory maybe-kmod-nohyper
 
-# Build for the Ubuntu HVM. HVM CLI + HVM kmod.
+# Build for the Ubuntu HVM. HVM CppUTest Client + HVM kmod.
 build-hvm: userspace-hvm kmod-hvm
 
 # Build or cross-compile the NOHYPER side (eve-flags.mk: ARCH, CROSS_COMPILE, KDIR_NOHYPER).
@@ -46,12 +50,14 @@ build-nohyper: userspace-nohyper kmod-nohyper
 
 help:
 	@echo "Targets:"
-	@echo "  build-hvm         Ubuntu HVM: amba-virt-cli + kmod-hvm"
+	@echo "  build-hvm         Ubuntu HVM: amba-virt-client (CppUTest) + kmod-hvm"
 	@echo "  build-nohyper     NOHYPER / cross: amba-virt-server + kmod-nohyper"
 	@echo "  userspace         both userspace binaries"
+	@echo "  test              run CppUTest suite on HVM"
+	@echo "  bench             run IPC benchmark suite on HVM"
 	@echo "  kmod-hvm          amba_virt.ko for the Ubuntu HVM (KDIR_HVM)"
 	@echo "  kmod-nohyper      amba_virt.ko for NOHYPER / EVE (KDIR_NOHYPER)"
-	@echo "  clean-hvm / distclean-hvm         HVM objects + amba-virt-cli"
+	@echo "  clean-hvm / distclean-hvm         HVM objects + amba-virt-client"
 	@echo "  clean-nohyper / distclean-nohyper NOHYPER objects + amba-virt-server"
 	@echo "  all               userspace + whichever kmods have a usable KDIR"
 	@echo
@@ -64,16 +70,22 @@ help:
 	@echo "HVM: Ubuntu linux-headers. NOHYPER: eve-flags.mk (EVE BaseOS)."
 
 userspace: userspace-hvm userspace-nohyper
-userspace-hvm: $(BINDIR)/amba-virt-cli
+userspace-hvm: $(BINDIR)/amba-virt-client
 userspace-nohyper: $(BINDIR)/amba-virt-server
 
-$(BINDIR)/amba-virt-cli: userspace/hvm/amba-virt-cli.c include/uapi/amba_virt.h
+$(BINDIR)/amba-virt-client: userspace/hvm/amba-virt-client.cxx include/amba_virt_dev.hxx include/uapi/amba_virt.h include/uapi/amba_virt_test.h
 	mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ userspace/hvm/amba-virt-cli.c
+	$(CXX) $(CXXFLAGS) -o $@ userspace/hvm/amba-virt-client.cxx $(CPPUTEST_LDFLAGS)
 
-$(BINDIR)/amba-virt-server: userspace/nohyper/amba-virt-server.c include/uapi/amba_virt.h
+$(BINDIR)/amba-virt-server: userspace/nohyper/amba-virt-server.c include/uapi/amba_virt.h include/uapi/amba_virt_test.h
 	mkdir -p $(BINDIR)
 	$(NOHYPER_CC) $(CFLAGS) -o $@ userspace/nohyper/amba-virt-server.c
+
+test: $(BINDIR)/amba-virt-client
+	$(BINDIR)/amba-virt-client -v
+
+bench: $(BINDIR)/amba-virt-client
+	$(BINDIR)/amba-virt-client -bench
 
 # Fail hard: explicit HVM build must not use eve-kernel.
 kmod-hvm:
@@ -129,7 +141,7 @@ maybe-kmod-nohyper:
 
 clean-hvm:
 	$(MAKE) -C kmod/hvm clean KDIR=$(KDIR_HVM)
-	rm -f $(BINDIR)/amba-virt-cli
+	rm -f $(BINDIR)/amba-virt-client $(BINDIR)/amba-virt-cli
 
 distclean-hvm: clean-hvm
 	rm -f kmod/hvm/.*.o.d kmod/hvm/*.o.d

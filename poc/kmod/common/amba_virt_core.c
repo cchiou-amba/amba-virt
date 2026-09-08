@@ -25,9 +25,12 @@
 #include <amba_virt.h>
 #include "amba_virt_core.h"
 
-static int recv_exact(struct socket *sock, void *buf, size_t len)
+static int recv_exact(struct socket *sock, void *buf, size_t len, long timeout_jiffies)
 {
 	size_t done = 0;
+
+	if (sock && sock->sk)
+		sock->sk->sk_rcvtimeo = timeout_jiffies;
 
 	while (done < len) {
 		struct kvec iov = {
@@ -38,8 +41,11 @@ static int recv_exact(struct socket *sock, void *buf, size_t len)
 		int n;
 
 		n = kernel_recvmsg(sock, &msg, &iov, 1, iov.iov_len, 0);
-		if (n <= 0)
+		if (n <= 0) {
+			if (n == -EAGAIN || n == -EWOULDBLOCK)
+				return -ETIMEDOUT;
 			return n < 0 ? n : -ECONNRESET;
+		}
 		done += n;
 	}
 	return 0;
@@ -79,19 +85,19 @@ static int frame_send(struct socket *sock, const void *payload, u32 len)
 	return send_exact(sock, payload, len);
 }
 
-static int frame_recv(struct socket *sock, void *payload, u32 *len)
+static int frame_recv(struct socket *sock, void *payload, u32 *len, long timeout_jiffies)
 {
 	__le32 hdr;
 	u32 n;
 	int ret;
 
-	ret = recv_exact(sock, &hdr, sizeof(hdr));
+	ret = recv_exact(sock, &hdr, sizeof(hdr), timeout_jiffies);
 	if (ret)
 		return ret;
 	n = le32_to_cpu(hdr);
 	if (n == 0 || n > AMBA_VIRT_MAX_MSG)
 		return -EPROTO;
-	ret = recv_exact(sock, payload, n);
+	ret = recv_exact(sock, payload, n, timeout_jiffies);
 	if (ret)
 		return ret;
 	*len = n;
@@ -364,45 +370,80 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 	}
 
 	if (cmd == AMBA_VIRT_IOC_SEND) {
+		struct socket *sock = NULL;
+
+		mutex_lock(&dev->send_lock);
 		if (!dev->is_host) {
 			ret = amba_virt_vsock_connect(dev);
-			if (ret)
+			if (ret) {
+				mutex_unlock(&dev->send_lock);
 				goto out_xfer;
+			}
 		}
 		mutex_lock(&dev->sock_lock);
-		if (!dev->conn_sock)
-			ret = -ENOTCONN;
-		else
-			ret = frame_send(dev->conn_sock, xfer->data, xfer->len);
+		sock = dev->conn_sock;
+		if (sock && sock->sk)
+			sock_hold(sock->sk);
 		mutex_unlock(&dev->sock_lock);
+
+		if (!sock) {
+			mutex_unlock(&dev->send_lock);
+			ret = -ENOTCONN;
+			goto out_xfer;
+		}
+
+		ret = frame_send(sock, xfer->data, xfer->len);
+		if (ret < 0 && ret != -EINVAL && ret != -ETIMEDOUT) {
+			amba_virt_vsock_disconnect(dev);
+		}
+		if (sock->sk)
+			sock_put(sock->sk);
+		mutex_unlock(&dev->send_lock);
 		goto out_xfer;
 	}
 
 	/* RECV */
 	{
-		struct socket *sock;
+		struct socket *sock = NULL;
+		long timeout = MAX_SCHEDULE_TIMEOUT;
 		u32 n = 0;
 
+		if (xfer->timeout_ms > 0)
+			timeout = msecs_to_jiffies(xfer->timeout_ms);
+		else if (xfer->timeout_ms == 0)
+			timeout = msecs_to_jiffies(5000);
+
+		mutex_lock(&dev->recv_lock);
 		mutex_lock(&dev->sock_lock);
 		sock = dev->conn_sock;
-		if (!sock) {
+		if (!sock && !dev->is_host) {
 			mutex_unlock(&dev->sock_lock);
-			if (!dev->is_host) {
-				ret = amba_virt_vsock_connect(dev);
-				if (ret)
-					goto out_xfer;
-				mutex_lock(&dev->sock_lock);
-				sock = dev->conn_sock;
+			ret = amba_virt_vsock_connect(dev);
+			if (ret) {
+				mutex_unlock(&dev->recv_lock);
+				goto out_xfer;
 			}
+			mutex_lock(&dev->sock_lock);
+			sock = dev->conn_sock;
 		}
+		if (sock && sock->sk)
+			sock_hold(sock->sk);
+		mutex_unlock(&dev->sock_lock);
+
 		if (!sock) {
-			mutex_unlock(&dev->sock_lock);
+			mutex_unlock(&dev->recv_lock);
 			ret = -ENOTCONN;
 			goto out_xfer;
 		}
-		/* hold sock_lock across recv so accept thread cannot swap it */
-		ret = frame_recv(sock, xfer->data, &n);
-		mutex_unlock(&dev->sock_lock);
+
+		ret = frame_recv(sock, xfer->data, &n, timeout);
+		if (ret < 0 && ret != -ETIMEDOUT) {
+			amba_virt_vsock_disconnect(dev);
+		}
+		if (sock->sk)
+			sock_put(sock->sk);
+		mutex_unlock(&dev->recv_lock);
+
 		if (ret)
 			goto out_xfer;
 		xfer->len = n;
@@ -448,6 +489,8 @@ int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
 	dev->vsock_cid = AMBA_VIRT_VSOCK_CID;
 	dev->vsock_port = AMBA_VIRT_VSOCK_PORT;
 	mutex_init(&dev->sock_lock);
+	mutex_init(&dev->send_lock);
+	mutex_init(&dev->recv_lock);
 	mutex_init(&dev->shm_lock);
 
 	ret = alloc_chrdev_region(&dev->devt, 0, 1, AMBA_VIRT_DEV_NAME);
