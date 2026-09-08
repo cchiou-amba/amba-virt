@@ -82,6 +82,7 @@ export ADD_APP_DIRECT_DRY="$DRY_RUN"
 export ADD_APP_DIRECT_FORCE="$FORCE"
 export ADD_APP_DIRECT_IFS="$IFS_ADD"
 export ADD_APP_DIRECT_LIB="$ROOT/scripts/app_manifest.py"
+export ADD_APP_DIRECT_MODELS="$ROOT/models"
 python3 << 'PY'
 import json, os, sys, importlib.util
 
@@ -97,13 +98,48 @@ names = [n for n in os.environ.get("ADD_APP_DIRECT_IFS", "").split() if n]
 
 man = am.sanitize(am.load(path))
 
+def window_markers():
+    """Interface names that are ivshmem window markers rather than hardware.
+
+    An IO_TYPE_OTHER bundle with no Ifname/PciLong/Serial/UsbAddr carries no
+    physical resource, so assigning it to an HVM cannot hand real hardware to a
+    VM: all it does is make the hypervisor emit an ivshmem device. Same rule
+    kvm.go uses to recognise a window, so the two cannot drift.
+    """
+    names = set()
+    models = os.environ.get("ADD_APP_DIRECT_MODELS", "")
+    if not models or not os.path.isdir(models):
+        return names
+    for fn in os.listdir(models):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(models, fn)) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for b in data.get("ioMemberList") or []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("ztype") != "IO_TYPE_OTHER":
+                continue
+            addrs = b.get("phyaddrs") or {}
+            if any(addrs.get(k) for k in ("Ifname", "PciLong", "Serial", "UsbAddr")):
+                continue
+            label = b.get("logicallabel") or b.get("phylabel")
+            if label:
+                names.add(label)
+    return names
+
 vmmode = str(man.get("vmmode") or "")
 if "HVM" in vmmode and "NOHYPER" not in vmmode and not force:
-    sys.stderr.write(
-        "scripts/add_app_direct.sh: vmmode %s looks like HVM; "
-        "do not add VisORC interfaces (pass --force to override)\n" % vmmode
-    )
-    sys.exit(1)
+    hardware = [n for n in names if n not in window_markers()]
+    if hardware:
+        sys.stderr.write(
+            "scripts/add_app_direct.sh: vmmode %s looks like HVM; refusing %s "
+            "(pass --force to override)\n" % (vmmode, " ".join(hardware))
+        )
+        sys.exit(1)
 
 ifs = man.get("interfaces")
 if not isinstance(ifs, list):

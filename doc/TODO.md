@@ -47,8 +47,16 @@ Firmware build and OTA procedures: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Fir
   - [ ] Confirm PCI probe succeeds: `dmesg | grep amba_virt` reports BAR 2 physical address and size.
   - [ ] Confirm `/dev/amba_virt` is automatically created and accessible.
 - [ ] **Container Host Server**:
-  - [ ] Ensure host driver (`amba_virt.ko`) is inserted on EVE host.
-  - [ ] Ensure container device cgroup whitelist includes major 506 (`c 506:* rwm`).
+  - [x] Host driver `amba_virt.ko` is built into the EVE kernel image and
+        `modprobe`d from `/etc/init.d/000-mod-params`, so `/dev/amba_virt`
+        exists before any NOHYPER container is created. Verified on
+        `n1-655-devkit`: loads with the backing file still absent and reports
+        `shm /dev/shm/amba-virt (pending)`.
+  - [ ] Assign the `amba_virt` adapter to the NOHYPER instance so EVE injects
+        the node and its cgroup device rule from the model. The major number is
+        dynamically allocated (507 on the current build, not a fixed 506), which
+        is precisely why this must come from the model rather than a hardcoded
+        `devices.allow` entry.
   - [ ] Run `bin/amba-virt-server` inside the NOHYPER container.
 - [ ] **Userspace Smoke Tests**:
   - [ ] In HVM: `./bin/amba-virt-cli info` (verify proto, role, shm_size, vsock CID/port).

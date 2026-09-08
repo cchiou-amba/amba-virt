@@ -77,10 +77,17 @@ Ambarella tree.
 - **Dynamic device nodes & container cgroups:** Both `amba-virt-cli` and
   `amba-virt-server` automatically inspect `/sys/class/amba_virt/amba_virt/dev`
   and `/proc/devices` to create `/dev/amba_virt` via `mknod()` if absent.
-  Running `amba-virt-server` inside a NOHYPER container requires whitelisting the
-  allocated major (e.g. 506) in the container's device cgroup:
+  The major is allocated dynamically (`alloc_chrdev_region`), so it moves between
+  builds — 507 on the current EVE image, not the 506 seen earlier. Do not hardcode
+  it. Assign the `amba_virt` `IO_TYPE_OTHER` adapter to the NOHYPER instance
+  instead: EVE then injects the node *and* the matching cgroup device rule from
+  the model, whatever the major happens to be. Hand-writing
+  `devices.allow` works for a one-off experiment but does not survive a container
+  recreate:
   ```bash
-  echo "c 506:* rwm" > /sys/fs/cgroup/devices/eve-user-apps/<container-id>/devices.allow
+  # last resort only; prefer the model adapter
+  echo "c $(sed -n 's/^\([0-9]*\) amba_virt$/\1/p' /proc/devices):* rwm" \
+      > /sys/fs/cgroup/devices/eve-user-apps/<container-id>/devices.allow
   ```
 
 ---
