@@ -11,7 +11,8 @@ vsock + ivshmem transport ([poc/](../poc/README.md)) and a later
 frontend that preserves the v3 ioctl ABI.
 
 System picture: [Architecture.md](Architecture.md). Transport details:
-[VirtualDrivers.md](VirtualDrivers.md).
+[VirtualDrivers.md](VirtualDrivers.md). Deploy:
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 Guest ABI to preserve:
 `eve-kernel/ambarella/include/cavalry_v3/cavalry_ioctl.h`
@@ -204,7 +205,12 @@ HPA, release reset, wait first sched IRQ. Host can
 ## 6. Proxy over amba_virt
 
 Control rides framed vsock (same `amba_virt` chardev as the PoC). Bulk rides
-ivshmem. Do not invent a custom VirtIO device ID for milestone 1.
+a **slice of the shared ivshmem window**, not a private BAR. The same 1 GiB
+window also holds DMA and SD/eMMC bounce buffers; the host proxy allocator
+gives Cavalry the majority by quota. Host `cavalry_reserved` (12 GB AMA)
+stays on the SoC; the VP never DMA-reads the ivshmem BAR. Do not invent a
+custom VirtIO device ID for milestone 1. Deploy:
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 ### Ctrl frames
 

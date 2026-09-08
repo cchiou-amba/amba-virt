@@ -1,6 +1,8 @@
 # Creating NOHYPER EdgeApp Instances on Ambarella Models
 
-This guide instructs how to create and deploy a missing NOHYPER container instance (`ubuntu_24_04_container.<node>`) on an Ambarella edge node (`n1-655-devkit` or `n1-655-pro`) using the helper script `scripts/create_nohyper.sh` (or raw `scripts/zcli`), with all Ambarella hardware model adapters attached.
+Current deploy recipe: [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md)
+(HVM + NOHYPER, `amba_virt`, cloud-init). This page is the older
+`create_nohyper.sh` path (no `amba_virt`).
 
 Related documents:
 - [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (hardware models and adapter inventory)

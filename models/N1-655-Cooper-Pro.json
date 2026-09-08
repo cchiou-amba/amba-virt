@@ -95,7 +95,7 @@
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
         "shmpath": "/dev/shm/amba-virt",
-        "shmsize": "16M"
+        "shmsize": "1G"
       },
       "usagePolicy": {},
       "cost": 0,

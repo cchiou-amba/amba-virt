@@ -1,6 +1,9 @@
 #!/bin/sh
 # Create an edge-app instance with networks and adapters.
 # Adapter intfnames must already exist on the edge-app template.
+# Cloud-init is passed at instance create (--custom-configuration), not
+# inherited from the edge-app bundle. By default this extracts
+# configuration.customConfig from apps/<edge-app>.json.
 # ZCLI_TOKEN must already be in the environment.
 #
 #   ./scripts/create_instance.sh ubuntu_24_04_container_visorc.n1-655-devkit \
@@ -16,6 +19,8 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 ZCLI="$ROOT/scripts/zcli"
 DRY_RUN=0
 ALLOW_VISORC=0
+NO_CUSTOM_CONFIGURATION=0
+CUSTOM_CONFIGURATION=
 NAME=
 EDGE_APP=
 EDGE_NODE=
@@ -23,7 +28,7 @@ NETWORKS=
 ADAPTERS=
 
 usage() {
-	echo "usage: scripts/create_instance.sh INSTANCE --edge-app=APP --edge-node=NODE --network-instance=INTF:NI... [--adapter=INTF:GRP...] [--allow-visorc] [--dry-run]" >&2
+	echo "usage: scripts/create_instance.sh INSTANCE --edge-app=APP --edge-node=NODE --network-instance=INTF:NI... [--adapter=INTF:GRP...] [--custom-configuration=JSON] [--no-custom-configuration] [--allow-visorc] [--dry-run]" >&2
 }
 
 if [ -z "${ZCLI_TOKEN:-}" ]; then
@@ -44,6 +49,22 @@ while [ "$#" -gt 0 ]; do
 	--allow-visorc)
 		ALLOW_VISORC=1
 		shift
+		;;
+	--no-custom-configuration)
+		NO_CUSTOM_CONFIGURATION=1
+		shift
+		;;
+	--custom-configuration=*)
+		CUSTOM_CONFIGURATION=${1#--custom-configuration=}
+		shift
+		;;
+	--custom-configuration)
+		if [ "$#" -lt 2 ]; then
+			echo "scripts/create_instance.sh: --custom-configuration needs a file" >&2
+			exit 1
+		fi
+		CUSTOM_CONFIGURATION=$2
+		shift 2
 		;;
 	--edge-app=*)
 		EDGE_APP=${1#--edge-app=}
@@ -118,6 +139,43 @@ for spec in "$@"; do
 	esac
 done
 
+zcli_custom=
+if [ "$NO_CUSTOM_CONFIGURATION" -eq 0 ]; then
+	if [ -z "$CUSTOM_CONFIGURATION" ]; then
+		src="$ROOT/apps/$EDGE_APP.json"
+		out="$ROOT/apps/.custom-config.$EDGE_APP.json"
+		if [ ! -f "$src" ]; then
+			echo "scripts/create_instance.sh: no $src; not passing --custom-configuration" >&2
+		else
+			ec=0
+			python3 "$ROOT/scripts/app_manifest.py" extract-custom-config "$src" "$out" || ec=$?
+			if [ "$ec" -eq 2 ]; then
+				echo "scripts/create_instance.sh: $src has no customConfig.template; instance will get empty CIDATA" >&2
+			elif [ "$ec" -ne 0 ]; then
+				echo "scripts/create_instance.sh: failed to extract customConfig from $src" >&2
+				exit 1
+			else
+				CUSTOM_CONFIGURATION=$out
+			fi
+		fi
+	fi
+	if [ -n "$CUSTOM_CONFIGURATION" ]; then
+		case "$CUSTOM_CONFIGURATION" in
+		/home/zcli/apps/*)
+			zcli_custom=$CUSTOM_CONFIGURATION
+			;;
+		"$ROOT/apps"/*|apps/*)
+			base=${CUSTOM_CONFIGURATION##*/}
+			zcli_custom="/home/zcli/apps/$base"
+			;;
+		*)
+			echo "scripts/create_instance.sh: custom-configuration must live under apps/ (zcli mounts that read-only)" >&2
+			exit 1
+			;;
+		esac
+	fi
+fi
+
 set -- edge-app-instance create "$NAME" \
 	--edge-app="$EDGE_APP" \
 	--edge-node="$EDGE_NODE"
@@ -129,6 +187,9 @@ done
 for spec in $ADAPTERS; do
 	set -- "$@" --adapter="$spec"
 done
+if [ -n "$zcli_custom" ]; then
+	set -- "$@" --custom-configuration="$zcli_custom"
+fi
 
 echo "scripts/create_instance.sh: $NAME" >&2
 if [ "$DRY_RUN" -eq 1 ]; then

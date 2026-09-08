@@ -1,5 +1,8 @@
 # Do not reconfigure existing NOHYPER apps
 
+Current deploy recipe (new apps, adapters at create):
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+
 **Do not try to add Cavalry / GPIO / IAV to `ubuntu_24_04-container`.**
 gmwtus will not add interfaces to an edge-app that already has instance
 records. **Halted still counts.** `--stop` only deactivates; it does

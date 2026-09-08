@@ -8,7 +8,8 @@ KVM guests talk to a privileged container over **virtio-vsock** (control) and
 Related: [VirtualDrivers.md](VirtualDrivers.md) (transport),
 [CavalryVirtualization.md](CavalryVirtualization.md) (Cavalry proxy),
 [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (cloud PhyIo models),
-[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (new VisORC app),
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (do not update in place),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
 (the EVE-side change),
@@ -133,10 +134,25 @@ Direction is **guest → host CID 2**. Do **not** use port **2000** (EVE
 VComLink). The transport uses port **5555**. EVE does not publish guest CID↔UUID;
 the container must not connect to a guest CID.
 
-**ivshmem** is not on stock EVE HVMs. It needs a QEMU `memory-backend-file`
-(share=on), `-device ivshmem-plain`, and that backing file bind-mounted into
-the NOHYPER container. Device-model / Zedcontroller work is required on the
-node; local QEMU can prove the path first.
+**One ivshmem window per HVM/NOHYPER pair.** Cavalry, DMA, SD/eMMC, and later
+frontends share that BAR. Do not add a second `amba_shm` per driver. Control
+stays on vsock; bulk is `shm_off` / `shm_len` into the window. A later host
+allocator partitions offsets; Cavalry takes most of the pool by quota.
+Several HVMs would need several windows:
+[EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (deferred).
+
+The window is guest staging, not host AMA. N1-655 `cavalry_reserved` is 12 GB
+on the host; the VP DMA-reads those HPAs. The proxy copies or token-rewrites
+between ivshmem and that pool. PCI BAR size must be a power of two, so 12G
+cannot be the BAR, and `/dev/shm` is only ~8.9 GB.
+
+**Production `cbattr.shmsize` is `1G`.** 16M is PoC `ping`/`shm` only. Guest
+RAM is a different number; the window is extra and must be charged in full by
+`ivshmemVMMOverhead`.
+[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md).
+The `amba_shm` adapter on the HVM is what makes `kvm.go` emit `ivshmem-plain`.
+The container reaches the same DRAM through `/dev/amba_virt`, not by opening
+the backing file (NOHYPER `/dev/shm` is a private tmpfs).
 
 Do not copy bulk data over vsock.
 

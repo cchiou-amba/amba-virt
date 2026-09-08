@@ -8,9 +8,10 @@ or store the token. Override the controller with `$ZCLI_SERVER` if needed.
 Catalog of wrappers in [`scripts/`](../scripts/). Hardware-model
 inventory: [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md).
 Firmware updates: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
-Architecture: [Architecture.md](Architecture.md). **Do not** add
-interfaces to `ubuntu_24_04-container` in place; create a new VisORC
-container: [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
+Architecture: [Architecture.md](Architecture.md). Deploy HVM + NOHYPER:
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). **Do not** add
+interfaces to an edge-app that already has instances:
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 In-place update attempts:
 [scripts/failed/README.md](../scripts/failed/README.md).
 
@@ -170,9 +171,13 @@ bundle that already lists Cavalry interfaces. Does not `update`.
 
 ## scripts/create_instance.sh
 
-`zcli edge-app-instance create` with `--network-instance=` and
-`--adapter=`. Template `intfname`s must exist. VisORC groups need
-`--allow-visorc`.
+`zcli edge-app-instance create` with `--network-instance=`,
+`--adapter=`, and `--custom-configuration=` (cloud-init). Template
+`intfname`s must exist. VisORC groups need `--allow-visorc`.
+`create_instance.sh` extracts `configuration.customConfig` from
+`apps/<edge-app>.json` unless you pass `--custom-configuration=` or
+`--no-custom-configuration`. An instance created without that flag gets
+empty CIDATA; `update` cannot add it later.
 
 ```bash
 ./scripts/create_instance.sh ubuntu_24_04_container_visorc.n1-655-devkit \
@@ -205,6 +210,8 @@ Ambarella model adapters attached (`cavalry`, `gpio0`, `iav`, `USB`).
 ```
 
 Walkthrough: [EVE-Create-NOHYPER-EdgeApp-Instance.md](EVE-Create-NOHYPER-EdgeApp-Instance.md).
+
+Current recipe (HVM + NOHYPER, `amba_virt`): [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 Walkthrough (legacy clone recipe): [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 

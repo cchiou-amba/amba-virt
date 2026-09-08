@@ -25,9 +25,10 @@ container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
 - [doc/EVE-Ambarella-Models.md](doc/EVE-Ambarella-Models.md) — ZEDEDA Cloud
   hardware models (`ioMemberList`), PhyIo rules, and how to assign adapters
   to the NOHYPER instance only.
+- [doc/EVE-EdgeApp-Provision.md](doc/EVE-EdgeApp-Provision.md) — from-scratch
+  Ubuntu 24.04 HVM + NOHYPER on a node (datastore, cloud-init, adapters).
 - [doc/EVE-ReconfigureEdgeApps.md](doc/EVE-ReconfigureEdgeApps.md) —
-  do not edit `ubuntu_24_04-container` in place; create a new VisORC
-  container with adapters at instance create.
+  do not add interfaces to an edge-app that already has instances.
 - [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md)
   — the `kvm.go` change that emits the ivshmem device, how the model drives
   it, and the memory accounting it pulls in.

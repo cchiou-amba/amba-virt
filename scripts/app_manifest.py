@@ -58,6 +58,30 @@ def show_config(data):
     return data
 
 
+def custom_config_from_manifest(man):
+    cfg = man.get("configuration")
+    if not isinstance(cfg, dict):
+        return None
+    cc = cfg.get("customConfig")
+    if not isinstance(cc, dict):
+        return None
+    template = cc.get("template") or ""
+    if not template:
+        return None
+    # zcli instance create needs the full script here, not the marketplace
+    # variable-group form. override/add must be true or EVE writes empty
+    # CIDATA user-data.
+    return {
+        "name": cc.get("name") or "cloud-init",
+        "add": True,
+        "override": True,
+        "allowStorageResize": bool(cc.get("allowStorageResize")),
+        "fieldDelimiter": "",
+        "template": template,
+        "variableGroups": [],
+    }
+
+
 def live_interfaces(cfg):
     man = cfg.get("manifestJSON")
     if man is None:
@@ -102,6 +126,21 @@ def main(argv):
         sys.stderr.write("scripts/app_manifest.py: cloned %s -> %s.json\n" %
                          (src, dst_name))
         return 0
+    if len(argv) in (3, 4) and argv[1] == "extract-custom-config":
+        man = sanitize(load(argv[2]))
+        cc = custom_config_from_manifest(man)
+        if cc is None:
+            sys.stderr.write(
+                "scripts/app_manifest.py: no customConfig.template in %s\n" %
+                argv[2]
+            )
+            return 2
+        if len(argv) == 4:
+            dump(argv[3], cc)
+        else:
+            json.dump(cc, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        return 0
     if len(argv) == 3 and argv[1] == "check-new-ifs":
         local = load(argv[2])
         cfg = show_config(json.load(sys.stdin))
@@ -126,6 +165,7 @@ def main(argv):
         "usage: scripts/app_manifest.py sanitize < in.json\n"
         "       scripts/app_manifest.py sanitize-file apps/NAME.json\n"
         "       scripts/app_manifest.py clone apps/SRC.json NEW-NAME\n"
+        "       scripts/app_manifest.py extract-custom-config apps/NAME.json [out.json]\n"
         "       scripts/app_manifest.py check-new-ifs apps/NAME.json < show.json\n"
     )
     return 1

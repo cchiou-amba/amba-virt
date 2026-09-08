@@ -11,6 +11,10 @@ Related: [Architecture.md](Architecture.md) (the N=1 split),
 (the EVE-side patch), [poc/README.md](../poc/README.md) (the modules discussed
 below).
 
+Several virtual drivers **inside one guest** (Cavalry, DMA, SD/eMMC) share
+the single N=1 window. That is not this document. Production that window is
+**1 GiB**. [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+
 ## The question
 
 Eight HVMs, each with a private 256 MB ivshmem window shared with NOHYPER.

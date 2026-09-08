@@ -7,8 +7,17 @@ for shared memory. Matching kernel modules on both sides expose
 hardware proxy / arbitrator).
 
 System picture: [Architecture.md](Architecture.md). Cavalry on top of this
-transport: [CavalryVirtualization.md](CavalryVirtualization.md). PoC sources:
+transport: [CavalryVirtualization.md](CavalryVirtualization.md). Deploy:
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). PoC sources:
 [poc/](../poc/README.md).
+
+**One BAR, many frontends.** The HVM sees a single `ivshmem-plain` device
+(`1af4:1110`). Guest Cavalry, DMA, SD/eMMC, and later virtual drivers all mmap
+`/dev/amba_virt` and use vsock messages with `shm_off` / `shm_len`. Do not
+provision a second ivshmem adapter per driver. Production window size is
+**1 GiB** (`cbattr.shmsize` on `amba_shm`); 16M is the PoC smoke-test size
+only. Several HVMs would need several windows
+([EVE-Multiple-HVM.md](EVE-Multiple-HVM.md)), which is not implemented.
 
 ```mermaid
 flowchart LR

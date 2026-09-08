@@ -5,7 +5,7 @@
 The Ambarella virtualization architecture relies on two complementary transport mechanisms between the guest domain (Ubuntu HVM at EL1) and the host container (NOHYPER at EL2):
 
 1. **`virtio-vsock` (Control Plane)**: Low-latency, connection-oriented point-to-point RPC and control messaging (CID 2, port 5555).
-2. **`ivshmem` (Data Plane)**: Zero-copy 16MB shared DRAM window (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2) mapped to a shared backing file in host memory (`/dev/shm/amba-virt`).
+2. **`ivshmem` (Data Plane)**: Zero-copy shared DRAM window (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2) mapped to a shared backing file in host memory (`/dev/shm/amba-virt`). Size comes from model `cbattr.shmsize`. **Production is 1 GiB** (shared by Cavalry, DMA, SD/eMMC, and later frontends). **16 MiB was the PoC / verification run** on n1-655-devkit. Do not add a second ivshmem device per driver. See [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 While `virtio-vsock` is already enabled by stock EVE BaseOS, `ivshmem-plain` is currently absent from EVE's hypervisor device model. This document details the technical background, explains why runtime workarounds are unsuitable for production, and outlines the complete proposed implementation for integrating native `ivshmem` support directly into EVE BaseOS.
 

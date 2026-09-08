@@ -6,7 +6,8 @@ authoritative.** This is not an app-instance or QEMU recipe.
 Related: [Architecture.md](Architecture.md) (PhyIo / NOHYPER),
 [VirtualDrivers.md](VirtualDrivers.md) (vsock + ivshmem),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
-[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (Devkit recipe),
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
+[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (do not update in place),
 [poc/](../poc/README.md) (transport PoC).
 
 Brand **Ambarella** is `ORIGIN_LOCAL`. Two models exist. Do not invent a third.
@@ -48,6 +49,9 @@ into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
   to an app even if `assigngrp` is set.
 - Assign `cavalry`, `gpio`, and `iav` only to the NOHYPER app. HVMs must
   not get VisORC / Cavalry.
+- Assign `amba_virt` only to NOHYPER (`Ifname=/dev/amba_virt`).
+- Assign `amba_shm` only to the HVM (window marker). One window per pair;
+  `shmsize` is `1G`.
 
 ## Shared `ioMemberList`
 
@@ -62,6 +66,17 @@ Both models have the same adapters (`zcli model show … --detail`):
 | cavalry_profile | cavalry_profile | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry_profile` | unspecified |
 | gpio0 | gpio0 | `IO_TYPE_OTHER` | gpio | `Ifname=/dev/gpiochip0` | unspecified |
 | iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified |
+| amba_virt | amba_virt | `IO_TYPE_OTHER` | amba_virt | `Ifname=/dev/amba_virt` | unspecified |
+| amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | *(empty)* | unspecified |
+
+`amba_shm` has empty `phyaddrs` and `cbattr` `shmpath=/dev/shm/amba-virt`,
+`shmsize=1G`. Assigning it to an HVM is a window marker: `kvm.go` emits
+`ivshmem-plain`. One window is shared by every virtual driver on that pair
+(Cavalry, DMA, SD/eMMC, …). Do not add a second `amba_shm`. 16M is PoC-only.
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+
+`amba_virt` is the host chardev injected into NOHYPER. The container's
+`/dev/shm` is a private tmpfs and cannot see the backing file.
 
 `/dev/ucode` was not added (not confirmed on the host). Assigning a missing
 `Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails).
@@ -78,8 +93,9 @@ The model only **publishes** adapters. No app gets `/dev/cavalry` until the
 **edge-app instance** lists that `assigngrp`. Attach `cavalry`, `gpio`, and
 `iav` to the NOHYPER container only. Keep them off the HVM.
 
-Worked example (cannot edit `ubuntu_24_04-container` in place; create
-`ubuntu_24_04-container-visorc`):
+Worked deploy (from scratch, adapters at create):
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Do not edit an
+existing bundle in place; that is
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
 Wrappers: [ZedControl-scripts.md](ZedControl-scripts.md). `$ZCLI_TOKEN` must
@@ -192,7 +208,11 @@ On the **HVM** those host Cavalry nodes must not be passed through.
 ## Out of model (not `ioMemberList`)
 
 - **virtio-vsock** is stock on every HVM (`vhost-vsock-pci`). Not an adapter.
-- **ivshmem** is a QEMU `memory-backend-file` + `ivshmem-plain`, bind-mounted
-  into NOHYPER. Not an `ioMemberList` entry.
 
-See [poc/README.md](../poc/README.md) and [VirtualDrivers.md](VirtualDrivers.md).
+**ivshmem is in the model** as `amba_shm` (empty `phyaddrs`, `cbattr.shmsize`).
+The QEMU device is still emulated; the adapter only requests the window.
+NOHYPER reaches that DRAM through `amba_virt`, not a bind-mount of the
+backing file.
+
+See [poc/README.md](../poc/README.md), [VirtualDrivers.md](VirtualDrivers.md),
+[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md).
