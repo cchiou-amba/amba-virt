@@ -18,6 +18,22 @@ Brand **Ambarella** is `ORIGIN_LOCAL`. Two models exist. Do not invent a third.
 | `N1-655-Cooper-Devkit` | Ambarella N1-655 Cooper Devkit | `dc7d22b4-855b-4267-be8f-0e5ced74b728` | Active | 3 |
 
 Both are ARM64, 4 CPUs, 32G memory, 32G storage, watchdog on, HSM/LEDs off.
+
+> [!WARNING]
+> Two published attributes do not match the running kernel, and both
+> are tracked in
+> [automation/doc/EnableAllKernelDeviceDrivers.md](../automation/doc/EnableAllKernelDeviceDrivers.md)
+> §8:
+>
+> - **`iav` is a ghost adapter.** It advertises `/dev/iav`, but no
+>   `iav.ko` exists in `eve-kernel` and nothing creates that node.
+>   An instance configured against it cannot start. Do not assign it
+>   until the driver lands.
+> - **`watchdog` is `true` with no watchdog.** There is no Ambarella
+>   `wdt` driver in the tree and all five `wdt` nodes are disabled;
+>   only `WATCHDOG_CORE` and other vendors' drivers are enabled.
+>
+> Everything else below reflects the deployed image.
 DTS `model` is `n1-655 cooper pro`. Source JSON:
 [models/N1-655-Cooper-Pro.json](../models/N1-655-Cooper-Pro.json),
 [models/N1-655-Cooper-Devkit.json](../models/N1-655-Cooper-Devkit.json).
@@ -38,6 +54,12 @@ All ZedControl wrappers: [ZedControl-scripts.md](ZedControl-scripts.md).
 | `IO_TYPE_CAN` | `PhyIoCAN` | 15 |
 | `IO_TYPE_OTHER` | `PhyIoOther` | 255 |
 
+Those are the types in use. The full 18-value enum, and which
+N1-655 device should map to which, is in
+[automation/doc/EnableAllKernelDeviceDrivers.md](../automation/doc/EnableAllKernelDeviceDrivers.md)
+§8.2–8.3. Prefer a specific type over `IO_TYPE_OTHER` wherever EVE
+has native semantics for it.
+
 `PhyIoOther` uses `phyaddrs.Ifname` as a host chardev. EVE injects that path
 into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
 
@@ -47,8 +69,9 @@ into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
 - Same non-empty `assigngrp`: one unit, assignable to one app instance.
 - `usage` `ADAPTER_USAGE_MANAGEMENT`: EVE management port. Do not assign it
   to an app even if `assigngrp` is set.
-- Assign `cavalry`, `gpio`, and `iav` only to the NOHYPER app. HVMs must
-  not get VisORC / Cavalry.
+- Assign `cavalry` and `gpio` only to the NOHYPER app. HVMs must
+  not get VisORC / Cavalry. (`iav` would follow the same rule, but
+  the node does not exist — see the warning above.)
 - Assign `amba_virt` only to NOHYPER (`Ifname=/dev/amba_virt`).
 - Assign `amba_shm` only to the HVM (window marker). One window per pair;
   `shmsize` is `1G`.
@@ -65,7 +88,7 @@ Both models have the same adapters (`zcli model show … --detail`):
 | cavalry | cavalry | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry` | unspecified |
 | cavalry_profile | cavalry_profile | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry_profile` | unspecified |
 | gpio0 | gpio0 | `IO_TYPE_OTHER` | gpio | `Ifname=/dev/gpiochip0` | unspecified |
-| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified |
+| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified — **node does not exist** |
 | amba_virt | amba_virt | `IO_TYPE_OTHER` | amba_virt | `Ifname=/dev/amba_virt` | unspecified |
 | amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | *(empty)* | unspecified |
 
@@ -79,19 +102,23 @@ Both models have the same adapters (`zcli model show … --detail`):
 `/dev/shm` is a private tmpfs and cannot see the backing file.
 
 `/dev/ucode` was not added (not confirmed on the host). Assigning a missing
-`Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails).
+`Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails)
+— which is exactly what happens with `iav` today.
 
-Confirm on the edge node before assigning to NOHYPER:
+Confirm on the edge node before assigning to NOHYPER. `/dev/iav` is
+included here only to show that it is absent:
 
 ```bash
-ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav
+ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0
+ls -l /dev/iav          # expected: No such file or directory
 ```
 
 ## Assign adapters to edge apps
 
 The model only **publishes** adapters. No app gets `/dev/cavalry` until the
-**edge-app instance** lists that `assigngrp`. Attach `cavalry`, `gpio`, and
-`iav` to the NOHYPER container only. Keep them off the HVM.
+**edge-app instance** lists that `assigngrp`. Attach `cavalry` and `gpio`
+to the NOHYPER container only. Keep them off the HVM. Do not attach
+`iav` — the node does not exist.
 
 Worked deploy (from scratch, adapters at create):
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Do not edit an
@@ -107,7 +134,7 @@ flowchart LR
   inst["NOHYPER instance create --adapter"]
   oci["OCI devices in container"]
   model -->|"available"| inst
-  inst -->|"assigngrp cavalry/gpio/iav"| oci
+  inst -->|"assigngrp cavalry/gpio"| oci
 ```
 
 ### 1. Find both instances

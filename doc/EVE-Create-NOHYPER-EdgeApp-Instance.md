@@ -20,8 +20,19 @@ Ambarella hardware models (`N1-655-Cooper-Devkit` and `N1-655-Cooper-Pro`) publi
 | `eth0` | `eth0` | `eth0` | Local network instance (`defaultLocal-<node>`). Management usage on host. |
 | `cavalry` | `cavalry` | `/dev/cavalry`, `/dev/cavalry_profile` | VisORC NPU accelerator chardevs |
 | `gpio0` | `gpio0` | `/dev/gpiochip0` | Ambarella SoC GPIO lines |
-| `iav` | `iav` | `/dev/iav` | Ambarella DSP / Video input chardev |
+| `iav` | `iav` | `/dev/iav` | Ambarella DSP / Video input chardev — **published but does not exist**, see warning below |
 | `USB` | `USB` | USB Host Controller | USB peripheral controller |
+
+> [!WARNING]
+> **`iav` is a ghost adapter.** No `iav.ko` exists in `eve-kernel`,
+> there is no `/iavmem` device tree node, and nothing creates
+> `/dev/iav`. EVE silently skips a missing `Ifname` when building the
+> OCI spec, so assigning `iav` appears to succeed and then the device
+> is simply absent in the container. The `--adapter=iav:iav`
+> arguments below are kept as a record of what was configured; omit
+> them for new instances. Tracked in
+> [automation/doc/EnableAllKernelDeviceDrivers.md](../automation/doc/EnableAllKernelDeviceDrivers.md)
+> §8 and in Design.md Phase 7.
 
 > [!NOTE]
 > When assigning adapters via `zcli edge-app-instance create --adapter=INTF:ADP`, the parameter syntax is `<manifest-intfname>:<model-adapter-name>`. For the GPIO controller, the model adapter name is `gpio0` (`--adapter=gpio0:gpio0`).
