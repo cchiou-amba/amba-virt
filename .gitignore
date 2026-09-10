@@ -20,3 +20,7 @@ poc/kmod/nohyper/amba_virt_core.h
 __pycache__/
 eve
 automation
+
+build/
+proc/
+*.sym
