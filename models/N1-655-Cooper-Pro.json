@@ -58,21 +58,6 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "iav",
-      "phyaddrs": {
-        "Ifname": "/dev/iav"
-      },
-      "logicallabel": "iav",
-      "assigngrp": "iav",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
       "phylabel": "cavalry",
       "phyaddrs": {
         "Ifname": "/dev/cavalry"
@@ -110,6 +95,36 @@
       },
       "logicallabel": "cavalry_profile",
       "assigngrp": "cavalry",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "iav",
+      "phyaddrs": {
+        "Ifname": "/dev/iav"
+      },
+      "logicallabel": "iav",
+      "assigngrp": "iav",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "hwrng",
+      "phyaddrs": {
+        "Ifname": "/dev/hwrng"
+      },
+      "logicallabel": "hwrng",
+      "assigngrp": "hwrng",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},

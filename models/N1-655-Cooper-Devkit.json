@@ -12,13 +12,58 @@
   },
   "ioMemberList": [
     {
-      "ztype": "IO_TYPE_COM",
-      "phylabel": "COM1",
+      "ztype": "IO_TYPE_ETH",
+      "phylabel": "eth0",
       "phyaddrs": {
-        "Serial": "/dev/ttyS0"
+        "Ifname": "eth0"
       },
-      "logicallabel": "COM1",
-      "assigngrp": "COM1",
+      "logicallabel": "eth0",
+      "assigngrp": "eth0",
+      "usage": "ADAPTER_USAGE_MANAGEMENT",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "gpio0",
+      "phyaddrs": {
+        "Ifname": "/dev/gpiochip0"
+      },
+      "logicallabel": "gpio0",
+      "assigngrp": "gpio",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_virt",
+      "phyaddrs": {
+        "Ifname": "/dev/amba_virt"
+      },
+      "logicallabel": "amba_virt",
+      "assigngrp": "amba_virt",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "cavalry",
+      "phyaddrs": {
+        "Ifname": "/dev/cavalry"
+      },
+      "logicallabel": "cavalry",
+      "assigngrp": "cavalry",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},
@@ -58,28 +103,13 @@
       "parentassigngrp": ""
     },
     {
-      "ztype": "IO_TYPE_ETH",
-      "phylabel": "eth0",
-      "phyaddrs": {
-        "Ifname": "eth0"
-      },
-      "logicallabel": "eth0",
-      "assigngrp": "eth0",
-      "usage": "ADAPTER_USAGE_MANAGEMENT",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "gpio0",
+      "phylabel": "iav",
       "phyaddrs": {
-        "Ifname": "/dev/gpiochip0"
+        "Ifname": "/dev/iav"
       },
-      "logicallabel": "gpio0",
-      "assigngrp": "gpio",
+      "logicallabel": "iav",
+      "assigngrp": "iav",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},
@@ -89,27 +119,12 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "cavalry",
+      "phylabel": "hwrng",
       "phyaddrs": {
-        "Ifname": "/dev/cavalry"
+        "Ifname": "/dev/hwrng"
       },
-      "logicallabel": "cavalry",
-      "assigngrp": "cavalry",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "amba_virt",
-      "phyaddrs": {
-        "Ifname": "/dev/amba_virt"
-      },
-      "logicallabel": "amba_virt",
-      "assigngrp": "amba_virt",
+      "logicallabel": "hwrng",
+      "assigngrp": "hwrng",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},
@@ -131,13 +146,13 @@
       "parentassigngrp": ""
     },
     {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "iav",
+      "ztype": "IO_TYPE_COM",
+      "phylabel": "COM1",
       "phyaddrs": {
-        "Ifname": "/dev/iav"
+        "Serial": "/dev/ttyS0"
       },
-      "logicallabel": "iav",
-      "assigngrp": "iav",
+      "logicallabel": "COM1",
+      "assigngrp": "COM1",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},

@@ -19,19 +19,18 @@ Brand **Ambarella** is `ORIGIN_LOCAL`. Two models exist. Do not invent a third.
 
 Both are ARM64, 4 CPUs, 32G memory, 32G storage, watchdog on, HSM/LEDs off.
 
-> [!WARNING]
-> Two published attributes do not match the running kernel, and both
-> are tracked in
-> [automation/doc/EnableAllKernelDeviceDrivers.md](../automation/doc/EnableAllKernelDeviceDrivers.md)
-> §8:
+> [!NOTE]
+> Published model attributes and adapter notes:
 >
-> - **`iav` is a ghost adapter.** It advertises `/dev/iav`, but no
->   `iav.ko` exists in `eve-kernel` and nothing creates that node.
->   An instance configured against it cannot start. Do not assign it
->   until the driver lands.
-> - **`watchdog` is `true` with no watchdog.** There is no Ambarella
->   `wdt` driver in the tree and all five `wdt` nodes are disabled;
->   only `WATCHDOG_CORE` and other vendors' drivers are enabled.
+> - **`watchdog` is operational (`true`).** Following Wave 2 driver integration,
+>   `ambarella_wdt.c` is active (`fff4001000.wdt`, creating `/dev/watchdog`),
+>   confirming the model attribute `"watchdog": "true"`.
+> - **`iav` is a pending adapter.** It advertises `/dev/iav`, but no
+>   `iav.ko` exists in `eve-kernel` yet. It is preserved in the model
+>   for backwards container compatibility; do not assign it to new apps
+>   until the vendor BSP driver lands ([CV3_AD655_BSP_Request.md](../automation/doc/CV3_AD655_BSP_Request.md)).
+> - **`hwrng` is published.** `/dev/hwrng` is created by the active
+>   `ambarella-rng.c` hardware RNG driver and published in the model.
 >
 > Everything else below reflects the deployed image.
 DTS `model` is `n1-655 cooper pro`. Source JSON:
@@ -71,7 +70,7 @@ into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
   to an app even if `assigngrp` is set.
 - Assign `cavalry` and `gpio` only to the NOHYPER app. HVMs must
   not get VisORC / Cavalry. (`iav` would follow the same rule, but
-  the node does not exist — see the warning above.)
+  the node does not exist — see the note above.)
 - Assign `amba_virt` only to NOHYPER (`Ifname=/dev/amba_virt`).
 - Assign `amba_shm` only to the HVM (window marker). One window per pair;
   `shmsize` is `1G`.
@@ -88,7 +87,8 @@ Both models have the same adapters (`zcli model show … --detail`):
 | cavalry | cavalry | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry` | unspecified |
 | cavalry_profile | cavalry_profile | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry_profile` | unspecified |
 | gpio0 | gpio0 | `IO_TYPE_OTHER` | gpio | `Ifname=/dev/gpiochip0` | unspecified |
-| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified — **node does not exist** |
+| hwrng | hwrng | `IO_TYPE_OTHER` | hwrng | `Ifname=/dev/hwrng` | unspecified |
+| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified — pending vendor `iav.ko` |
 | amba_virt | amba_virt | `IO_TYPE_OTHER` | amba_virt | `Ifname=/dev/amba_virt` | unspecified |
 | amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | *(empty)* | unspecified |
 
