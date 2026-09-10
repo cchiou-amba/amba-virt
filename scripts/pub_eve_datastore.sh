@@ -122,7 +122,7 @@ EVE_VER=$(tr -d '\r\n' < "$INSTALLER_DIR/eve_version")
 IMAGE_NAME="${IMAGE_NAME:-$EVE_VER}"
 
 # Target versioned directory
-TARGET_DIR="$DEST_DIR/$EVE_VER"
+TARGET_DIR="$DEST_DIR/$IMAGE_NAME"
 TARGET_FILE="$TARGET_DIR/rootfs.img"
 
 # Compute relative datastore URL path
@@ -132,7 +132,7 @@ else
 	REL_PREFIX="$(basename "$DEST_DIR")"
 fi
 REL_PREFIX=$(echo "$REL_PREFIX" | sed -e 's|^/||' -e 's|/$||')
-IMAGE_URL="${REL_PREFIX}/${EVE_VER}/rootfs.img"
+IMAGE_URL="${REL_PREFIX}/${IMAGE_NAME}/rootfs.img"
 
 echo "=== Staging EVE BaseOS Image ==="
 echo "Version     : $EVE_VER"
