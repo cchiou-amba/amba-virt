@@ -16,6 +16,7 @@ if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
 fi
 
 RESTART_APP=""
+RELOAD=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -23,8 +24,12 @@ while [ "$#" -gt 0 ]; do
         RESTART_APP="${1#--restart-app=}"
         shift
         ;;
+    --reload)
+        RELOAD=1
+        shift
+        ;;
     -h|--help)
-        echo "Usage: scripts/deploy_and_insmod.sh [target-node] [--restart-app=APP_NAME]"
+        echo "Usage: scripts/deploy_and_insmod.sh [target-node] [--restart-app=APP_NAME] [--reload]"
         exit 0
         ;;
     *)
@@ -71,13 +76,25 @@ ssh -o BatchMode=yes "$TARGET_NODE" "
     if [ -f /persist/firmware/cavalry.bin ]; then
         echo -n '/persist/firmware' > /sys/module/firmware_class/parameters/path
     fi
-    if [ -f /persist/modules/cavalry.ko ] && ! lsmod | grep -q '^cavalry '; then
-        echo 'Inserting cavalry.ko...'
-        insmod /persist/modules/cavalry.ko
+    if [ -f /persist/modules/cavalry.ko ]; then
+        if [ \"$RELOAD\" -eq 1 ] && lsmod | grep -q '^cavalry '; then
+            echo 'Unloading cavalry...'
+            rmmod cavalry 2>/dev/null || true
+        fi
+        if ! lsmod | grep -q '^cavalry '; then
+            echo 'Inserting cavalry.ko...'
+            insmod /persist/modules/cavalry.ko
+        fi
     fi
-    if [ -f /persist/modules/amba_virt.ko ] && ! lsmod | grep -q '^amba_virt '; then
-        echo 'Inserting amba_virt.ko...'
-        insmod /persist/modules/amba_virt.ko
+    if [ -f /persist/modules/amba_virt.ko ]; then
+        if [ \"$RELOAD\" -eq 1 ] && lsmod | grep -q '^amba_virt '; then
+            echo 'Unloading amba_virt...'
+            rmmod amba_virt 2>/dev/null || true
+        fi
+        if ! lsmod | grep -q '^amba_virt '; then
+            echo 'Inserting amba_virt.ko...'
+            insmod /persist/modules/amba_virt.ko
+        fi
     fi
 "
 

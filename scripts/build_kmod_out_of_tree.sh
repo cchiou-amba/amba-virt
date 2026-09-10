@@ -105,4 +105,58 @@ EOF
 echo "Building amba_virt.ko against $KDIR..."
 make -C "$KDIR" M="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules
 
+if [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/cavalry/cavalry_v3" ]; then
+    echo "Building cavalry.ko against $KDIR..."
+    make -C "$KDIR" M="$EVE_DIR/cavalry/cavalry_v3" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+        AMBARELLA_DRV_CFLAGS="-I$EVE_DIR/cavalry/include/cavalry_v3 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules
+fi
+
+# Detect kernel module signing key and sign modules
+KEY=""
+CERT=""
+if [ -f "$KDIR/certs/signing_key.pem" ]; then
+    KEY="$KDIR/certs/signing_key.pem"
+    CERT="$KDIR/certs/signing_key.x509"
+elif [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/eve-kernel/certs/signing_key.pem" ]; then
+    KEY="$EVE_DIR/eve-kernel/certs/signing_key.pem"
+    CERT="$EVE_DIR/eve-kernel/certs/signing_key.x509"
+fi
+
+if [ -n "$KEY" ] && [ -f "$KEY" ] && [ -f "$CERT" ]; then
+    SIGN_FILE=""
+    if [ -x "$KDIR/scripts/sign-file" ]; then
+        SIGN_FILE="$KDIR/scripts/sign-file"
+    elif [ -x "$ROOT/build/bin/sign-file" ]; then
+        SIGN_FILE="$ROOT/build/bin/sign-file"
+    else
+        SIGN_SRC=""
+        if [ -f "$KDIR/scripts/sign-file.c" ]; then
+            SIGN_SRC="$KDIR/scripts/sign-file.c"
+        elif [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/eve-kernel/scripts/sign-file.c" ]; then
+            SIGN_SRC="$EVE_DIR/eve-kernel/scripts/sign-file.c"
+        fi
+        if [ -n "$SIGN_SRC" ]; then
+            mkdir -p "$ROOT/build/bin"
+            gcc "$SIGN_SRC" -lcrypto -o "$ROOT/build/bin/sign-file"
+            SIGN_FILE="$ROOT/build/bin/sign-file"
+        fi
+    fi
+
+    if [ -n "$SIGN_FILE" ] && [ -x "$SIGN_FILE" ]; then
+        echo "Signing amba_virt.ko with $(basename "$KEY")..."
+        "$SIGN_FILE" sha256 "$KEY" "$CERT" "$OUT_DIR/amba_virt.ko"
+        if [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko" ]; then
+            echo "Signing cavalry.ko with $(basename "$KEY")..."
+            "$SIGN_FILE" sha256 "$KEY" "$CERT" "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko"
+        fi
+    else
+        echo "Warning: sign-file binary could not be built; modules left unsigned" >&2
+    fi
+else
+    echo "Notice: No signing_key.pem found; modules left unsigned (Development Mode without key)"
+fi
+
 echo "Successfully built: $OUT_DIR/amba_virt.ko"
+if [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko" ]; then
+    echo "Successfully built: $EVE_DIR/cavalry/cavalry_v3/cavalry.ko"
+fi

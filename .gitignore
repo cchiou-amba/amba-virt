@@ -24,3 +24,5 @@ automation
 build/
 proc/
 *.sym
+qnx-build/
+

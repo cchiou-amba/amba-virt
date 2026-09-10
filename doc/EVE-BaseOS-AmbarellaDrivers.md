@@ -234,3 +234,69 @@ fi
 ```
 
 This ensures that developers can rapidly iterate on kernel drivers without modifying or rebuilding the base EVE operating system.
+
+---
+
+## 8. Dual-Mode Build Workflow: Development vs. Production
+
+EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y`). To balance developer productivity (sub-5-second edit-compile-reload loops) with production security (hermetic, zero-trust appliance images), two build and execution modes are supported:
+
+### 8.1 Mode Comparison
+
+| Property | Development Mode | Production Mode |
+|---|---|---|
+| **Driver Location** | `/persist/modules/` (deployed live via SSH) | `/lib/modules/<ver>/extra/` (baked in `rootfs.img`) |
+| **Driver Build** | Host filesystem via `scripts/build_kmod_out_of_tree.sh` | Inside Docker container via `Dockerfile.ambarella` |
+| **Signing Key** | Local persistent key (`eve-kernel/certs/signing_key.pem`) | Ephemeral key generated dynamically inside Docker |
+| **Signing Action** | Host script runs `scripts/sign-file sha256 <key> <cert> <.ko>` | Kernel `modules_install` automatically signs inside Docker |
+| **Private Key Lifetime** | Persisted on host (`.gitignore`d) for repeated signing | Destroyed immediately when Docker container exits |
+| **Iteration Turnaround** | **~3 seconds** (edit -> build -> deploy -> reload) | **~30 minutes** (full BaseOS build + OTA + reboot) |
+| **Upstream Cleanliness** | Git status clean (`certs/` in `.gitignore`) | 100% clean upstream tree (sources mapped via `--build-context`) |
+
+### 8.2 Developer Guide: Switching Between Modes
+
+#### Switching to Development Mode (Host Out-of-Tree Builds)
+
+1. **Ensure Local Key Exists**:
+   ```bash
+   cd eve/eve-kernel
+   if [ ! -f certs/signing_key.pem ]; then
+       openssl req -new -nodes -utf8 -sha256 -days 36500 -batch -x509 \
+           -config certs/default_x509.genkey \
+           -outform PEM -out certs/signing_key.pem \
+           -keyout certs/signing_key.pem
+       openssl x509 -in certs/signing_key.pem -outform DER -out certs/signing_key.x509
+   fi
+   ```
+2. **Build Development Kernel & BaseOS**:
+   ```bash
+   make -C eve/eve-kernel -f Makefile.eve kernel-gcc
+   make -C eve/build eve
+   ```
+3. **Deploy Development Firmware to Target Node**:
+   ```bash
+   pub_eve_datastore.sh ~/public_html/eve-images/
+   zcli edge-node eveimage-update <target-node> --image=<new-image-name>
+   ```
+   Cycle power rails via MCU serial console (`pwr off -y` / `pwr on`) and wait 5+ minutes for boot.
+4. **Rapidly Iterate on Driver Code**:
+   Modify driver code on the host, then run:
+   ```bash
+   ./amba-virt/scripts/build_kmod_out_of_tree.sh
+   ./amba-virt/scripts/deploy_and_insmod.sh <target-node> --reload
+   ```
+   The module is recompiled, signed, transferred, and reloaded on the running board in seconds without rebooting.
+
+#### Switching to Production Mode (In-Tree Hermetic Build)
+
+1. **Remove Local Development Key**:
+   ```bash
+   rm -f eve/eve-kernel/certs/signing_key.pem eve/eve-kernel/certs/signing_key.x509
+   ```
+2. **Build Production Image with External Contexts**:
+   ```bash
+   make -C eve/eve-kernel -f Makefile.eve kernel-ambarella
+   make -C eve/build eve
+   ```
+3. **Result**: Both `amba_virt.ko` and `cavalry.ko` are built inside Docker, signed with the single-use ephemeral key, and sealed into `rootfs.img` under `/lib/modules/.../extra/`. The private signing key is destroyed when Docker finishes building, maintaining EVE's zero-trust security architecture.
+
