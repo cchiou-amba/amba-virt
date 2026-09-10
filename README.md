@@ -11,7 +11,7 @@ container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
 | [poc/](poc/) | Matching `amba_virt` kernel modules and userspace on both sides |
 | [models/](models/) | Hardware-details JSON for the two Cooper cloud models |
 | [apps/](apps/) | Pulled edge-app manifests (`pull_app.sh`; local JSON) |
-| [scripts/](scripts/) | `zcli` wrappers (token in `$ZCLI_TOKEN`, never committed). In-place update attempts: [scripts/failed/](scripts/failed/README.md) |
+| [scripts/](scripts/) | `zcli` wrappers (token in `$ZCLI_TOKEN`, never committed). CONFIG GRUB override: [scripts/config-grub-noruntime.cfg](scripts/config-grub-noruntime.cfg). In-place update attempts: [scripts/failed/](scripts/failed/README.md) |
 
 ## Documentation
 

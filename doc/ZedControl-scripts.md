@@ -242,6 +242,19 @@ register/uplink the image in ZedControl via `zcli`.
 
 Walkthrough: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
 
+## scripts/config-grub-noruntime.cfg
+
+GRUB snippet for the EVE CONFIG partition. Appends `efi=noruntime` so Linux
+skips U-Boot's broken UEFI `ResetSystem` and reaches `ambarella-reboot`.
+
+```bash
+scp scripts/config-grub-noruntime.cfg n1-655-devkit:/config/grub.cfg
+```
+
+Takes effect after one MCU cold cycle (`pwr off -y` / `pwr on`). Linux
+`reboot` still hangs on the current boot. Tracked as Issue 1 in
+[Issues.md](../automation/doc/Issues.md).
+
 ## scripts/failed/
 
 Do **not** run. `push_app.sh` (`edge-app update` extra ifs) and
