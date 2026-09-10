@@ -223,9 +223,68 @@ EVE_VER=$(cat eve/eve/dist/arm64/current/installer/eve_version)
    ./scripts/show_instances.sh --edge-node=n1-655-devkit
    ```
 
-4. **Troubleshooting**:
-   - If the update gets interrupted or fails during download, retry with:
-     ```bash
-     ./scripts/zcli -- edge-node eveimage-update n1-655-devkit --image="eve-${EVE_VER}" --activate --retry
-     ```
-   - To inspect download or boot errors, look at `status.devError` or `status.lastRebootReason` in the `--detail` output.
+## 6. Troubleshooting & Recovery from Upgrade Deadlocks
+
+### Deadlock Symptom: Node Stuck in `Baseos_updating` and Apps in `Suspect`
+
+If an edge node stays indefinitely in `Run State: Baseos_updating` while all edge applications report `Run State: Suspect`:
+1. **Do NOT delete or reinstall the edge applications**: Their virtual disks and container layers on `/persist/clear/volumes/` remain intact and healthy. Reinstalling will not start them because the node's config parser is paused.
+2. **Check the Node's Local State**:
+   ```bash
+   ssh <node-ip> "cat /run/baseosmgr/BaseOsStatus/*.json"
+   ```
+   If the output shows `"TooEarly": true`, `baseosmgr` has deferred installing the update.
+
+### Why This Happens
+
+1. **`zedagent` Configuration Suppression**: Whenever the configured target image on ZedControl differs from the running image version (`status.ShortVersion != cfg.BaseOsVersion`) and has `Activate: true`, `zedagent` enters an update-pending state. In this state, it intentionally bypasses `parseAppInstanceConfig()`, so `zedmanager` never receives instructions to launch the applications.
+2. **Standby Partition Stalemate (`TooEarly: true`)**: If an abnormal reboot, crash, or manual power event interrupted the previous update transition, both rootfs partitions (`IMGA` and `IMGB`) may be marked `active` in `zboot`. When `baseosmgr` detects that the standby partition is marked `active`, it assumes testing is still underway on a fallback partition and refuses to overwrite it, flagging `TooEarly = true` and deferring indefinitely.
+3. **Ambarella Hardware Warm-Reboot Halting**: The Ambarella N1-655 SoC does not cycle carrier PMIC voltage rails during a software warm reboot (`ambarella,reboot` halts at kernel restart notifier). When EVE triggers a reboot during an update, the board halts instead of cycling power rails. An external cold power cycle interrupts EVE's 10-minute probationary testing window, leaving GPT partition attributes in an uncommitted dual-`active` state.
+
+### Resolution Procedures
+
+#### Method A: Zero-Reboot Recovery (Align Controller to Running Image)
+If the node is running an operational image and you want to restore the edge applications immediately without downtime or reboots:
+```bash
+# 1. Check the image version currently running on the node
+ssh <node-ip> "cat /run/eve-release"
+
+# 2. Update ZedControl to match the running image
+./scripts/zcli -- edge-node eveimage-update <node-name> \
+  --image=<running-eve-image-name> \
+  --activate -f
+```
+As soon as the controller target version matches `status.ShortVersion`, `zedagent` unblocks application config parsing, `zedmanager` mounts the existing volumes, and both applications transition from `Suspect` to `Online`.
+
+#### Method B: Reset Standby Partition State to Complete Upgrade
+If you wish to proceed with the pending update:
+1. Inspect partition states on the node:
+   ```bash
+   ssh <node-ip> "eve exec pillar /usr/bin/zboot partstate IMGA -d; eve exec pillar /usr/bin/zboot partstate IMGB -d"
+   ```
+2. Reset the standby partition (e.g. `IMGB`) to `unused`:
+   ```bash
+   ssh <node-ip> "eve exec pillar /usr/bin/zboot set_partstate IMGB unused"
+   ```
+3. Restart `baseosmgr` so it immediately claims the partition:
+   ```bash
+   ssh <node-ip> "pkill -f baseosmgr"
+   ```
+4. Once `baseosmgr` completes downloading and writing the image, EVE will halt for restart.
+5. **Power-Cycle via MCU Serial Console**:
+   Because the board will halt without power-cycling rails, send MCU commands over the designated serial console:
+   - `n1-655-pro`: `ttyCH9344USB3` (screen session `ttyCH9344USB03`)
+   - `n1-655-devkit`: `ttyCH9344USB11` (screen session `ttyCH9344USB11`)
+   ```text
+   pwr off -y
+   pwr on
+   ```
+   Wait **5+ minutes** for hardware memory training, early boot, and EVE pillar startup.
+
+### Avoiding `domainmgr` Fatal Panic During Model Updates
+
+When updating physical IO adapters in hardware models (`scripts/push_models.sh`):
+> [!CAUTION]
+> **Never modify or reorder hardware model IO adapters while applications are active.**  
+> If an adapter (`iav`, `gpio0`, `amba_virt`) is modified in the model while assigned to an active container or VM, `domainmgr.releaseAdapters()` will fail to locate the bundle in `AssignableAdapters` and execute `log.Fatalf()`, crashing the node into a halted reboot state.  
+> Always stop or undeploy direct-attached applications before updating hardware models on ZedControl.
