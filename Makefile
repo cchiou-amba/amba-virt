@@ -19,6 +19,24 @@ EVE_MAKE_DONE = touch $(BUILD_DIR)/.$@.done
 LINUXKIT_VERSION := $(shell sed -n 's/^LINUXKIT_VERSION=//p' $(EVE_KERNEL_DIR)/Makefile.eve 2>/dev/null)
 LINUXKIT := /tmp/linuxkit-$(LINUXKIT_VERSION)/linuxkit
 
+MODE_FILE := $(ROOT_DIR)/.mode
+MODE ?= $(shell cat $(MODE_FILE) 2>/dev/null || echo development)
+
+# Mode configuration: development (default) vs. production
+ifeq ($(filter prod production,$(MODE)),)
+    CURRENT_MODE := development
+    EVE_KERNEL_TARGET := kernel-gcc
+    EVE_KERNEL_TAG_CMD := docker-tag-gcc
+    DRIVER_DEPENDENCY := drivers
+    MODE_DESC := DEVELOPMENT (Host Out-of-Tree / Rapid Iteration)
+else
+    CURRENT_MODE := production
+    EVE_KERNEL_TARGET := kernel-ambarella
+    EVE_KERNEL_TAG_CMD := docker-tag-ambarella
+    DRIVER_DEPENDENCY :=
+    MODE_DESC := PRODUCTION (Hermetic In-Tree / Zero-Trust Appliance)
+endif
+
 # Dynamically discover all out-of-tree driver suites in drivers/
 OOT_DRIVERS := $(notdir $(patsubst %/,%,$(wildcard $(DRIVERS_DIR)/*/)))
 
@@ -30,22 +48,31 @@ V ?= 1
 EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
-	drivers $(OOT_DRIVERS) clean distclean
+	drivers $(OOT_DRIVERS) clean distclean \
+	mode set-mode-development set-mode-production mode-dev mode-prod
 
-all: eve drivers
+all: eve $(DRIVER_DEPENDENCY)
 
 help:
 	@echo "Ambarella N1-655 EVE-OS Firmware & Driver Build Targets:"
 	@echo
-	@echo "  all                 Build full EVE BaseOS image and all drivers (default)"
-	@echo "  eve                 Build EVE BaseOS live installer image (depends on drivers)"
-	@echo "  drivers             Build and sign all detected out-of-tree drivers"
-	@echo "  eve-kernel          Build EVE kernel package via Docker (kernel-gcc)"
+	@echo "  mode                Show current compile mode (development vs. production)"
+	@echo "  set-mode-development Switch to development mode (host out-of-tree drivers)"
+	@echo "  set-mode-production  Switch to production mode (hermetic in-tree drivers)"
+	@echo "  all                 Build full EVE BaseOS image and all drivers for active mode"
+	@echo "  eve                 Build EVE BaseOS live installer image for active mode"
+	@echo "  drivers             Build and sign all detected out-of-tree drivers (dev mode)"
+	@echo "  eve-kernel          Build EVE kernel package via Docker ($(EVE_KERNEL_TARGET))"
 	@echo "  eve-kernel-headers  Extract linux-headers and signing keys to build/"
 	@echo "  eve-kernel-keys     Alias for extracting signing keys to build/certs/"
 	@echo "  <driver-name>       Build and sign a specific driver (e.g. cavalry, amba_otp)"
 	@echo "  clean               Clean local build outputs and driver artifacts"
 	@echo "  distclean           Full clean of build outputs and EVE system artifacts"
+	@echo
+	@echo "Active Configuration:"
+	@echo "  Mode:           $(CURRENT_MODE)"
+	@echo "  Kernel Target:  $(EVE_KERNEL_TARGET)"
+	@echo "  Driver Build:   $(if $(DRIVER_DEPENDENCY),Host out-of-tree (make drivers),In-tree inside Docker)"
 	@echo
 	@echo "Detected Out-of-Tree Drivers:"
 	@echo "  $(if $(OOT_DRIVERS),$(OOT_DRIVERS),<none detected>)"
@@ -59,25 +86,59 @@ help:
 	@echo "  BOOT_DIR:       $(BOOT_DIR)"
 	@echo "  NCORES:         $(NCORES)"
 
-eve: $(call my-depend,eve-kernel) drivers
+mode:
+	@echo "EVE Compile Mode: $(CURRENT_MODE)"
+	@echo "  Kernel:    $(EVE_KERNEL_TARGET)"
+	@if [ "$(CURRENT_MODE)" = "development" ]; then \
+		echo "  Drivers:   Host out-of-tree (make drivers -> build/modules/)"; \
+		echo "  Storage:   Target node '/persist/modules/' (deployed via SSH)"; \
+		echo "  Signing:   Persistent host key (build/certs/signing_key.pem)"; \
+		echo "  Workflow:  Fast turnaround (~3s reload via deploy_and_insmod.sh)"; \
+		echo "  Switch:    make set-mode-production"; \
+	else \
+		echo "  Drivers:   In-tree inside Docker BuildKit using driver contexts"; \
+		echo "  Storage:   Sealed inside 'rootfs.img' (/lib/modules/<ver>/extra/)"; \
+		echo "  Signing:   Ephemeral 4096-bit RSA key inside Docker (zero-trust)"; \
+		echo "  Workflow:  Hermetic appliance image (make eve -> OTA update)"; \
+		echo "  Switch:    make set-mode-development"; \
+	fi
+
+set-mode-development:
+	@echo "development" > $(MODE_FILE)
+	@rm -f $(BUILD_DIR)/.eve-kernel.done $(BUILD_DIR)/.eve.done $(BUILD_DIR)/.drivers.done
+	@echo "Mode set to 'development' (host out-of-tree drivers on /persist)."
+	@echo "Run 'make all' to build BaseOS and drivers."
+
+set-mode-production:
+	@echo "production" > $(MODE_FILE)
+	@rm -f $(BUILD_DIR)/.eve-kernel.done $(BUILD_DIR)/.eve.done $(BUILD_DIR)/.drivers.done
+	@echo "Mode set to 'production' (hermetic in-tree drivers in rootfs.img)."
+	@echo "Run 'make eve' to build production BaseOS image."
+
+mode-dev: set-mode-development
+mode-prod: set-mode-production
+
+
+eve: $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
-		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve docker-tag-gcc) live && \
+		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD)) live && \
 		$(EVE_MAKE_DONE)
 
 
 eve-kernel:
 	@mkdir -p $(BUILD_DIR)
-	+$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve kernel-gcc && \
+	+$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve $(EVE_KERNEL_TARGET) && \
 		rm -f $(BUILD_DIR)/.eve-kernel-headers.done $(BUILD_DIR)/.drivers.done && \
 		$(EVE_MAKE_DONE)
 
 eve-kernel-headers: $(call my-depend,eve-kernel)
 	@mkdir -p $(BUILD_DIR)/certs $(BUILD_DIR)/bin
 	+@$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve linuxkit
-	+@TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve docker-tag-gcc) && \
+	+@TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD)) && \
 		TAG=$${TAG#docker.io/} && \
 		CLEAN_TAG=$$(echo "$$TAG" | sed 's/-dirty//') && \
+
 		rm -f $(BUILD_DIR)/kernel-dev.tar && rm -rf $(BUILD_DIR)/usr/src/linux-headers-* && \
 		echo "Exporting kernel headers and signing keys from linuxkit cache ($$TAG)..." && \
 		( $(LINUXKIT) cache export --arch arm64 --format filesystem --outfile - $$TAG 2>/dev/null || \

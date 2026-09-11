@@ -241,11 +241,12 @@ This workflow executes in **under 3 seconds**:
 
 In Production Mode, the developer's workstation holds **no private keys**:
 
-1. When `make -C eve-kernel -f Makefile.eve kernel-ambarella` is invoked, Docker BuildKit mounts the driver sources into the container using external contexts:
+1. When `make set-mode-production && make eve` is invoked, Docker BuildKit mounts the driver sources into the container using external contexts:
    ```dockerfile
-   # syntax=docker/dockerfile:1.4
-   COPY --from=cavalry-src / /usr/src/cavalry/
-   COPY --from=amba-virt-src / /usr/src/amba-virt/
+   # syntax=docker/dockerfile:1.6
+   FROM scratch AS cavalry
+   FROM scratch AS amba-virt
+   ...
    ```
 2. The kernel build generates a unique, single-use 4096-bit RSA key pair during compilation (`certs/signing_key.pem`).
 3. `kbuild` compiles the out-of-tree drivers alongside in-tree modules.
@@ -253,6 +254,7 @@ In Production Mode, the developer's workstation holds **no private keys**:
 5. The public X.509 certificate is embedded into the kernel binary (`/boot/kernel`).
 6. The container finishes, and the private key is **permanently destroyed**.
 7. Result: The root filesystem image (`rootfs.img`) is sealed and hermetic. No attacker or third party can sign rogue kernel modules post-build.
+
 
 ---
 

@@ -255,50 +255,68 @@ EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y
 | **Iteration Turnaround** | **~3 seconds** (edit -> build -> deploy -> reload) | **~30 minutes** (full BaseOS build + OTA + reboot) |
 | **Upstream Cleanliness** | Git status clean (`certs/` in `.gitignore`) | 100% clean upstream tree (sources mapped via `--build-context`) |
 
-### 8.2 Developer Guide: Switching Between Modes
+### 8.2 Developer Guide: Querying & Switching Between Modes
+
+The active compile mode is persisted in the repository root `.mode` file and managed directly via the top-level `Makefile`.
+
+#### Querying Current Mode
+
+Run `make mode` at any time to inspect the active configuration:
+
+```bash
+make mode
+```
+
+This displays whether the build is configured for `development` or `production`, the target kernel Docker tag, driver storage locations, signing key types, and iteration commands.
 
 #### Switching to Development Mode (Host Out-of-Tree Builds)
 
-1. **Ensure Local Key Exists**:
+1. **Activate Development Mode**:
    ```bash
-   cd eve-kernel
-   if [ ! -f certs/signing_key.pem ]; then
-       openssl req -new -nodes -utf8 -sha256 -days 36500 -batch -x509 \
-           -config certs/default_x509.genkey \
-           -outform PEM -out certs/signing_key.pem \
-           -keyout certs/signing_key.pem
-       openssl x509 -in certs/signing_key.pem -outform DER -out certs/signing_key.x509
-   fi
+   make set-mode-development
    ```
+   This writes `development` to `.mode` and invalidates any conflicting production build cache markers.
+
 2. **Build Development Kernel & BaseOS**:
    ```bash
-   make eve-kernel
-   make eve
+   make all
    ```
+   Compiles `kernel-gcc`, extracts headers and signing keys to `build/`, compiles out-of-tree drivers, and builds the development BaseOS installer.
+
 3. **Deploy Development Firmware to Target Node**:
    ```bash
-   pub_eve_datastore.sh ~/public_html/eve-images/
+   pub_eve_datastore.sh /path/to/eve-images/
    zcli edge-node eveimage-update <target-node> --image=<new-image-name>
    ```
    Monitor SoC console for `BootFrom:PAHTA` (reboots within 10 seconds; if stuck, cycle power rails via MCU serial console with `pwr off -y` / `pwr on`).
+
 4. **Rapidly Iterate on Driver Code**:
-   Modify driver code on the host, then run:
+   Modify driver code on the host, then recompile and reload live in ~3 seconds:
    ```bash
-   ./amba-virt/scripts/build_kmod_out_of_tree.sh
-   ./amba-virt/scripts/deploy_and_insmod.sh <target-node> --reload
+   make drivers
+   ./scripts/deploy_and_insmod.sh <target-node> --reload
    ```
-   The module is recompiled, signed, transferred, and reloaded on the running board in seconds without rebooting.
+   The module is recompiled, signed, transferred, and reloaded on the running board without rebooting.
 
 #### Switching to Production Mode (In-Tree Hermetic Build)
 
-1. **Remove Local Development Key**:
+1. **Activate Production Mode**:
    ```bash
-   rm -f eve-kernel/certs/signing_key.pem eve-kernel/certs/signing_key.x509
+   make set-mode-production
    ```
-2. **Build Production Image with External Contexts**:
+   This writes `production` to `.mode` and invalidates any conflicting development build cache markers.
+
+2. **Build Hermetic Production BaseOS Image**:
    ```bash
-   make -C eve-kernel -f Makefile.eve kernel-ambarella
    make eve
    ```
-3. **Result**: Both `amba_virt.ko` and `cavalry.ko` are built inside Docker, signed with the single-use ephemeral key, and sealed into `rootfs.img` under `/lib/modules/.../extra/`. The private signing key is destroyed when Docker finishes building, maintaining EVE's zero-trust security architecture.
+   Builds `kernel-ambarella` inside Docker BuildKit using driver contexts, generates an ephemeral 4096-bit RSA key to sign all modules during `modules_install`, bakes all drivers into `/lib/modules/<ver>/extra/` and firmware into `/lib/firmware/`, and embeds them into `rootfs.img`. The private signing key is destroyed when Docker finishes building, maintaining EVE's zero-trust security architecture.
+
+3. **Deploy Production OTA Image**:
+   ```bash
+   pub_eve_datastore.sh /path/to/eve-images/
+   zcli edge-node eveimage-update <target-node> --image=<new-production-image>
+   ```
+   Upon reboot, the Linux kernel automatically probes and loads all Ambarella drivers via `udev` without requiring any `/persist` scripts.
+
 

@@ -21,19 +21,28 @@ deployment and automated loading on EVE BaseOS.
 ## Building & Targets
 
 The top-level `Makefile` unifies EVE BaseOS image generation with kernel header
-extraction and out-of-tree driver compilation and signing:
+extraction and out-of-tree driver compilation and signing across two distinct compile modes:
 
 ```bash
-# Build full EVE BaseOS live image and out-of-tree drivers (default)
+# Query active compile mode and configuration state
+make mode
+
+# Switch to development mode (host out-of-tree drivers, rapid iteration)
+make set-mode-development
+
+# Switch to production mode (hermetic in-tree drivers, zero-trust appliance)
+make set-mode-production
+
+# Build full EVE BaseOS live image and drivers for the active mode (default)
 make
 
-# Build EVE BaseOS image (automatically builds eve-kernel, headers, and drivers)
+# Build EVE BaseOS image (automatically builds eve-kernel and headers)
 make eve
 
-# Build and sign all out-of-tree drivers found under drivers/
+# Build and sign all out-of-tree drivers found under drivers/ (dev mode)
 make drivers
 
-# Build EVE kernel package via LinuxKit
+# Build EVE kernel package via Docker for the active mode
 make eve-kernel
 
 # Extract linux-headers and module signing keys from LinuxKit cache
@@ -45,6 +54,21 @@ make clean
 # Deep clean including extracted kernel headers and caches
 make distclean
 ```
+
+### Compile Modes: Development vs. Production
+
+EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y`).
+The repository provides two operational modes configured via the `.mode` file:
+
+- **Development Mode (`make set-mode-development`)**:
+  - Builds `kernel-gcc` and extracts headers and signing keys to `build/certs/`.
+  - Out-of-tree drivers are compiled on the host and signed with the persistent local key.
+  - Staged to `/persist/modules/` on the target node via `./scripts/deploy_and_insmod.sh <node> --reload` with **~3-second iteration turnaround**.
+- **Production Mode (`make set-mode-production`)**:
+  - Builds `kernel-ambarella` via Docker BuildKit with driver sources mapped in as build contexts.
+  - Drivers and firmware are signed with an ephemeral single-use key and baked directly into `rootfs.img` under `/lib/modules/<ver>/extra/` and `/lib/firmware/`.
+  - Fully hermetic zero-trust appliance image measured into TPM PCR 13.
+
 
 ### Out-of-Tree Driver Handling & Signing
 

@@ -4,3 +4,4 @@
 apps/*.json
 build/
 automation/
+.mode
