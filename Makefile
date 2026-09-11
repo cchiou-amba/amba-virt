@@ -60,9 +60,11 @@ help:
 	@echo "  NCORES:         $(NCORES)"
 
 eve: $(call my-depend,eve-kernel) drivers
+	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
 		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve docker-tag-gcc) live && \
 		$(EVE_MAKE_DONE)
+
 
 eve-kernel:
 	@mkdir -p $(BUILD_DIR)
