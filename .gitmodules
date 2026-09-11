@@ -33,3 +33,7 @@
 	path = boot/arm-trusted-firmware
 	url = https://github.com/cchiou-amba/arm-trusted-firmware
 	branch = eve
+[submodule "boot/u-boot"]
+	path = boot/u-boot
+	url = https://github.com/cchiou-amba/u-boot
+	branch = eve
