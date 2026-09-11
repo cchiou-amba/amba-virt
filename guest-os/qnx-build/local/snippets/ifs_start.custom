@@ -1,0 +1,2 @@
+# local/snippets/ifs_start.custom
+# Commands executed from ifs start-up script prior to invoking main start-up script or slm

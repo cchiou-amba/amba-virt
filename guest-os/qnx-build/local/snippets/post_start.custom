@@ -1,0 +1,3 @@
+# local/snippets/post_start.custom
+# Commands executed from post_startup.sh. Executed at the end of system startup whether slm is in use
+# or not

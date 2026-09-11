@@ -1,0 +1,35 @@
+[submodule "automation"]
+	path = automation
+	url = https://github.com/cchiou-amba/amba-virt-automation
+[submodule "drivers/ambvideo"]
+	path = drivers/ambvideo
+	url = https://github.com/cchiou-amba/ambvideo
+	branch = eve
+[submodule "drivers/cavalry"]
+	path = drivers/cavalry
+	url = https://github.com/cchiou-amba/cavalry
+	branch = eve
+[submodule "drivers/dsplog"]
+	path = drivers/dsplog
+	url = https://github.com/cchiou-amba/dsplog
+	branch = eve
+[submodule "drivers/pci_platform"]
+	path = drivers/pci_platform
+	url = https://github.com/cchiou-amba/pci_platform
+	branch = eve
+[submodule "drivers/pwr_gpu"]
+	path = drivers/pwr_gpu
+	url = https://github.com/cchiou-amba/pwr_gpu
+	branch = eve
+[submodule "eve"]
+	path = eve
+	url = https://github.com/cchiou-amba/eve
+	branch = ambarella-eve
+[submodule "eve-kernel"]
+	path = eve-kernel
+	url = https://github.com/cchiou-amba/eve-kernel
+	branch = ambarella-eve
+[submodule "boot/arm-trusted-firmware"]
+	path = boot/arm-trusted-firmware
+	url = https://github.com/cchiou-amba/arm-trusted-firmware
+	branch = eve

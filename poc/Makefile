@@ -105,9 +105,7 @@ kmod-hvm:
 kmod-nohyper:
 	@if [ ! -d "$(KDIR_NOHYPER)" ]; then \
 		echo "kmod-nohyper: KDIR_NOHYPER=$(KDIR_NOHYPER) not found." >&2; \
-		echo "Set EVE to the EVE source tree (sibling of amba-virt), then:" >&2; \
-		echo "  make -C \$$(EVE)/build eve-kernel-headers" >&2; \
-		echo "Or: make build-nohyper EVE=/path/to/eve" >&2; \
+		echo "Run 'make eve-kernel-headers' at repository root, or set KDIR_NOHYPER." >&2; \
 		echo "On device / local QEMU: KDIR_NOHYPER=/lib/modules/\$$(uname -r)/build" >&2; \
 		exit 1; \
 	fi
@@ -132,7 +130,7 @@ maybe-kmod-hvm:
 
 maybe-kmod-nohyper:
 	@if [ ! -d "$(KDIR_NOHYPER)" ]; then \
-		echo "Skipping kmod-nohyper: KDIR_NOHYPER=$(KDIR_NOHYPER) not found (set EVE= to the EVE tree; make -C \$$(EVE)/build eve-kernel-headers)."; \
+		echo "Skipping kmod-nohyper: KDIR_NOHYPER=$(KDIR_NOHYPER) not found (run 'make eve-kernel-headers' at repository root)."; \
 	elif [ ! -f "$(KDIR_NOHYPER)/.config" ] && [ ! -f "$(KDIR_NOHYPER)/include/generated/autoconf.h" ]; then \
 		echo "Skipping kmod-nohyper: $(KDIR_NOHYPER) is not prepared (no .config). On device use KDIR_NOHYPER=/lib/modules/\$$(uname -r)/build; for local QEMU use that path on this machine."; \
 	else \

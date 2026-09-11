@@ -1,0 +1,12 @@
+--- a/host/common/mkqnximage/qemu/opt_scripts/qemu
++++ b/host/common/mkqnximage/qemu/opt_scripts/qemu
+@@ -32,8 +32,7 @@
+ 
+ 	if [ -e "${QNX_TARGET}/${OPT_ARCH}/lib/dll/devr-virtio.so" ]; then
+ 		if [ "$OPT_ARCH" == "aarch64le" ]; then
+-			echo "#define __RANDOM_OTHER_ENTROPY__ -l devr-virtio.so:mem=0xa003a00 -l devr-virtio.so" >>output/option_files/definitions.opt_type_qemu
+-			echo lib/dll/devr-virtio.so=lib/dll/devr-virtio.so >>output/option_files/system_files.opt_type_qemu
++			echo "#define __RANDOM_OTHER_ENTROPY__" >>output/option_files/definitions.opt_type_qemu
+ 		fi
+ 	fi
+ }

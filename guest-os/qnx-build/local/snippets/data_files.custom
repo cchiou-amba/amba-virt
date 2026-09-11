@@ -1,0 +1,3 @@
+# local/snippets/data_files.custom
+# Custom files to add to data partition
+[gid=0 uid=0 perms=600] home/root/.ssh/authorized_keys=local/misc_files/authorized_keys

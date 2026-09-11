@@ -103,6 +103,10 @@ DEST_DIR="${DEST_DIR%/}"
 INSTALLER_DIR=""
 if [ -n "$EVE_DIST" ] && [ -d "$EVE_DIST" ]; then
 	INSTALLER_DIR="$EVE_DIST"
+elif [ -d "$ROOT/eve/dist/arm64/current/installer" ]; then
+	INSTALLER_DIR="$ROOT/eve/dist/arm64/current/installer"
+elif [ -d "$ROOT/../eve/dist/arm64/current/installer" ]; then
+	INSTALLER_DIR="$ROOT/../eve/dist/arm64/current/installer"
 elif [ -d "$ROOT/eve/eve/dist/arm64/current/installer" ]; then
 	INSTALLER_DIR="$ROOT/eve/eve/dist/arm64/current/installer"
 elif [ -d "$ROOT/../eve/eve/dist/arm64/current/installer" ]; then
@@ -111,9 +115,9 @@ fi
 
 if [ -z "$INSTALLER_DIR" ] || [ ! -f "$INSTALLER_DIR/rootfs.img" ] || [ ! -f "$INSTALLER_DIR/eve_version" ]; then
 	echo "scripts/pub_eve_datastore.sh: cannot locate EVE build artifacts (rootfs.img, eve_version)" >&2
-	echo "Checked: $ROOT/eve/eve/dist/arm64/current/installer" >&2
-	echo "         $ROOT/../eve/eve/dist/arm64/current/installer" >&2
-	echo "Ensure you built EVE via 'make eve' in eve/build, or specify --eve-dist=PATH." >&2
+	echo "Checked: $ROOT/eve/dist/arm64/current/installer" >&2
+	echo "         $ROOT/../eve/dist/arm64/current/installer" >&2
+	echo "Ensure you built EVE via 'make eve' at repository root, or specify --eve-dist=PATH." >&2
 	exit 1
 fi
 

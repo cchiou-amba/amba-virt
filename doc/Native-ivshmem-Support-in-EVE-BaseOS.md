@@ -54,7 +54,7 @@ Therefore, the only clean, robust, and permanent solution is adding native `ivsh
 
 The QEMU domain configuration is managed in:
 ```text
-eve/eve/pkg/pillar/hypervisor/kvm.go
+eve/pkg/pillar/hypervisor/kvm.go
 ```
 
 ### 3.2 Configuration Template Additions
@@ -197,7 +197,7 @@ The update follows the validated dual-partition BaseOS procedure documented in `
 
 ```mermaid
 graph TD
-    A["Modify kvm.go"] --> B["Build EVE BaseOS<br/>(make -C eve/build eve)"]
+    A["Modify kvm.go"] --> B["Build EVE BaseOS<br/>(make eve)"]
     B --> C["Generate rootfs.img & eve_version"]
     C --> D["Stage to Local HTTP Datastore<br/>(pub_eve_datastore.sh)"]
     D --> E["Register in ZedControl<br/>(zcli image create + uplink)"]
@@ -211,13 +211,12 @@ graph TD
 
 Execute the build on the build server:
 ```bash
-cd eve/build
 make eve
 ```
 
 The build system utilizes Docker for toolchains and outputs the final artifacts directly onto the host filesystem:
-- **Rootfs Image**: `eve/eve/dist/arm64/current/installer/rootfs.img` (~262 MB)
-- **Version String**: `eve/eve/dist/arm64/current/installer/eve_version`
+- **Rootfs Image**: `eve/dist/arm64/current/installer/rootfs.img` (~262 MB)
+- **Version String**: `eve/dist/arm64/current/installer/eve_version`
 
 ### 4.2 Registering the Image in ZedControl
 
@@ -234,7 +233,7 @@ This automates:
 ### 4.3 Triggering the OTA Update on the Edge Node
 
 ```bash
-EVE_VER=$(cat eve/eve/dist/arm64/current/installer/eve_version)
+EVE_VER=$(cat eve/dist/arm64/current/installer/eve_version)
 
 # 1. Stage the candidate image to the node:
 ./scripts/zcli -- edge-node eveimage-update n1-655-devkit --image="${EVE_VER}"
@@ -417,6 +416,6 @@ from the controller model.
 ## 7. Next Steps & Recommendations
 
 1. **Review**: Review the proposed template additions and backing file allocation in Section 3.
-2. **Code Edit**: Apply the changes to `eve/eve/pkg/pillar/hypervisor/kvm.go`.
-3. **Build Execution**: Trigger `make -C eve/build eve` on the builder.
+2. **Code Edit**: Apply the changes to `eve/pkg/pillar/hypervisor/kvm.go`.
+3. **Build Execution**: Trigger `make eve` at the repository root.
 4. **Deployment**: Publish to LocalHTTP and run `eveimage-update` on `n1-655-devkit`.

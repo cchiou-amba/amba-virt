@@ -1,0 +1,18 @@
+# Build outputs and temporary artifacts
+output/
+dist/
+*.qcow2
+*.raw
+*.bin
+*.img
+*.vmdk
+
+# Patch backups and Python cache
+*.orig
+__pycache__/
+*.pyc
+
+# Editor backups
+*~
+*.swp
+.tmp*

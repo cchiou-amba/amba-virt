@@ -11,6 +11,11 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/poc"
 OUT_DIR="$ROOT/build/kmod"
 EVE_DIR=$(CDPATH= cd -- "$ROOT/../eve" 2>/dev/null && pwd || true)
+EVE_KERNEL_DIR=$(CDPATH= cd -- "$ROOT/../eve-kernel" 2>/dev/null && pwd || true)
+[ -z "$EVE_KERNEL_DIR" ] && [ -d "$ROOT/eve-kernel" ] && EVE_KERNEL_DIR="$ROOT/eve-kernel"
+DRIVERS_DIR=$(CDPATH= cd -- "$ROOT/../drivers" 2>/dev/null && pwd || true)
+[ -z "$DRIVERS_DIR" ] && [ -d "$ROOT/drivers" ] && DRIVERS_DIR="$ROOT/drivers"
+
 KDIR=""
 CLEAN=0
 
@@ -60,13 +65,16 @@ done
 
 # Resolve default KDIR if not specified
 if [ -z "$KDIR" ]; then
-    if [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/eve-kernel" ] && [ -f "$EVE_DIR/eve-kernel/Module.symvers" ]; then
-        KDIR="$EVE_DIR/eve-kernel"
-    elif [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/build" ]; then
-        HDR=$(ls -d "$EVE_DIR/build/usr/src/linux-headers-"* 2>/dev/null | head -n 1 || true)
+    if [ -d "$ROOT/build/usr/src" ]; then
+        HDR=$(ls -d "$ROOT/build/usr/src/linux-headers-"* 2>/dev/null | head -n 1 || true)
         if [ -n "$HDR" ] && [ -d "$HDR" ]; then
             KDIR="$HDR"
         fi
+    fi
+    if [ -z "$KDIR" ] && [ -n "$EVE_KERNEL_DIR" ] && [ -f "$EVE_KERNEL_DIR/Module.symvers" ]; then
+        KDIR="$EVE_KERNEL_DIR"
+    elif [ -z "$KDIR" ] && [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/eve-kernel" ]; then
+        KDIR="$EVE_DIR/eve-kernel"
     fi
 fi
 
@@ -105,10 +113,17 @@ EOF
 echo "Building amba_virt.ko against $KDIR..."
 make -C "$KDIR" M="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules
 
-if [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/cavalry/cavalry_v3" ]; then
+CAVALRY_DIR=""
+if [ -n "$DRIVERS_DIR" ] && [ -d "$DRIVERS_DIR/cavalry/cavalry_v3" ]; then
+    CAVALRY_DIR="$DRIVERS_DIR/cavalry"
+elif [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/cavalry/cavalry_v3" ]; then
+    CAVALRY_DIR="$EVE_DIR/cavalry"
+fi
+
+if [ -n "$CAVALRY_DIR" ]; then
     echo "Building cavalry.ko against $KDIR..."
-    make -C "$KDIR" M="$EVE_DIR/cavalry/cavalry_v3" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-        AMBARELLA_DRV_CFLAGS="-I$EVE_DIR/cavalry/include/cavalry_v3 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules
+    make -C "$KDIR" M="$CAVALRY_DIR/cavalry_v3" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+        AMBARELLA_DRV_CFLAGS="-I$CAVALRY_DIR/include/cavalry_v3 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules
 fi
 
 # Detect kernel module signing key and sign modules
@@ -117,6 +132,12 @@ CERT=""
 if [ -f "$KDIR/certs/signing_key.pem" ]; then
     KEY="$KDIR/certs/signing_key.pem"
     CERT="$KDIR/certs/signing_key.x509"
+elif [ -f "$ROOT/build/certs/signing_key.pem" ]; then
+    KEY="$ROOT/build/certs/signing_key.pem"
+    CERT="$ROOT/build/certs/signing_key.x509"
+elif [ -n "$EVE_KERNEL_DIR" ] && [ -f "$EVE_KERNEL_DIR/certs/signing_key.pem" ]; then
+    KEY="$EVE_KERNEL_DIR/certs/signing_key.pem"
+    CERT="$EVE_KERNEL_DIR/certs/signing_key.x509"
 elif [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/eve-kernel/certs/signing_key.pem" ]; then
     KEY="$EVE_DIR/eve-kernel/certs/signing_key.pem"
     CERT="$EVE_DIR/eve-kernel/certs/signing_key.x509"
@@ -132,6 +153,8 @@ if [ -n "$KEY" ] && [ -f "$KEY" ] && [ -f "$CERT" ]; then
         SIGN_SRC=""
         if [ -f "$KDIR/scripts/sign-file.c" ]; then
             SIGN_SRC="$KDIR/scripts/sign-file.c"
+        elif [ -n "$EVE_KERNEL_DIR" ] && [ -f "$EVE_KERNEL_DIR/scripts/sign-file.c" ]; then
+            SIGN_SRC="$EVE_KERNEL_DIR/scripts/sign-file.c"
         elif [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/eve-kernel/scripts/sign-file.c" ]; then
             SIGN_SRC="$EVE_DIR/eve-kernel/scripts/sign-file.c"
         fi
@@ -145,9 +168,9 @@ if [ -n "$KEY" ] && [ -f "$KEY" ] && [ -f "$CERT" ]; then
     if [ -n "$SIGN_FILE" ] && [ -x "$SIGN_FILE" ]; then
         echo "Signing amba_virt.ko with $(basename "$KEY")..."
         "$SIGN_FILE" sha256 "$KEY" "$CERT" "$OUT_DIR/amba_virt.ko"
-        if [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko" ]; then
+        if [ -n "$CAVALRY_DIR" ] && [ -f "$CAVALRY_DIR/cavalry_v3/cavalry.ko" ]; then
             echo "Signing cavalry.ko with $(basename "$KEY")..."
-            "$SIGN_FILE" sha256 "$KEY" "$CERT" "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko"
+            "$SIGN_FILE" sha256 "$KEY" "$CERT" "$CAVALRY_DIR/cavalry_v3/cavalry.ko"
         fi
     else
         echo "Warning: sign-file binary could not be built; modules left unsigned" >&2
@@ -157,6 +180,6 @@ else
 fi
 
 echo "Successfully built: $OUT_DIR/amba_virt.ko"
-if [ -n "$EVE_DIR" ] && [ -f "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko" ]; then
-    echo "Successfully built: $EVE_DIR/cavalry/cavalry_v3/cavalry.ko"
+if [ -n "$CAVALRY_DIR" ] && [ -f "$CAVALRY_DIR/cavalry_v3/cavalry.ko" ]; then
+    echo "Successfully built: $CAVALRY_DIR/cavalry_v3/cavalry.ko"
 fi

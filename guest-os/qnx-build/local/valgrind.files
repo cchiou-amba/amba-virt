@@ -1,0 +1,12 @@
+# Add the names of the binaries you want to add a symbols to the target
+# to debug through valgrind.
+#
+# e.g sbin/devb-ram
+#
+# Binaries that should be picked up from SDP/target_symbols should be
+# suffixed with .sym else the stage or normal SDP binary will be picked up
+#
+# e.g. sbin/devb-ram.sym
+#
+# Note: libc and ldqnx are added automatically.
+#

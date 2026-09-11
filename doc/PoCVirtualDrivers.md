@@ -173,14 +173,14 @@ All automated test orchestration scripts, test manifests, and agent runbooks res
 
 ### 5.1 Orchestration Architecture
 
-The test orchestrator (`automation/run_poc_autotest.py`) executes end-to-end continuous validation across target edge nodes:
+The test orchestrator (`automation/scripts/run_poc_autotest.py`) executes end-to-end continuous validation across target edge nodes:
 
 ```mermaid
 flowchart TD
   Agent["Autonomous Agent / CI Orchestrator"]
   Manifest["automation/test_plan_manifest.json"]
   Env["automation/test_nodes.env"]
-  Script["automation/run_poc_autotest.py"]
+  Script["automation/scripts/run_poc_autotest.py"]
 
   Agent --> Script
   Manifest --> Script
@@ -205,15 +205,15 @@ Agents execute the pipeline using specific stage selectors:
 
 ```bash
 # Full end-to-end validation pipeline
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage all
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage all
 
 # Step-by-step modular execution
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage build
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage deploy
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage setup
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage test
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage bench
-python3 automation/run_poc_autotest.py --node n1-655-devkit --stage report
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage build
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage deploy
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage setup
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage test
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage bench
+python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage report
 ```
 
 ### 5.3 Diagnostic & Error Recovery Triage

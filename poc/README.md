@@ -14,7 +14,7 @@ plus framed vsock send/recv. Background: [../doc/Architecture.md](../doc/Archite
 **vsock:** HVM guest → host **CID 2**, port **5555**. Never port **2000** (EVE VComLink).
 
 **NOHYPER `insmod` loads into the EVE kernel.** Build `kmod-nohyper` against
-`eve-kernel` (`../eve/eve-kernel` from `amba-virt`) or, on the device,
+`eve-kernel` (`../eve-kernel` from `amba-virt`) or, on the device,
 `/lib/modules/$(uname -r)/build`. A mismatched kmod can panic the host.
 
 **HVM `insmod` loads into the Ubuntu HVM kernel.** Build `kmod-hvm` against
@@ -45,28 +45,28 @@ Two kernels, two `KDIR`s. `make help` prints the paths in use.
 |---|---|---|
 | `KDIR_HVM` | `/lib/modules/$(uname -r)/build` | `kmod-hvm` (Ubuntu HVM) |
 | `EVE` | sibling `../eve` (override if the tree lives elsewhere) | `eve-flags.mk` |
-| `KDIR_NOHYPER` | `$(EVE)/build/usr/src/linux-headers-<ver>-linuxkit-<git12>[-<user>][-dirty]` | `kmod-nohyper` (NOHYPER / EVE) |
+| `KDIR_NOHYPER` | `build/usr/src/linux-headers-<ver>-linuxkit-<git12>[-<user>][-dirty]` | `kmod-nohyper` (NOHYPER / EVE) |
 | `ARCH` / `CROSS_COMPILE` / `NOHYPER_CC` | `arm64` / `aarch64-linux-gnu-` / `$(CROSS_COMPILE)gcc` | `kmod-nohyper`, `amba-virt-server` |
 
 The HVM target **refuses** a tree that contains `ambarella/` (eve-kernel).
 The old single `KDIR` override is rejected so one tree cannot be used for both.
 
-### Builder (`make build-nohyper`)
+### Builder (`make build-nohyper` or top-level `make nohyper`)
 
 Cross-compile the NOHYPER kmod against EVE linux-headers, not Ubuntu.
 
 1. EVE tree with `eve-kernel/Makefile.eve`. Default: sibling of this repo
    (`../eve` from `amba-virt`, `../../eve` from `poc`). Override: `EVE=/path/to/eve`.
 2. Once per kernel build (needs a prior `make eve-kernel` so the image is in
-   the linuxkit cache):
+   the linuxkit cache), run from repository root:
 
 ```bash
-make -C $EVE/build eve-kernel-headers
+make eve-kernel-headers
 ```
 
 3. `make help` — `EVE_KERNEL` exists (not `poc/eve-kernel`); `KDIR_NOHYPER` is
-   `…/build/usr/src/linux-headers-*-linuxkit-*`.
-4. `make build-nohyper` (or `make build-nohyper EVE=/path/to/eve`).
+   `build/usr/src/linux-headers-*-linuxkit-*`.
+4. Run `make nohyper` from repository root (or `make build-nohyper` from `poc/`).
 
 ```bash
 cd poc

@@ -18,11 +18,6 @@ poc/kmod/hvm/amba_virt_core.h
 poc/kmod/nohyper/amba_virt_core.c
 poc/kmod/nohyper/amba_virt_core.h
 __pycache__/
-eve
-automation
-
-build/
-proc/
 *.sym
-qnx-build
-
+build/
+automation/

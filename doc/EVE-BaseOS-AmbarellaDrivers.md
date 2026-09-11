@@ -200,13 +200,15 @@ ssh <target-node> "eve app enter ubuntu_24_04_container ls -la /dev/cavalry /dev
 - If an OTA update installs a kernel with an incremented version or altered build configuration, existing modules in `/persist/modules` will fail to insert (`Exec format error` or `Unknown symbol in module`).
 - Whenever the BaseOS kernel version changes, recompile `cavalry.ko` and `amba_virt.ko` against the new kernel headers and update `/persist/modules/`.
 
-### Board Power Cycles
-Target Ambarella CV3/N1 platforms do not support software warm reboot (`ambarella,reboot` halts without power cycling hardware rails). Power cycling requires MCU serial commands followed by a 5+ minute cold boot sequence:
+### Board Reboot and Power Cycles
+Software warm reboot has been fixed in updated U-Boot firmware. When performing an OTA update or issuing a reboot, monitor the SoC serial console:
+- If `BootFrom:PAHTA` appears within **10 seconds**, the warm reboot succeeded and U-Boot/GRUB will boot automatically.
+- If `BootFrom:PAHTA` does not appear within 10 seconds, the board is stuck and requires an MCU power cycle:
 ```text
 pwr off -y
 pwr on
 ```
-Because `/persist` is non-volatile flash, staged files persist through cold power cycles. After the board boots up, running the insmod sequence reloads the drivers.
+Because `/persist` is non-volatile flash, staged files persist through reboots and cold power cycles. After the board boots up, running the insmod sequence reloads the drivers.
 
 ---
 
@@ -259,7 +261,7 @@ EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y
 
 1. **Ensure Local Key Exists**:
    ```bash
-   cd eve/eve-kernel
+   cd eve-kernel
    if [ ! -f certs/signing_key.pem ]; then
        openssl req -new -nodes -utf8 -sha256 -days 36500 -batch -x509 \
            -config certs/default_x509.genkey \
@@ -270,15 +272,15 @@ EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y
    ```
 2. **Build Development Kernel & BaseOS**:
    ```bash
-   make -C eve/eve-kernel -f Makefile.eve kernel-gcc
-   make -C eve/build eve
+   make eve-kernel
+   make eve
    ```
 3. **Deploy Development Firmware to Target Node**:
    ```bash
    pub_eve_datastore.sh ~/public_html/eve-images/
    zcli edge-node eveimage-update <target-node> --image=<new-image-name>
    ```
-   Cycle power rails via MCU serial console (`pwr off -y` / `pwr on`) and wait 5+ minutes for boot.
+   Monitor SoC console for `BootFrom:PAHTA` (reboots within 10 seconds; if stuck, cycle power rails via MCU serial console with `pwr off -y` / `pwr on`).
 4. **Rapidly Iterate on Driver Code**:
    Modify driver code on the host, then run:
    ```bash
@@ -291,12 +293,12 @@ EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y
 
 1. **Remove Local Development Key**:
    ```bash
-   rm -f eve/eve-kernel/certs/signing_key.pem eve/eve-kernel/certs/signing_key.x509
+   rm -f eve-kernel/certs/signing_key.pem eve-kernel/certs/signing_key.x509
    ```
 2. **Build Production Image with External Contexts**:
    ```bash
-   make -C eve/eve-kernel -f Makefile.eve kernel-ambarella
-   make -C eve/build eve
+   make -C eve-kernel -f Makefile.eve kernel-ambarella
+   make eve
    ```
 3. **Result**: Both `amba_virt.ko` and `cavalry.ko` are built inside Docker, signed with the single-use ephemeral key, and sealed into `rootfs.img` under `/lib/modules/.../extra/`. The private signing key is destroyed when Docker finishes building, maintaining EVE's zero-trust security architecture.
 

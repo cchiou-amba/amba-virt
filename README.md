@@ -1,40 +1,86 @@
 # amba-virt
 
 Virtualize Ambarella N1-655 devices for **EVE-OS** (KVM). Hardware stays on
-the hypervisor. An Ubuntu **HVM** (EL1) talks to a privileged **NOHYPER**
-container (EL2 host) over **virtio-vsock** (control, CID 2 port 5555) and
-**ivshmem** (bulk). Cavalry / VisORC is assigned only to NOHYPER.
+the hypervisor host, and out-of-tree Ambarella kernel drivers (Cavalry / VisORC,
+`amba_virt`, and optional vendor drivers) are built, signed, and staged for
+deployment and automated loading on EVE BaseOS.
 
 | Path | What it is |
 |---|---|
-| [doc/](doc/) | Architecture, transport, Cavalry, cloud models, zcli scripts |
-| [poc/](poc/) | Matching `amba_virt` kernel modules and userspace on both sides |
-| [models/](models/) | Hardware-details JSON for the two Cooper cloud models |
-| [apps/](apps/) | Pulled edge-app manifests (`pull_app.sh`; local JSON) |
-| [scripts/](scripts/) | `zcli` wrappers (token in `$ZCLI_TOKEN`, never committed). CONFIG GRUB override: [scripts/config-grub-noruntime.cfg](scripts/config-grub-noruntime.cfg). In-place update attempts: [scripts/failed/](scripts/failed/README.md) |
+| [Makefile](Makefile) | Top-level build orchestration (`eve`, `drivers`, `eve-kernel`, `eve-kernel-headers`, `clean`) |
+| [drivers/](drivers/) | Out-of-tree Ambarella kernel modules (`cavalry`, `amba_virt`, optional `amba_otp`) |
+| [eve/](eve/) | LF Edge EVE-OS submodule with Ambarella board support and storage-init boot hooks |
+| [eve-kernel/](eve-kernel/) | EVE Linux kernel package definitions and configuration |
+| [scripts/](scripts/) | Deployment, OTA update, driver loader, and management scripts |
+| [models/](models/) | Hardware-details JSON for Cooper cloud models |
+| [apps/](apps/) | Edge-app manifests and instance configurations |
+| [doc/](doc/) | Architecture, transport, Cavalry virtualization, and EVE guides |
+| [automation/doc/](automation/doc/) | Release notes, issues, and private kernel module distribution guide |
+
+## Building & Targets
+
+The top-level `Makefile` unifies EVE BaseOS image generation with kernel header
+extraction and out-of-tree driver compilation and signing:
+
+```bash
+# Build full EVE BaseOS live image and out-of-tree drivers (default)
+make
+
+# Build EVE BaseOS image (automatically builds eve-kernel, headers, and drivers)
+make eve
+
+# Build and sign all out-of-tree drivers found under drivers/
+make drivers
+
+# Build EVE kernel package via LinuxKit
+make eve-kernel
+
+# Extract linux-headers and module signing keys from LinuxKit cache
+make eve-kernel-headers
+
+# Clean build artifacts and staging directories
+make clean
+
+# Deep clean including extracted kernel headers and caches
+make distclean
+```
+
+### Out-of-Tree Driver Handling & Signing
+
+All drivers residing under `drivers/` are discovered dynamically. Optional NDA
+modules (such as `drivers/amba_otp`) are automatically compiled if present and
+cleanly skipped if absent.
+
+During `make eve-kernel-headers`, kernel module signing keys (`signing_key.pem`
+and `signing_key.x509`) are extracted directly from the LinuxKit cache into
+`build/certs/`. The `drivers` target builds each module against the extracted
+headers, signs them with `sign-file` (SHA256), and stages them into:
+- `build/modules/`: Signed kernel modules (`.ko`)
+- `build/firmware/`: Required driver firmware binaries
+
+### Deployment & Automated Early Boot Loading
+
+To deploy staged drivers to an active EVE node:
+
+```bash
+./scripts/deploy_and_insmod.sh <target-node>
+```
+
+This script stages modules into `/persist/modules/`, firmware into
+`/persist/firmware/`, and installs the runtime loader to
+`/persist/bin/load-ambarella-drivers.sh`.
+
+On system boot, EVE's `storage-init` service automatically executes
+`/persist/bin/load-ambarella-drivers.sh` via chroot into `/hostfs` as soon as the
+`/persist` partition is mounted, ensuring all Ambarella character devices
+(`/dev/cavalry`, `/dev/amba_virt`, etc.) are initialized before edge applications
+and runtime domains launch.
 
 ## Documentation
 
-- [doc/Architecture.md](doc/Architecture.md) — EVE split (HVM + NOHYPER),
-  device assignment, vsock/ivshmem placement.
-- [doc/PoCVirtualDrivers.md](doc/PoCVirtualDrivers.md) — virtio-vsock + ivshmem
-  path and `/dev/amba_virt` on both ends.
-- [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — why
-  Cavalry stays in NOHYPER and how a later ioctl frontend sits on the
-  transport.
-- [doc/EVE-Ambarella-Models.md](doc/EVE-Ambarella-Models.md) — ZEDEDA Cloud
-  hardware models (`ioMemberList`), PhyIo rules, and how to assign adapters
-  to the NOHYPER instance only.
-- [doc/EVE-EdgeApp-Provision.md](doc/EVE-EdgeApp-Provision.md) — from-scratch
-  Ubuntu 24.04 HVM + NOHYPER on a node (datastore, cloud-init, adapters).
-- [doc/EVE-ReconfigureEdgeApps.md](doc/EVE-ReconfigureEdgeApps.md) —
-  do not add interfaces to an edge-app that already has instances.
-- [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md)
-  — the `kvm.go` change that emits the ivshmem device, how the model drives
-  it, and the memory accounting it pulls in.
-- [doc/EVE-Multiple-HVM.md](doc/EVE-Multiple-HVM.md) — what breaks when
-  scaling the transport past one HVM/NOHYPER pair. Deferred, not implemented.
-- [doc/ZedControl-scripts.md](doc/ZedControl-scripts.md) — every wrapper
-  under `scripts/` (zcli, pull models, show/set instance adapters, restart).
-- [poc/README.md](poc/README.md) — build and load the transport PoC
-  (guest vs host `KDIR`, vsock port 5555, ivshmem).
+- [doc/Architecture.md](doc/Architecture.md) — EVE architecture and device assignment.
+- [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry architecture and memory management.
+- [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Ambarella drivers in EVE BaseOS.
+- [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — ivshmem support in EVE BaseOS.
+- [automation/doc/Issues.md](automation/doc/Issues.md) — Known issues, tracking, and upstream integration notes.
+- [automation/doc/PrivateKernelModuleRelease.md](automation/doc/PrivateKernelModuleRelease.md) — Distributing private out-of-tree kernel modules without source.

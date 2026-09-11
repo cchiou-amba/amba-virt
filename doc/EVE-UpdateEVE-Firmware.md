@@ -40,10 +40,12 @@ EVE uses an **A/B dual-partitioning scheme** with priority boot support in GRUB 
 ## 2. Prerequisites
 
 1. **Host Build Tree**:
-   The EVE source and build trees are structured under `eve/`:
-   - `eve/build/`: Top-level build orchestration Makefile.
-   - `eve/eve/`: LF-Edge EVE system source and tools.
-   - `eve/eve-kernel/`: Ambarella Linux kernel and device drivers.
+   The repositories are structured cleanly at the workspace root:
+   - `Makefile`: Top-level build orchestration Makefile in `amba-virt/`.
+   - `eve/`: LF-Edge EVE system source and tools.
+   - `eve-kernel/`: Ambarella Linux kernel and device drivers.
+   - `drivers/`: Out-of-tree Ambarella vendor drivers (`cavalry/`, `amba_otp/`, etc.).
+   - `boot/`: Hardware bootloaders and ARM Trusted Firmware.
 
 2. **ZedControl Access**:
    Ensure `$ZCLI_TOKEN` is exported in your environment for [`scripts/zcli`](../scripts/zcli):
@@ -62,10 +64,9 @@ EVE uses an **A/B dual-partitioning scheme** with priority boot support in GRUB 
 
 ## 3. Building EVE on the Host
 
-Build the EVE image from the top-level `eve/build` directory:
+Build the EVE image from the repository root:
 
 ```bash
-cd eve/build
 make eve
 ```
 
@@ -81,9 +82,9 @@ make eve
 All output files are written to the host distribution directory:
 
 ```
-eve/eve/dist/arm64/current/
+eve/dist/arm64/current/
 ```
-*(This is a symlink pointing to `eve/eve/dist/arm64/<version-tag>`)*
+*(This is a symlink pointing to `eve/dist/arm64/<version-tag>`)*
 
 ### Key Files:
 
@@ -96,7 +97,7 @@ eve/eve/dist/arm64/current/
 
 Capture the version string for subsequent steps:
 ```bash
-EVE_VER=$(cat eve/eve/dist/arm64/current/installer/eve_version)
+EVE_VER=$(cat eve/dist/arm64/current/installer/eve_version)
 echo "Built EVE version: $EVE_VER"
 ```
 
@@ -130,14 +131,14 @@ If performing the steps manually without the helper script:
 
 1. **Copy `rootfs.img` to a Versioned Staging Directory**:
    ```bash
-   EVE_VER=$(cat eve/eve/dist/arm64/current/installer/eve_version)
+   EVE_VER=$(cat eve/dist/arm64/current/installer/eve_version)
    mkdir -p /path/to/public_html/eve-images/"$EVE_VER"
-   cp eve/eve/dist/arm64/current/installer/rootfs.img /path/to/public_html/eve-images/"$EVE_VER"/rootfs.img
+   cp eve/dist/arm64/current/installer/rootfs.img /path/to/public_html/eve-images/"$EVE_VER"/rootfs.img
    ```
 
 2. **Compute Checksum and File Size**:
    ```bash
-   IMAGE_FILE="eve/eve/dist/arm64/current/installer/rootfs.img"
+   IMAGE_FILE="eve/dist/arm64/current/installer/rootfs.img"
    IMAGE_SHA=$(sha256sum "$IMAGE_FILE" | awk '{print $1}')
    IMAGE_SIZE=$(stat -c %s "$IMAGE_FILE")
    ```
@@ -169,7 +170,7 @@ If performing the steps manually without the helper script:
 ## 7. Updating the Edge Node (`n1-655-devkit`)
 
 ```bash
-EVE_VER=$(cat eve/eve/dist/arm64/current/installer/eve_version)
+EVE_VER=$(cat eve/dist/arm64/current/installer/eve_version)
 
 # 1. Publish the new image to the node's candidate BaseOS config:
 ./scripts/zcli -- edge-node eveimage-update n1-655-devkit --image="${EVE_VER}"
@@ -239,7 +240,7 @@ If an edge node stays indefinitely in `Run State: Baseos_updating` while all edg
 
 1. **`zedagent` Configuration Suppression**: Whenever the configured target image on ZedControl differs from the running image version (`status.ShortVersion != cfg.BaseOsVersion`) and has `Activate: true`, `zedagent` enters an update-pending state. In this state, it intentionally bypasses `parseAppInstanceConfig()`, so `zedmanager` never receives instructions to launch the applications.
 2. **Standby Partition Stalemate (`TooEarly: true`)**: If an abnormal reboot, crash, or manual power event interrupted the previous update transition, both rootfs partitions (`IMGA` and `IMGB`) may be marked `active` in `zboot`. When `baseosmgr` detects that the standby partition is marked `active`, it assumes testing is still underway on a fallback partition and refuses to overwrite it, flagging `TooEarly = true` and deferring indefinitely.
-3. **Ambarella Hardware Warm-Reboot Halting**: The Ambarella N1-655 SoC does not cycle carrier PMIC voltage rails during a software warm reboot (`ambarella,reboot` halts at kernel restart notifier). When EVE triggers a reboot during an update, the board halts instead of cycling power rails. An external cold power cycle interrupts EVE's 10-minute probationary testing window, leaving GPT partition attributes in an uncommitted dual-`active` state.
+3. **Ambarella Hardware Warm-Reboot Handling**: In older firmware, the Ambarella N1-655 SoC did not cycle PMIC rails during software warm reboot (`ambarella,reboot` halted at the kernel restart notifier). **This has been fixed in recent U-Boot firmware.** On nodes running fixed firmware, warm reset completes cleanly and the bootloader prints `BootFrom:PAHTA` on the serial console within 10 seconds of reboot. If `BootFrom:PAHTA` does not appear within 10 seconds, the board is stuck in an older halting state and requires an MCU power cycle.
 
 ### Resolution Procedures
 
@@ -270,16 +271,20 @@ If you wish to proceed with the pending update:
    ```bash
    ssh <node-ip> "pkill -f baseosmgr"
    ```
-4. Once `baseosmgr` completes downloading and writing the image, EVE will halt for restart.
-5. **Power-Cycle via MCU Serial Console**:
-   Because the board will halt without power-cycling rails, send MCU commands over the designated serial console:
-   - `n1-655-pro`: `ttyCH9344USB3` (screen session `ttyCH9344USB03`)
-   - `n1-655-devkit`: `ttyCH9344USB11` (screen session `ttyCH9344USB11`)
-   ```text
-   pwr off -y
-   pwr on
-   ```
-   Wait **5+ minutes** for hardware memory training, early boot, and EVE pillar startup.
+4. Once `baseosmgr` completes downloading and writing the image, EVE will trigger a reboot.
+5. **Monitor Serial Console for `BootFrom:PAHTA`**:
+   - Monitor the SoC serial console during reboot:
+     - `n1-655-pro`: `ttyCH9344USB0` (screen session `ttyCH9344USB00`)
+     - `n1-655-devkit`: `ttyCH9344USB8` (screen session `ttyCH9344USB08`)
+   - If the node has the fixed U-Boot firmware, `BootFrom:PAHTA` will appear within 10 seconds.
+   - If `BootFrom:PAHTA` does not appear within 10 seconds, the board is stuck and requires an MCU power cycle:
+     - `n1-655-pro`: `ttyCH9344USB3` (screen session `ttyCH9344USB03`)
+     - `n1-655-devkit`: `ttyCH9344USB11` (screen session `ttyCH9344USB11`)
+     ```text
+     pwr off -y
+     pwr on
+     ```
+     Wait **5+ minutes** for hardware memory training, early boot, and EVE pillar startup.
 
 ### Avoiding `domainmgr` Fatal Panic During Model Updates
 

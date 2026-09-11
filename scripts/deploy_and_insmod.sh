@@ -39,64 +39,48 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-AMBA_VIRT_KO="$ROOT/build/kmod/amba_virt.ko"
-CAVALRY_KO=""
-CAVALRY_BIN=""
-
-if [ -n "$EVE_DIR" ] && [ -d "$EVE_DIR/cavalry" ]; then
-    if [ -f "$EVE_DIR/cavalry/cavalry_v3/cavalry.ko" ]; then
-        CAVALRY_KO="$EVE_DIR/cavalry/cavalry_v3/cavalry.ko"
-    else
-        CAVALRY_KO="$EVE_DIR/cavalry/driver/cavalry_v3/cavalry.ko"
-    fi
-    CAVALRY_BIN="$EVE_DIR/cavalry/firmware/cavalry_v3/n1_655/cavalry.bin"
-fi
+BUILD_MOD_DIR="$ROOT/build/modules"
+BUILD_FW_DIR="$ROOT/build/firmware"
+LOADER_SCRIPT="$ROOT/scripts/load-ambarella-drivers.sh"
 
 echo "Target Node: $TARGET_NODE"
-echo "Creating /persist/modules and /persist/firmware on $TARGET_NODE..."
+echo "Creating /persist/modules, /persist/firmware, /persist/bin on $TARGET_NODE..."
 ssh -o BatchMode=yes "$TARGET_NODE" "mkdir -p /persist/modules /persist/firmware /persist/bin"
 
-if [ -f "$CAVALRY_BIN" ]; then
-    echo "Staging Cavalry firmware binary..."
-    scp "$CAVALRY_BIN" "$TARGET_NODE:/persist/firmware/cavalry.bin"
+# 1. Stage all available kernel modules
+echo "Staging all kernel modules to $TARGET_NODE:/persist/modules/..."
+if [ -d "$BUILD_MOD_DIR" ] && [ -n "$(ls -A "$BUILD_MOD_DIR"/*.ko 2>/dev/null)" ]; then
+    scp "$BUILD_MOD_DIR"/*.ko "$TARGET_NODE:/persist/modules/"
+elif [ -n "$DRIVERS_DIR" ]; then
+    for ko in $(find "$DRIVERS_DIR" -name "*.ko"); do
+        scp "$ko" "$TARGET_NODE:/persist/modules/"
+    done
 fi
 
-if [ -f "$CAVALRY_KO" ]; then
-    echo "Staging cavalry.ko..."
-    scp "$CAVALRY_KO" "$TARGET_NODE:/persist/modules/cavalry.ko"
+# 2. Stage firmware binaries
+if [ -d "$BUILD_FW_DIR" ] && [ -n "$(ls -A "$BUILD_FW_DIR" 2>/dev/null)" ]; then
+    echo "Staging firmware binaries from $BUILD_FW_DIR..."
+    scp "$BUILD_FW_DIR"/*.bin "$TARGET_NODE:/persist/firmware/"
+elif [ -n "$DRIVERS_DIR" ] && [ -f "$DRIVERS_DIR/cavalry/firmware/cavalry.bin" ]; then
+    echo "Staging cavalry.bin..."
+    scp "$DRIVERS_DIR/cavalry/firmware/cavalry.bin" "$TARGET_NODE:/persist/firmware/"
 fi
 
-if [ -f "$AMBA_VIRT_KO" ]; then
-    echo "Staging amba_virt.ko..."
-    scp "$AMBA_VIRT_KO" "$TARGET_NODE:/persist/modules/amba_virt.ko"
+# 3. Deploy and configure /persist/bin/load-ambarella-drivers.sh
+if [ -f "$LOADER_SCRIPT" ]; then
+    echo "Installing $LOADER_SCRIPT to $TARGET_NODE:/persist/bin/..."
+    scp "$LOADER_SCRIPT" "$TARGET_NODE:/persist/bin/load-ambarella-drivers.sh"
+    ssh -o BatchMode=yes "$TARGET_NODE" "chmod +x /persist/bin/load-ambarella-drivers.sh"
 fi
 
-echo "Configuring runtime firmware search path and inserting modules..."
-ssh -o BatchMode=yes "$TARGET_NODE" "
-    if [ -f /persist/firmware/cavalry.bin ]; then
-        echo -n '/persist/firmware' > /sys/module/firmware_class/parameters/path
-    fi
-    if [ -f /persist/modules/cavalry.ko ]; then
-        if [ \"$RELOAD\" -eq 1 ] && lsmod | grep -q '^cavalry '; then
-            echo 'Unloading cavalry...'
-            rmmod cavalry 2>/dev/null || true
-        fi
-        if ! lsmod | grep -q '^cavalry '; then
-            echo 'Inserting cavalry.ko...'
-            insmod /persist/modules/cavalry.ko
-        fi
-    fi
-    if [ -f /persist/modules/amba_virt.ko ]; then
-        if [ \"$RELOAD\" -eq 1 ] && lsmod | grep -q '^amba_virt '; then
-            echo 'Unloading amba_virt...'
-            rmmod amba_virt 2>/dev/null || true
-        fi
-        if ! lsmod | grep -q '^amba_virt '; then
-            echo 'Inserting amba_virt.ko...'
-            insmod /persist/modules/amba_virt.ko
-        fi
-    fi
-"
+# 4. Execute the dynamic driver loader on the target node
+LOAD_ARGS=""
+if [ "$RELOAD" -eq 1 ]; then
+    LOAD_ARGS="--reload"
+fi
+
+echo "Executing driver loader on $TARGET_NODE..."
+ssh -o BatchMode=yes "$TARGET_NODE" "/persist/bin/load-ambarella-drivers.sh $LOAD_ARGS"
 
 if [ -n "$RESTART_APP" ]; then
     echo "Restarting application $RESTART_APP to refresh device bindings..."
@@ -105,7 +89,7 @@ fi
 
 echo "Verifying driver status on $TARGET_NODE:"
 ssh -o BatchMode=yes "$TARGET_NODE" "
-    lsmod | grep -E 'cavalry|amba_virt' || true
-    ls -l /dev/cavalry /dev/amba_virt 2>/dev/null || true
+    lsmod | grep -E 'cavalry|amba_virt|amba_otp|iav|pvrsrvkm' || true
+    ls -l /dev/cavalry /dev/amba_virt /dev/amba_otp /dev/iav 2>/dev/null || true
 "
 echo "Done."

@@ -188,7 +188,7 @@ fi
 
 Because `CONFIG_MODULE_SIG_FORCE=y` is enforced by the kernel:
 1. The kernel build must incorporate the public certificate of the development key into its builtin system keyring (`system_trusted_keyring`).
-2. The private key (`signing_key.pem`) is retained on the developer workstation under `eve/eve-kernel/certs/` (ignored by `.gitignore`).
+2. The private key (`signing_key.pem`) is retained on the developer workstation under `eve-kernel/certs/` or `build/certs/` (ignored by `.gitignore`).
 3. If the kernel is rebuilt, modules compiled on the host **must** match the exact kernel version magic string (e.g. `6.1.112-linuxkit-310c92224386-...`).
 
 ### 4.2 Building Out-of-Tree on the Host
@@ -201,14 +201,14 @@ The script `scripts/build_kmod_out_of_tree.sh` automates the compilation and sig
 ```
 
 Under the hood, this script:
-1. Locates the compiled kernel build tree (`build/kernel/linux-6.1.112`).
+1. Locates the extracted kernel headers (`build/usr/src/linux-headers-...` extracted via `make eve-kernel-headers`).
 2. Invokes kbuild out-of-tree:
    ```bash
    make -C "$KDIR" M="$SRC_DIR" modules ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
    ```
 3. Uses `sign-file` to append a CMS cryptographic signature to the ELF binary:
    ```bash
-   $KDIR/scripts/sign-file sha256 certs/signing_key.pem certs/signing_key.x509 cavalry.ko
+   $KDIR/scripts/sign-file sha256 build/certs/signing_key.pem build/certs/signing_key.x509 cavalry.ko
    ```
 4. Verifies the module signature footer with `modinfo`:
    ```text

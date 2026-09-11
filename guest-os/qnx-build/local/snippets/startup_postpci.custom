@@ -1,0 +1,13 @@
+echo "---> Starting virtio-console"
+devc-virtio &
+waitfor /dev/vcon1 3
+if [ -e /dev/vcon1 ]; then
+    echo "---> Starting shell on virtconsole /dev/vcon1"
+    on -d -t /dev/vcon1 ksh -l &
+fi
+for dev in /dev/ser*; do
+    if [ "$dev" != "/dev/ser1" ]; then
+        echo "---> Starting shell on serial $dev"
+        on -d -t "$dev" ksh -l &
+    fi
+done

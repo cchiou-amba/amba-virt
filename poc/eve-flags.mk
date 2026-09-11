@@ -3,7 +3,7 @@
 # Copyright (C) 2026, Ambarella International LLC
 
 # NOHYPER / EVE BaseOS kmod (kmod-nohyper). Not for the Ubuntu HVM.
-# Headers from: make -C $(EVE)/build eve-kernel-headers
+# Headers from: make eve-kernel-headers
 # Must match uname -r on the board that will insmod this module.
 # Override EVE if the eve tree is not a sibling of amba-virt.
 #
@@ -23,9 +23,11 @@ CROSS_COMPILE ?= aarch64-linux-gnu-
 NOHYPER_CC ?= $(CROSS_COMPILE)gcc
 
 _eve_mk := $(dir $(lastword $(MAKEFILE_LIST)))
-EVE ?= $(abspath $(_eve_mk)/../../eve)
-EVE_KERNEL ?= $(EVE)/eve-kernel
-EVE_BUILD ?= $(EVE)/build
+_root_dir := $(abspath $(_eve_mk)/..)
+EVE ?= $(or $(wildcard $(_root_dir)/eve),$(wildcard $(_root_dir)/../eve))
+EVE_KERNEL ?= $(or $(wildcard $(_root_dir)/eve-kernel),$(wildcard $(_root_dir)/../eve-kernel),$(wildcard $(EVE)/eve-kernel))
+LOCAL_BUILD ?= $(_root_dir)/build
+EVE_BUILD ?= $(LOCAL_BUILD)
 
 ifeq ($(wildcard $(EVE_KERNEL)/Makefile.eve),)
 EVE_KVER :=
@@ -36,10 +38,11 @@ EVE_KREV := $(shell git -C $(EVE_KERNEL) rev-parse --short=12 HEAD 2>/dev/null)
 endif
 
 # Same layout eve-kernel-headers unpacks: usr/src/linux-headers-$(uname -r)
-EVE_HDR_PREFIX := $(EVE_BUILD)/usr/src/linux-headers-$(EVE_KVER)-linuxkit-$(EVE_KREV)
+# Local amba-virt build/usr/src/
+EVE_HDR_PREFIX := $(LOCAL_BUILD)/usr/src/linux-headers-$(EVE_KVER)-linuxkit-$(EVE_KREV)
 KDIR_NOHYPER ?= $(or \
 	$(wildcard $(EVE_HDR_PREFIX)), \
 	$(wildcard $(EVE_HDR_PREFIX)-$(USER)), \
 	$(wildcard $(EVE_HDR_PREFIX)-$(USER)-dirty), \
 	$(firstword $(sort $(wildcard $(EVE_HDR_PREFIX)-*))), \
-	$(firstword $(sort $(wildcard $(EVE_BUILD)/usr/src/linux-headers-*-linuxkit-*))))
+	$(firstword $(sort $(wildcard $(LOCAL_BUILD)/usr/src/linux-headers-*-linuxkit-*))))

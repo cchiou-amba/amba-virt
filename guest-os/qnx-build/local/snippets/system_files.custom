@@ -1,0 +1,4 @@
+# local/snippets/system_files.custom
+# Custom files to add to system partition
+[perms=444] etc/dhcpcd/dhcpcd.conf=local/misc_files/dhcpcd.conf
+[perms=444] etc/ssh/sshd_config=local/misc_files/sshd_config
