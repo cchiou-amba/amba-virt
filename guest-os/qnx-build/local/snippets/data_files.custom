@@ -1,3 +1,4 @@
 # local/snippets/data_files.custom
 # Custom files to add to data partition
 [gid=0 uid=0 perms=600] home/root/.ssh/authorized_keys=local/misc_files/authorized_keys
+[gid=0 uid=0 perms=644] var/etc/dhcpcd.conf=local/misc_files/dhcpcd.conf

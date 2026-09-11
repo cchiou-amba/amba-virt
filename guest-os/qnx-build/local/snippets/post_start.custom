@@ -1,3 +1,12 @@
 # local/snippets/post_start.custom
 # Commands executed from post_startup.sh. Executed at the end of system startup whether slm is in use
 # or not
+
+# Ensure /etc/dhcpcd.conf exists (in QNX /etc is /data/var/etc)
+[ ! -e /etc/dhcpcd.conf ] && ln -sf /system/etc/dhcpcd/dhcpcd.conf /etc/dhcpcd.conf
+
+# Disable rxcsum on vtnet0 to prevent BPF raw socket checksum failure on VirtIO virtual interface
+ifconfig vtnet0 -rxcsum
+
+# Launch dhcpcd on vtnet0 to obtain DHCP lease from EVE dnsmasq
+dhcpcd -4 -b vtnet0
