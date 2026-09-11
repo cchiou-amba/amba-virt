@@ -138,7 +138,6 @@ eve-kernel-headers: $(call my-depend,eve-kernel)
 	+@TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD)) && \
 		TAG=$${TAG#docker.io/} && \
 		CLEAN_TAG=$$(echo "$$TAG" | sed 's/-dirty//') && \
-
 		rm -f $(BUILD_DIR)/kernel-dev.tar && rm -rf $(BUILD_DIR)/usr/src/linux-headers-* && \
 		echo "Exporting kernel headers and signing keys from linuxkit cache ($$TAG)..." && \
 		( $(LINUXKIT) cache export --arch arm64 --format filesystem --outfile - $$TAG 2>/dev/null || \
@@ -172,7 +171,7 @@ eve-kernel-headers: $(call my-depend,eve-kernel)
 eve-kernel-keys: eve-kernel-headers
 	@echo "Signing keys available in $(BUILD_DIR)/certs/"
 
-drivers: eve-kernel-headers
+drivers: $(call my-depend,eve-kernel-headers)
 	@mkdir -p $(BUILD_DIR)/modules $(BUILD_DIR)/firmware
 	@hdr=$$(echo $(BUILD_DIR)/usr/src/linux-headers-*); \
 	sign_bin=$(BUILD_DIR)/bin/sign-file; \
@@ -196,17 +195,19 @@ drivers: eve-kernel-headers
 			for bin in $$(find $(DRIVERS_DIR)/$$drv -name "*.bin"); do \
 				cp -f "$$bin" $(BUILD_DIR)/firmware/; \
 			done; \
+			if [ -d "$(DRIVERS_DIR)/$$drv/tools" ]; then \
+				for exe in $$(find $(DRIVERS_DIR)/$$drv/tools -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
+					mkdir -p $(BUILD_DIR)/bin; \
+					cp -f "$$exe" $(BUILD_DIR)/bin/; \
+				done; \
+			fi; \
 		fi; \
 	done
-	@if [ -f "scripts/build_kmod_out_of_tree.sh" ]; then \
-		./scripts/build_kmod_out_of_tree.sh && \
-		cp -f $(BUILD_DIR)/kmod/amba_virt.ko $(BUILD_DIR)/modules/ 2>/dev/null || true; \
-	fi
 	@$(EVE_MAKE_DONE)
 	@echo "Staged modules in $(BUILD_DIR)/modules/:"
 	@ls -la $(BUILD_DIR)/modules/
 
-$(OOT_DRIVERS): %: eve-kernel-headers
+$(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	@mkdir -p $(BUILD_DIR)/modules $(BUILD_DIR)/firmware
 	@hdr=$$(echo $(BUILD_DIR)/usr/src/linux-headers-*); \
 	sign_bin=$(BUILD_DIR)/bin/sign-file; \
@@ -229,6 +230,12 @@ $(OOT_DRIVERS): %: eve-kernel-headers
 		for bin in $$(find $(DRIVERS_DIR)/$@ -name "*.bin"); do \
 			cp -f "$$bin" $(BUILD_DIR)/firmware/; \
 		done; \
+		if [ -d "$(DRIVERS_DIR)/$@/tools" ]; then \
+			for exe in $$(find $(DRIVERS_DIR)/$@/tools -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
+				mkdir -p $(BUILD_DIR)/bin; \
+				cp -f "$$exe" $(BUILD_DIR)/bin/; \
+			done; \
+		fi; \
 	else \
 		echo "[skip] $@: driver source not present in tree"; \
 	fi

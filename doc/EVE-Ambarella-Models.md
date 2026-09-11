@@ -8,7 +8,7 @@ Related: [Architecture.md](Architecture.md) (PhyIo / NOHYPER),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (do not update in place),
-[poc/](../poc/README.md) (transport PoC).
+[drivers/amba_virt/](../drivers/amba_virt/README.md) and [guest-os/](../guest-os/).
 
 Brand **Ambarella** is `ORIGIN_LOCAL`. Two models exist. Do not invent a third.
 
@@ -241,5 +241,5 @@ The QEMU device is still emulated; the adapter only requests the window.
 NOHYPER reaches that DRAM through `amba_virt`, not a bind-mount of the
 backing file.
 
-See [poc/README.md](../poc/README.md), [PoCVirtualDrivers.md](PoCVirtualDrivers.md),
+See [drivers/amba_virt/README.md](../drivers/amba_virt/README.md), [PoCVirtualDrivers.md](PoCVirtualDrivers.md),
 [Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md).

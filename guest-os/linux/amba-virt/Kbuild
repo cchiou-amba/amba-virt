@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Ambarella Virtualization Linux Guest Driver Kbuild
+
+ccflags-y += -I$(src)/include/uapi -I$(src)
+
+obj-m := amba_virt.o
+amba_virt-y := amba_virt_hvm.o amba_virt_core.o

@@ -1,6 +1,9 @@
 /*
  * amba_virt_dev.hxx
  *
+ * Portable C++ device abstraction for Ambarella Virtualization (/dev/amba_virt).
+ * Supports both Linux (Ubuntu HVM) and QNX Neutrino RTOS (QNX 8.0 HVM).
+ *
  * Copyright (C) 2026, Ambarella International LLC.
  */
 
@@ -20,9 +23,12 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#if defined(__linux__)
+#include <sys/sysmacros.h>
+#endif
 
 #include "amba_virt.h"
 #include "amba_virt_test.h"
@@ -31,15 +37,21 @@ class AmbaVirtDevice {
 public:
     static int ensureDevNode(const std::string &path = AMBA_VIRT_DEV_PATH) {
         struct stat st;
-        int major = -1, minor = 0;
-        FILE *fp = nullptr;
-        char line[256];
-
         if (stat(path.c_str(), &st) == 0) {
             if (S_ISCHR(st.st_mode))
                 return 0;
             return -1;
         }
+
+#if defined(__QNX__) || defined(__QNXNTO__)
+        /* On QNX Neutrino, device nodes are registered directly in pathname space
+         * by the Resource Manager (resmgr_attach), not created via mknod.
+         * If the node is missing, the resource manager is not running. */
+        return -ENODEV;
+#elif defined(__linux__)
+        int major = -1, minor = 0;
+        FILE *fp = nullptr;
+        char line[256];
 
         /* 1. Try reading major:minor from sysfs */
         fp = fopen("/sys/class/amba_virt/amba_virt/dev", "r");
@@ -89,6 +101,9 @@ create_node:
         }
         chmod(path.c_str(), 0666);
         return 0;
+#else
+        return -ENOSYS;
+#endif
     }
 
     explicit AmbaVirtDevice(const std::string &path = AMBA_VIRT_DEV_PATH)
@@ -271,13 +286,3 @@ private:
 };
 
 #endif /* AMBA_VIRT_DEV_HXX */
-
-/*
- * Local variables:
- * mode: C++
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

@@ -14,7 +14,7 @@ Related: [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport),
 [Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
 (the EVE-side change),
 [EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (scaling past one pair, deferred),
-[poc/](../poc/README.md) (transport PoC).
+[drivers/amba_virt/](../drivers/amba_virt/README.md) and [guest-os/](../guest-os/).
 
 ## Diagram
 
@@ -159,7 +159,7 @@ Do not copy bulk data over vsock.
 Both ends of the transport compile a matching kernel module (`amba_virt.ko`) that
 exposes `/dev/amba_virt` (mmap of the shared region + framed vsock send/recv).
 A userspace **server** in NOHYPER opens that chardev and later opens real
-hardware. See [poc/](../poc/README.md).
+hardware. See [drivers/amba_virt/](../drivers/amba_virt/README.md).
 
 vhost-user is an optional later transport, not the plan.
 

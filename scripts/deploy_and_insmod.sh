@@ -66,7 +66,19 @@ elif [ -n "$DRIVERS_DIR" ] && [ -f "$DRIVERS_DIR/cavalry/firmware/cavalry.bin" ]
     scp "$DRIVERS_DIR/cavalry/firmware/cavalry.bin" "$TARGET_NODE:/persist/firmware/"
 fi
 
-# 3. Deploy and configure /persist/bin/load-ambarella-drivers.sh
+# 3. Stage host helper binaries (e.g. amba-virt-server)
+BUILD_BIN_DIR="$ROOT/build/bin"
+if [ -d "$BUILD_BIN_DIR" ] && [ -n "$(ls -A "$BUILD_BIN_DIR" 2>/dev/null)" ]; then
+    echo "Staging host helper binaries from $BUILD_BIN_DIR to $TARGET_NODE:/persist/bin/..."
+    for bin in "$BUILD_BIN_DIR"/*; do
+        if [ -f "$bin" ] && [ -x "$bin" ]; then
+            scp "$bin" "$TARGET_NODE:/persist/bin/"
+            ssh -o BatchMode=yes "$TARGET_NODE" "chmod +x /persist/bin/$(basename "$bin")"
+        fi
+    done
+fi
+
+# 4. Deploy and configure /persist/bin/load-ambarella-drivers.sh
 if [ -f "$LOADER_SCRIPT" ]; then
     echo "Installing $LOADER_SCRIPT to $TARGET_NODE:/persist/bin/..."
     scp "$LOADER_SCRIPT" "$TARGET_NODE:/persist/bin/load-ambarella-drivers.sh"

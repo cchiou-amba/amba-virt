@@ -127,7 +127,7 @@ Compile the modules against the target kernel build tree (`kernel-out` or target
 
 ```bash
 # Example for amba_virt
-make -C /path/to/kernel-out M=poc/kmod modules
+make -C /path/to/kernel-out M=drivers/amba_virt modules
 
 # Example for cavalry_drv
 make -C /path/to/kernel-out M=/path/to/cavalry_drv \

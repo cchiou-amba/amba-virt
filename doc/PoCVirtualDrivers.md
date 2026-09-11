@@ -2,7 +2,7 @@
 
 This document specifies the architecture, functional test matrix, and IPC performance benchmarking methodology for the Ambarella device virtualization transport (`amba-virt`). The transport bridges an Ubuntu **HVM** (EL1 guest) and a privileged **NOHYPER** container (EL2 host) within EVE-OS, using **virtio-vsock** for low-latency control messaging and **ivshmem** for high-throughput zero-copy data transfer.
 
-System context: [Architecture.md](Architecture.md). Cavalry on top of this transport: [CavalryVirtualization.md](CavalryVirtualization.md). Provisioning: [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). PoC code: [poc/](../poc/README.md).
+System context: [Architecture.md](Architecture.md). Cavalry on top of this transport: [CavalryVirtualization.md](CavalryVirtualization.md). Provisioning: [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Driver code: [drivers/amba_virt/](../drivers/amba_virt/README.md) and [guest-os/](../guest-os/).
 
 ---
 
@@ -85,7 +85,7 @@ High-framerate video frames from image sensor pipelines (`/dev/iav`) are capture
 
 ## 3. Comprehensive Test Specification (CppUTest)
 
-The functional validation suite is structured using the **CppUTest** unit testing framework within `poc/userspace/hvm/amba-virt-client.cxx`. It verifies kernel driver robustness, POSIX VFS compliance, protocol corner cases, memory integrity, and multi-thread concurrency.
+The functional validation suite is structured using the **CppUTest** unit testing framework within `guest-os/client/amba-virt-client.cxx`. It verifies kernel driver robustness, POSIX VFS compliance, protocol corner cases, memory integrity, and multi-thread concurrency.
 
 ### 3.1 VFS System Call Compliance (`TEST_GROUP(VFS)`)
 

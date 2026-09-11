@@ -8,7 +8,7 @@ picked up later without re-deriving it.
 Related: [Architecture.md](Architecture.md) (the N=1 split),
 [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport),
 [Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
-(the EVE-side patch), [poc/README.md](../poc/README.md) (the modules discussed
+(the EVE-side patch), [drivers/amba_virt/README.md](../drivers/amba_virt/README.md) (the modules discussed
 below).
 
 Several virtual drivers **inside one guest** (Cavalry, DMA, SD/eMMC) share
@@ -76,7 +76,7 @@ of which apply at N=1 too:
 
 ## The blocker: the PoC module is single-instance
 
-Host side, `poc/kmod/nohyper/amba_virt_nohyper.c`:
+Host side, `drivers/amba_virt/amba_virt_nohyper.c`:
 
 ```c
 static char *shm_path = "/dev/shm/amba-virt";
@@ -86,7 +86,7 @@ static struct amba_virt_dev gdev;
 ```
 
 One global device struct, one backing-file path. And in
-`poc/kmod/common/amba_virt_core.c`, exactly one character device minor:
+`drivers/amba_virt/amba_virt_core.c`, exactly one character device minor:
 
 ```c
 ret = alloc_chrdev_region(&dev->devt, 0, 1, AMBA_VIRT_DEV_NAME);

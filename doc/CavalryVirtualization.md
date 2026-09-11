@@ -7,7 +7,7 @@ DMA-reads those addresses.
 
 On this platform the real driver stays in the **NOHYPER** container on EVE-OS.
 KVM **HVM** guests (EL1) never load Ambarella `cavalry.ko`. They use the
-vsock + ivshmem transport ([poc/](../poc/README.md)) and a later
+vsock + ivshmem transport ([drivers/amba_virt/](../drivers/amba_virt/README.md)) and a later
 frontend that preserves the v3 ioctl ABI.
 
 System picture: [Architecture.md](Architecture.md). Transport details:
@@ -318,7 +318,7 @@ The NOHYPER server is the only process that opens real `/dev/cavalry`.
 
 ## 8. Implementation order
 
-1. [poc/](../poc/README.md): vsock PING + ivshmem pattern
+1. [drivers/amba_virt/](../drivers/amba_virt/README.md): vsock PING + ivshmem pattern
    on local QEMU, then on EVE (vsock stock; ivshmem needs QEMU/device-model).
 2. NOHYPER: confirm real `/dev/cavalry` + ucode started.
 3. Ctrl-only proxy: `GET_DRIVER_VERSION` / `GET_CV_CHIP_ID` over the transport.
@@ -339,4 +339,4 @@ The NOHYPER server is the only process that opens real `/dev/cavalry`.
 | `.../cavalry_cma.c`, `cavalry_ama.c` | phys pool |
 | `eve-kernel/ambarella/include/cavalry_v3/cavalry_ioctl.h` | guest ABI (copy UAPI only; guest `KDIR` is Ubuntu) |
 | `eve-kernel/arch/arm64/boot/dts/ambarella/n1_655.dts` | addresses |
-| `amba-virt/poc/` | vsock + ivshmem transport |
+| `amba-virt/drivers/amba_virt/` | vsock + ivshmem transport |

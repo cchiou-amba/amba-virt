@@ -11,7 +11,7 @@ Catalog: [ZedControl-scripts.md](ZedControl-scripts.md). Models:
 [Architecture.md](Architecture.md).
 
 This guide stops when login and adapter assignment work. Transport smoke
-tests (`amba-virt-cli ping` / `shm`) stay in [poc/README.md](../poc/README.md).
+tests stay in [guest-os/client/README.md](../guest-os/client/README.md).
 The pair this creates is the same transport Native-ivshmem already ran.
 
 Do not bake NoCloud into the Ubuntu image before EVE sees it. EVE injects
@@ -611,9 +611,9 @@ ssh ubuntu@<node-ip> -p 4222
 
 ## Out of scope
 
-PoC demonstration: `make build-hvm`, `insmod`, `amba-virt-server`, `ping` /
-`shm`. That recipe still applies after this guide
-([poc/README.md](../poc/README.md)). A 1G window does not change those tests:
+Virtualization transport demonstration: `insmod amba_virt.ko`, `amba-virt-server`,
+test client. That workflow is documented in
+([guest-os/client/README.md](../guest-os/client/README.md)). A 1G window does not change those tests:
 they mmap whatever `GET_INFO.shm_size` reports and write 256 bytes at offset 0.
 The guest module must be built in the VM against that kernel.
 

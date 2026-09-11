@@ -32,8 +32,8 @@ talking to the controller.
 
 `$ZCLI_TOKEN` must already be in the environment. Wrappers never export
 it. Catalog: [ZedControl-scripts.md](ZedControl-scripts.md). Models:
-[EVE-Ambarella-Models.md](EVE-Ambarella-Models.md). Transport PoC:
-[poc/README.md](../poc/README.md).
+[EVE-Ambarella-Models.md](EVE-Ambarella-Models.md). Transport driver:
+[drivers/amba_virt/README.md](../drivers/amba_virt/README.md).
 
 ## Names (n1-655-devkit)
 
@@ -161,4 +161,4 @@ on that **new** container:
 ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav
 ```
 
-`amba_virt.ko` stays [poc/README.md](../poc/README.md).
+`amba_virt.ko` is located in [drivers/amba_virt/README.md](../drivers/amba_virt/README.md).

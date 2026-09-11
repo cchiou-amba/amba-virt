@@ -384,7 +384,7 @@ amba_virt 0000:00:06.0: amba_virt guest: shm phys 0x8000000000 size 16777216
 
 The guest module must be built against the HVM's own headers — that guest is
 `6.8.0-137-generic`, and `modversions` means a near-miss vermagic will not load.
-Build it in the VM with `make build-hvm`, per [poc/README.md](../poc/README.md).
+Build it in the VM per [guest-os/linux/amba-virt/README.md](../guest-os/linux/amba-virt/README.md).
 
 Both planes then completed end to end, with `amba-virt-server` running in the
 NOHYPER container against its injected `/dev/amba_virt`:

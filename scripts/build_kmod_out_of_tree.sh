@@ -8,7 +8,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-SRC="$ROOT/poc"
+SRC="$ROOT/drivers/amba_virt"
 OUT_DIR="$ROOT/build/kmod"
 EVE_DIR=$(CDPATH= cd -- "$ROOT/../eve" 2>/dev/null && pwd || true)
 EVE_KERNEL_DIR=$(CDPATH= cd -- "$ROOT/../eve-kernel" 2>/dev/null && pwd || true)
@@ -96,10 +96,10 @@ fi
 mkdir -p "$OUT_DIR/include"
 
 # Stage sources into build directory
-install -m 0644 "$SRC/kmod/nohyper/amba_virt_nohyper.c" "$OUT_DIR/amba_virt_nohyper.c"
-install -m 0644 "$SRC/kmod/common/amba_virt_core.c"     "$OUT_DIR/amba_virt_core.c"
-install -m 0644 "$SRC/kmod/common/amba_virt_core.h"     "$OUT_DIR/amba_virt_core.h"
-install -m 0644 "$SRC/include/uapi/amba_virt.h"         "$OUT_DIR/include/amba_virt.h"
+install -m 0644 "$SRC/amba_virt_nohyper.c" "$OUT_DIR/amba_virt_nohyper.c"
+install -m 0644 "$SRC/amba_virt_core.c"     "$OUT_DIR/amba_virt_core.c"
+install -m 0644 "$SRC/amba_virt_core.h"     "$OUT_DIR/amba_virt_core.h"
+install -m 0644 "$SRC/include/uapi/amba_virt.h" "$OUT_DIR/include/amba_virt.h"
 
 cat > "$OUT_DIR/Kbuild" <<'EOF'
 # SPDX-License-Identifier: GPL-2.0

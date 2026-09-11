@@ -82,6 +82,7 @@ and `signing_key.x509`) are extracted directly from the LinuxKit cache into
 headers, signs them with `sign-file` (SHA256), and stages them into:
 - `build/modules/`: Signed kernel modules (`.ko`)
 - `build/firmware/`: Required driver firmware binaries
+- `build/bin/`: Host helper daemons and tools (e.g. `amba-virt-server`)
 
 ### Deployment & Automated Early Boot Loading
 
