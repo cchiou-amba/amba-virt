@@ -33,7 +33,7 @@ EVE uses an **A/B dual-partitioning scheme** with priority boot support in GRUB 
 - **After Boot**: All edge applications resume with their existing volumes, rootfs layers, and states intact.
 
 > [!NOTE]
-> Unlike an OTA update (`eveimage-update`), flashing a node from scratch using `live.raw` or the USB installer re-partitions the whole disk and **will** reformat `/persist` unless configured otherwise.
+> Unlike an OTA update (`eveimage-update`), flashing a node from scratch using `live.raw` or the USB installer re-partitions the whole disk and **will** reformat `/persist` unless configured otherwise. For initial board flashing or bare-metal recovery from an x86 Linux workstation over USB, see [`tools/bin/usb-matrix`](../tools/README.md).
 
 ---
 
@@ -42,6 +42,7 @@ EVE uses an **A/B dual-partitioning scheme** with priority boot support in GRUB 
 1. **Host Build Tree**:
    The repositories are structured cleanly at the workspace root:
    - `Makefile`: Top-level build orchestration Makefile in `amba-virt/`.
+   - `tools/`: Host flash programming utilities ([`tools/bin/usb-matrix`](../tools/README.md)).
    - `eve/`: LF-Edge EVE system source and tools.
    - `eve-kernel/`: Ambarella Linux kernel and device drivers.
    - `drivers/`: Out-of-tree Ambarella vendor drivers (`cavalry/`, `amba_otp/`, etc.).

@@ -14,6 +14,7 @@ deployment and automated loading on EVE BaseOS.
 | [scripts/](scripts/) | Deployment, OTA update, driver loader, and management scripts |
 | [models/](models/) | Hardware-details JSON for Cooper cloud models |
 | [apps/](apps/) | Edge-app manifests and instance configurations |
+| [tools/](tools/) | Host flashing and utility binaries (`usb-matrix` for x86 Linux USB programming) |
 | [doc/](doc/) | Architecture, transport, Cavalry virtualization, and EVE guides |
 | [automation/doc/](automation/doc/) | Release notes, issues, and private kernel module distribution guide |
 
@@ -76,11 +77,26 @@ On system boot, EVE's `storage-init` service automatically executes
 (`/dev/cavalry`, `/dev/amba_virt`, etc.) are initialized before edge applications
 and runtime domains launch.
 
+### USB Flash Programming (`usb-matrix`)
+
+For bare-metal board bring-up, initial provisioning, and recovery over USB, the repository includes `tools/bin/usb-matrix`, an x86-64 Linux host utility:
+
+```bash
+# Scan and list connected Ambarella devices
+./tools/bin/usb-matrix -l
+
+# Program/burn firmware on CV3AD655 (N1-655)
+sudo ./tools/bin/usb-matrix -c cv3ad655 -f /path/to/firmware.bin
+```
+
+See [tools/README.md](tools/README.md) for full usage, prerequisites (`libusb-1.0`), and boot mode preparation.
+
 ## Documentation
 
 - [doc/Architecture.md](doc/Architecture.md) — EVE architecture and device assignment.
 - [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry architecture and memory management.
 - [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Ambarella drivers in EVE BaseOS.
 - [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — ivshmem support in EVE BaseOS.
+- [tools/README.md](tools/README.md) — Host tools guide and `usb-matrix` USB flash programming reference.
 - [automation/doc/Issues.md](automation/doc/Issues.md) — Known issues, tracking, and upstream integration notes.
 - [automation/doc/PrivateKernelModuleRelease.md](automation/doc/PrivateKernelModuleRelease.md) — Distributing private out-of-tree kernel modules without source.
