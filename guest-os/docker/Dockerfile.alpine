@@ -1,0 +1,13 @@
+# Dockerfile for Ambarella Alpine Linux 3.20 ARM64 Guest Build Environment
+# Pre-bakes headers and compilers so guest builds run in seconds without re-downloading.
+
+FROM arm64v8/alpine:3.20
+
+RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.20/community" >> /etc/apk/repositories && \
+    apk add --no-cache \
+        build-base \
+        linux-virt-dev \
+        linux-headers \
+        cpputest
+
+WORKDIR /workspace

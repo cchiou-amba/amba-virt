@@ -16,6 +16,7 @@ deployment and automated loading on EVE BaseOS.
 | [apps/](apps/) | Edge-app manifests and instance configurations |
 | [tools/](tools/) | Host flashing and utility binaries (`usb-matrix` for x86 Linux USB programming) |
 | [doc/](doc/) | Architecture, transport, Cavalry virtualization, and EVE guides |
+| [guest-os/](guest-os/) | Guest OS kernel drivers, resource managers, and test clients (Ubuntu, Alpine, QNX) |
 | [automation/doc/](automation/doc/) | Release notes, issues, and private kernel module distribution guide |
 
 ## Building & Targets
@@ -33,10 +34,20 @@ make set-mode-development
 # Switch to production mode (hermetic in-tree drivers, zero-trust appliance)
 make set-mode-production
 
-# Build full EVE BaseOS live image and drivers for the active mode (default)
+# Build EVE BaseOS + all NOHYPER drivers and apps (default goal)
 make
+make all
 
-# Build EVE BaseOS image (automatically builds eve-kernel and headers)
+# Build NOHYPER drivers/apps + all guest side (Ubuntu, Alpine, QNX)
+make everything
+
+# Build all HVM guest side artifacts (Ubuntu, Alpine, QNX)
+make guest
+
+# Build all NOHYPER host drivers and apps
+make nohyper
+
+# Build EVE BaseOS live installer image for active mode
 make eve
 
 # Build and sign all out-of-tree drivers found under drivers/ (dev mode)
@@ -47,6 +58,11 @@ make eve-kernel
 
 # Extract linux-headers and module signing keys from LinuxKit cache
 make eve-kernel-headers
+
+# Build specific guest distributions
+make guest-ubuntu
+make guest-alpine
+make guest-qnx
 
 # Clean build artifacts and staging directories
 make clean
@@ -116,9 +132,28 @@ sudo ./tools/bin/usb-matrix -c cv3ad655 -f /path/to/firmware.bin
 
 See [tools/README.md](tools/README.md) for full usage, prerequisites (`libusb-1.0`), and boot mode preparation.
 
+### Guest OS Cross-Compilation (Ubuntu, Alpine, QNX)
+
+The repository provides automated cross-compilation for HVM guest operating systems running on Ambarella N1-655. To achieve rapid turnaround (**~7–8s per distribution**), builds execute on the host's native cross-compiler rather than through slow QEMU CPU emulation:
+
+```bash
+# Recommended host prerequisite (Ubuntu/Debian host):
+sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+# Build individual or all guest distributions:
+make guest-ubuntu     # Ubuntu 24.04: amba_virt.ko + amba-virt-client
+make guest-alpine     # Alpine Linux 3.20: amba_virt.ko + static client
+make guest-qnx        # BlackBerry QNX 8.0: amba-virt-resmgr + client
+make guest-all        # Build all three consecutively (~20s total)
+```
+
+Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/`. See [guest-os/README.md](guest-os/README.md) and [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md) for architecture, header extraction caching, and benchmarks.
+
 ## Documentation
 
 - [doc/Architecture.md](doc/Architecture.md) — EVE architecture and device assignment.
+- [guest-os/README.md](guest-os/README.md) — HVM guest OS cross-compilation developer guide.
+- [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md) — Fast cross-compilation architecture and benchmarks.
 - [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry architecture and memory management.
 - [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Ambarella drivers in EVE BaseOS.
 - [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — ivshmem support in EVE BaseOS.

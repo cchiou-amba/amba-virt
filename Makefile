@@ -40,34 +40,51 @@ endif
 # Dynamically discover all out-of-tree driver suites in drivers/
 OOT_DRIVERS := $(notdir $(patsubst %/,%,$(wildcard $(DRIVERS_DIR)/*/)))
 
+CURRENT_KERNEL_TAG = $(shell $(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD) 2>/dev/null)
+
 define my-depend
-$(if $(wildcard $(BUILD_DIR)/.$(1).done),,$(if $(and $(filter eve-kernel-headers,$(1)),$(wildcard $(BUILD_DIR)/usr/src/linux-headers-*)),,$(if $(and $(filter eve-kernel-keys,$(1)),$(wildcard $(BUILD_DIR)/certs/signing_key.pem)),,$(1))))
+$(if $(and $(filter eve-kernel,$(1)),$(filter-out $(shell cat $(BUILD_DIR)/.eve-kernel.done 2>/dev/null),$(CURRENT_KERNEL_TAG))),$(1),$(if $(wildcard $(BUILD_DIR)/.$(1).done),,$(if $(and $(filter eve-kernel-headers,$(1)),$(wildcard $(BUILD_DIR)/usr/src/linux-headers-*)),,$(if $(and $(filter eve-kernel-keys,$(1)),$(wildcard $(BUILD_DIR)/certs/signing_key.pem)),,$(1)))))
 endef
 
 V ?= 1
 EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
-	drivers $(OOT_DRIVERS) clean distclean \
-	mode set-mode-development set-mode-production mode-dev mode-prod
+	drivers $(OOT_DRIVERS) nohyper everything clean distclean \
+	mode set-mode-development set-mode-production mode-dev mode-prod \
+	guest guest-all guest-ubuntu guest-alpine guest-qnx guest-qnx-image \
+	clean-guest distclean-guest
+
+.DEFAULT_GOAL := all
 
 all: eve $(DRIVER_DEPENDENCY)
+
+nohyper: drivers
+
+everything: nohyper guest
 
 help:
 	@echo "Ambarella N1-655 EVE-OS Firmware & Driver Build Targets:"
 	@echo
-	@echo "  mode                Show current compile mode (development vs. production)"
-	@echo "  set-mode-development Switch to development mode (host out-of-tree drivers)"
-	@echo "  set-mode-production  Switch to production mode (hermetic in-tree drivers)"
-	@echo "  all                 Build full EVE BaseOS image and all drivers for active mode"
-	@echo "  eve                 Build EVE BaseOS live installer image for active mode"
+	@echo "  <empty> / all       Build EVE BaseOS + all NOHYPER drivers and apps (default)"
+	@echo "  everything          Build all NOHYPER drivers/apps + all HVM guests"
+	@echo "  guest               Build all HVM guest side artifacts (Ubuntu, Alpine, QNX)"
+	@echo "  guest-ubuntu        Build Ubuntu 24.04 HVM driver & client"
+	@echo "  guest-alpine        Build Alpine 3.20 HVM driver & client"
+	@echo "  guest-qnx           Build QNX 8.0 HVM resource manager & client"
+	@echo "  guest-qnx-image     Build bootable QNX 8.0 QCOW2 disk image"
+	@echo "  nohyper             Build all NOHYPER host drivers and apps"
 	@echo "  drivers             Build and sign all detected out-of-tree drivers (dev mode)"
+	@echo "  eve                 Build EVE BaseOS live installer image for active mode"
 	@echo "  eve-kernel          Build EVE kernel package via Docker ($(EVE_KERNEL_TARGET))"
 	@echo "  eve-kernel-headers  Extract linux-headers and signing keys to build/"
 	@echo "  eve-kernel-keys     Alias for extracting signing keys to build/certs/"
 	@echo "  <driver-name>       Build and sign a specific driver (e.g. cavalry, amba_otp)"
+	@echo "  clean-guest         Clean guest build staging (build/guest/)"
+	@echo "  distclean-guest     Full clean of guest build cache (including headers)"
 	@echo "  clean               Clean local build outputs and driver artifacts"
 	@echo "  distclean           Full clean of build outputs and EVE system artifacts"
+
 	@echo
 	@echo "Active Configuration:"
 	@echo "  Mode:           $(CURRENT_MODE)"
@@ -130,7 +147,7 @@ eve-kernel:
 	@mkdir -p $(BUILD_DIR)
 	+$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve $(EVE_KERNEL_TARGET) && \
 		rm -f $(BUILD_DIR)/.eve-kernel-headers.done $(BUILD_DIR)/.drivers.done && \
-		$(EVE_MAKE_DONE)
+		$(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD) > $(BUILD_DIR)/.eve-kernel.done
 
 eve-kernel-headers: $(call my-depend,eve-kernel)
 	@mkdir -p $(BUILD_DIR)/certs $(BUILD_DIR)/bin
@@ -196,6 +213,9 @@ drivers: $(call my-depend,eve-kernel-headers)
 				cp -f "$$bin" $(BUILD_DIR)/firmware/; \
 			done; \
 			if [ -d "$(DRIVERS_DIR)/$$drv/tools" ]; then \
+				if [ -f "$(DRIVERS_DIR)/$$drv/tools/Makefile" ]; then \
+					$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
+				fi; \
 				for exe in $$(find $(DRIVERS_DIR)/$$drv/tools -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
 					mkdir -p $(BUILD_DIR)/bin; \
 					cp -f "$$exe" $(BUILD_DIR)/bin/; \
@@ -231,6 +251,9 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 			cp -f "$$bin" $(BUILD_DIR)/firmware/; \
 		done; \
 		if [ -d "$(DRIVERS_DIR)/$@/tools" ]; then \
+			if [ -f "$(DRIVERS_DIR)/$@/tools/Makefile" ]; then \
+				$(MAKE) -C $(DRIVERS_DIR)/$@/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
+			fi; \
 			for exe in $$(find $(DRIVERS_DIR)/$@/tools -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
 				mkdir -p $(BUILD_DIR)/bin; \
 				cp -f "$$exe" $(BUILD_DIR)/bin/; \
@@ -240,15 +263,43 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 		echo "[skip] $@: driver source not present in tree"; \
 	fi
 
-clean:
+guest: guest-all
+
+guest-all:
+	@$(ROOT_DIR)/scripts/build_guest.sh --distro=all
+
+guest-ubuntu:
+	@$(ROOT_DIR)/scripts/build_guest.sh --distro=ubuntu
+
+guest-alpine:
+	@$(ROOT_DIR)/scripts/build_guest.sh --distro=alpine
+
+guest-qnx:
+	@$(ROOT_DIR)/scripts/build_guest.sh --distro=qnx
+
+guest-qnx-image:
+	@$(ROOT_DIR)/scripts/build_guest.sh --distro=qnx --qnx-image
+
+clean-guest:
+	@$(ROOT_DIR)/scripts/build_guest.sh --clean
+
+distclean-guest:
+	@$(ROOT_DIR)/scripts/build_guest.sh --distclean
+
+clean: clean-guest
 	@rm -rf $(BUILD_DIR)/kmod $(BUILD_DIR)/modules $(BUILD_DIR)/firmware \
-		$(BUILD_DIR)/certs $(BUILD_DIR)/usr $(BUILD_DIR)/bin $(BUILD_DIR)/.*.done
+		$(BUILD_DIR)/certs $(BUILD_DIR)/usr $(BUILD_DIR)/bin \
+		$(BUILD_DIR)/guest/ubuntu $(BUILD_DIR)/guest/alpine $(BUILD_DIR)/guest/qnx $(BUILD_DIR)/.*.done
 	@for drv in $(OOT_DRIVERS); do \
 		if [ -f "$(DRIVERS_DIR)/$$drv/Makefile" ]; then \
 			$(MAKE) -C $(DRIVERS_DIR)/$$drv clean 2>/dev/null || true; \
 		fi; \
+		if [ -f "$(DRIVERS_DIR)/$$drv/tools/Makefile" ]; then \
+			$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools clean 2>/dev/null || true; \
+		fi; \
 	done
 	@echo "Cleaned build artifacts."
 
-distclean: clean
+distclean: clean distclean-guest
 	@+$(MAKE) -C $(EVE_SYSTEM_DIR) clean 2>/dev/null || true
+

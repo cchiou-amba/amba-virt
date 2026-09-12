@@ -6,15 +6,42 @@ TARGET := amba-virt-client
 SRCS := amba-virt-client.cxx
 INCLUDES := -I. -Iinclude/uapi
 
+CROSS_COMPILE ?=
+STATIC ?= 0
+
 ifeq ($(OS),qnx)
+QNX_TARGET_CXX ?= gcc_ntoaarch64le_cxx
 CXX := qcc
-CXXFLAGS ?= -Vgcc_ntoarm64le -O2 -Wall -Wextra -std=c++17 $(INCLUDES)
-LDFLAGS ?= -Vgcc_ntoarm64le -lCppUTest -lCppUTestExt
+INCLUDES += -Icompat
+CXXFLAGS ?= -V$(QNX_TARGET_CXX) -D_QNX_SOURCE -O2 -Wall -Wextra -std=c++17 $(INCLUDES)
+LDFLAGS ?= -V$(QNX_TARGET_CXX)
+
+
+
+else
+ifneq ($(CROSS_COMPILE),)
+CXX := $(CROSS_COMPILE)g++
 else
 CXX ?= g++
-CXXFLAGS ?= -O2 -Wall -Wextra -std=c++17 $(INCLUDES)
-LDFLAGS ?= -lCppUTest -lCppUTestExt -lpthread
 endif
+
+HAVE_CPPUTEST := $(shell if printf '%b\n' '\043include <CppUTest/CommandLineTestRunner.h>' | $(CXX) $(INCLUDES) -E -x c++ - >/dev/null 2>&1; then echo 1; else echo 0; fi)
+
+ifeq ($(HAVE_CPPUTEST),1)
+LDFLAGS += -lCppUTest -lCppUTestExt
+else
+INCLUDES += -Icompat
+endif
+
+CXXFLAGS ?= -O2 -Wall -Wextra -std=c++17 $(INCLUDES)
+LDFLAGS ?= -lpthread
+
+ifeq ($(STATIC),1)
+LDFLAGS += -static
+endif
+endif
+
+
 
 .PHONY: all help clean test bench
 

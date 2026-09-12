@@ -1,0 +1,15 @@
+# Dockerfile for Ambarella Ubuntu 24.04 ARM64 Guest Build Environment
+# Pre-bakes headers and compilers so guest builds run in seconds without re-downloading.
+
+FROM arm64v8/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        linux-headers-generic \
+        libcpputest-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace

@@ -9,8 +9,9 @@
 #ifndef _UAPI_AMBA_VIRT_TEST_H
 #define _UAPI_AMBA_VIRT_TEST_H
 
-#include <linux/types.h>
 #include "amba_virt.h"
+
+
 
 /* Extended test message types */
 #define AMBA_VIRT_MSG_ECHO_REQ          5u

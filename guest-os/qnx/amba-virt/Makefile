@@ -1,9 +1,11 @@
 # QNX 8.0 Resource Manager Makefile for amba_virt
 # Requires QNX SDP 8.0 environment (source qnxsdp-env.sh)
 
+QNX_TARGET_ARCH ?= gcc_ntoaarch64le
 CC := qcc
-CFLAGS ?= -Vgcc_ntoarm64le -O2 -Wall -Wextra -I../../../drivers/amba_virt/include/uapi
-LDFLAGS ?= -Vgcc_ntoarm64le -lpci
+CFLAGS ?= -V$(QNX_TARGET_ARCH) -O2 -Wall -Wextra -I../../../drivers/amba_virt/include/uapi
+LDFLAGS ?= -V$(QNX_TARGET_ARCH) -lpci
+
 
 TARGET := amba-virt-resmgr
 

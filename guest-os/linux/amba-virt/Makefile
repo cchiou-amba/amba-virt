@@ -11,18 +11,22 @@ PWD  := $(CURDIR)
 
 .PHONY: all help clean modules
 
+ARCH ?=
+CROSS_COMPILE ?=
+
 all modules:
 	@if [ ! -d "$(KDIR)" ]; then \
-		echo "kmod: KDIR=$(KDIR) not found (Ubuntu linux-headers)." >&2; \
+		echo "kmod: KDIR=$(KDIR) not found (guest linux-headers)." >&2; \
 		echo "Set KDIR_HVM=/path/to/hvm/linux-headers" >&2; \
 		exit 1; \
 	fi
 	@if [ -d "$(KDIR)/ambarella" ] || [ -f "$(KDIR)/.config" -a -n "$$(grep -s CONFIG_AMBARELLA $(KDIR)/.config 2>/dev/null)" ]; then \
 		echo "kmod: Refusing Ambarella eve-kernel ($(KDIR))." >&2; \
-		echo "The HVM runs Ubuntu. Set KDIR_HVM to the HVM kernel linux-headers." >&2; \
+		echo "The HVM runs a standard Linux guest (Ubuntu/Alpine). Set KDIR_HVM to the HVM kernel linux-headers." >&2; \
 		exit 1; \
 	fi
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) $(if $(ARCH),ARCH=$(ARCH)) $(if $(CROSS_COMPILE),CROSS_COMPILE=$(CROSS_COMPILE)) modules
+
 
 clean:
 	@if [ -d "$(KDIR)" ]; then \

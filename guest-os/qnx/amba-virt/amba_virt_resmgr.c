@@ -15,6 +15,8 @@
 #include <sys/iofunc.h>
 #include <sys/dispatch.h>
 #include <sys/mman.h>
+#include <sys/resmgr.h>
+#include <devctl.h>
 
 #include "amba_virt.h"
 #include "amba_virt_test.h"
@@ -75,22 +77,28 @@ static int io_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
         return status;
 
     switch (msg->i.dcmd) {
-    case AMBA_VIRT_IOCTL_GET_INFO: {
-        struct amba_virt_ioctl_info *info =
-            (struct amba_virt_ioctl_info *)_DEVCTL_DATA(msg->i);
+    case AMBA_VIRT_IOC_GET_INFO: {
+        struct amba_virt_info *info =
+            (struct amba_virt_info *)_DEVCTL_DATA(msg->i);
         memset(info, 0, sizeof(*info));
-        info->shm_size = g_resmgr.shm_size;
-        info->is_host = 0;
-        info->status = 1;
-        SET_XTYPE_FLAGS(ctp->iov, 0);
+        info->proto = AMBA_VIRT_PROTO;
+        info->role = AMBA_VIRT_ROLE_GUEST;
+        info->shm_size = (uint32_t)g_resmgr.shm_size;
+        info->connected = 1;
+        info->vsock_cid = AMBA_VIRT_VSOCK_CID;
+        info->vsock_port = AMBA_VIRT_VSOCK_PORT;
+        msg->o.ret_val = 0;
         return _RESMGR_PTR(ctp, &msg->o, sizeof(msg->o) + sizeof(*info));
     }
-    case AMBA_VIRT_IOCTL_RESET:
-        return EOK;
+    case AMBA_VIRT_IOC_CONNECT:
+        msg->o.ret_val = 0;
+        return _RESMGR_PTR(ctp, &msg->o, sizeof(msg->o));
     default:
         return ENOSYS;
     }
+
 }
+
 
 int main(int argc, char **argv)
 {
