@@ -128,13 +128,10 @@ existing bundle in place; that is
 Wrappers: [ZedControl-scripts.md](ZedControl-scripts.md). `$ZCLI_TOKEN` must
 already be in the environment.
 
-```mermaid
-flowchart LR
-  model["Model ioMemberList"]
-  inst["NOHYPER instance create --adapter"]
-  oci["OCI devices in container"]
-  model -->|"available"| inst
-  inst -->|"assigngrp cavalry/gpio"| oci
+```text
++--------------------+   available   +-----------------------------------+   assigngrp cavalry/gpio   +--------------------------+
+| Model ioMemberList |-------------->| NOHYPER instance create --adapter |--------------------------->| OCI devices in container |
++--------------------+               +-----------------------------------+                            +--------------------------+
 ```
 
 ### 1. Find both instances

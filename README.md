@@ -8,7 +8,7 @@ deployment and automated loading on EVE BaseOS.
 | Path | What it is |
 |---|---|
 | [Makefile](Makefile) | Top-level build orchestration (`eve`, `drivers`, `eve-kernel`, `eve-kernel-headers`, `clean`) |
-| [drivers/](drivers/) | Out-of-tree Ambarella kernel modules (`cavalry`, `amba_virt`, optional `amba_otp`) |
+| [drivers/](drivers/) | Out-of-tree Ambarella kernel modules (`amba_virt`, `dsplog`, `pci_platform`, optional `cavalry`, `ambvideo`, `pwr_gpu`, `amba_otp`) |
 | [eve/](eve/) | LF Edge EVE-OS submodule with Ambarella board support and storage-init boot hooks |
 | [eve-kernel/](eve-kernel/) | EVE Linux kernel package definitions and configuration |
 | [scripts/](scripts/) | Deployment, OTA update, driver loader, and management scripts |
@@ -17,7 +17,26 @@ deployment and automated loading on EVE BaseOS.
 | [tools/](tools/) | Host flashing and utility binaries (`usb-matrix` for x86 Linux USB programming) |
 | [doc/](doc/) | Architecture, transport, Cavalry virtualization, and EVE guides |
 | [guest-os/](guest-os/) | Guest OS kernel drivers, resource managers, and test clients (Ubuntu, Alpine, QNX) |
-| [automation/doc/](automation/doc/) | Release notes, issues, and private kernel module distribution guide |
+| `automation/` (optional) | Internal test automation and orchestrator (private repository; clone separately if authorized) |
+
+## Repository Setup & Submodules
+
+Clone this repository with all public submodules initialized:
+
+```bash
+git clone --recursive https://github.com/cchiou-amba/amba-virt.git
+cd amba-virt
+```
+
+### Internal Test Automation (Optional)
+
+The test automation orchestrator and internal validation runbooks reside in a separate private repository (`amba-virt-automation`). Authorized internal developers can clone it into `automation/`:
+
+```bash
+git clone https://github.com/cchiou-amba/amba-virt-automation.git automation
+```
+
+The `automation/` directory is gitignored by default and operates as a standalone repository.
 
 ## Building & Targets
 
@@ -88,9 +107,11 @@ The repository provides two operational modes configured via the `.mode` file:
 
 ### Out-of-Tree Driver Handling & Signing
 
-All drivers residing under `drivers/` are discovered dynamically. Optional NDA
-modules (such as `drivers/amba_otp`) are automatically compiled if present and
-cleanly skipped if absent.
+All drivers residing under `drivers/` are discovered dynamically. Public builds include
+`amba_virt`, `dsplog`, and `pci_platform`. Proprietary and NDA modules (such as
+`drivers/cavalry`, `drivers/ambvideo`, `drivers/pwr_gpu`, and `drivers/amba_otp`) are
+maintained in internal repositories, automatically compiled if present in the workspace,
+and cleanly skipped if absent.
 
 During `make eve-kernel-headers`, kernel module signing keys (`signing_key.pem`
 and `signing_key.x509`) are extracted directly from the LinuxKit cache into
@@ -158,5 +179,5 @@ Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/`. See [guest-o
 - [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Ambarella drivers in EVE BaseOS.
 - [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — ivshmem support in EVE BaseOS.
 - [tools/README.md](tools/README.md) — Host tools guide and `usb-matrix` USB flash programming reference.
-- [automation/doc/Issues.md](automation/doc/Issues.md) — Known issues, tracking, and upstream integration notes.
-- [automation/doc/PrivateKernelModuleRelease.md](automation/doc/PrivateKernelModuleRelease.md) — Distributing private out-of-tree kernel modules without source.
+- [automation/doc/Issues.md](automation/doc/Issues.md) — Known issues, tracking, and upstream integration notes (internal `automation` repository).
+- [automation/doc/PrivateKernelModuleRelease.md](automation/doc/PrivateKernelModuleRelease.md) — Distributing private out-of-tree kernel modules without source (internal `automation` repository).

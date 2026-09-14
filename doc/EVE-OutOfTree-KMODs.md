@@ -14,6 +14,7 @@ Ambarella edge platforms rely on proprietary hardware accelerators and virtualiz
 1. **`cavalry.ko`**: The Ambarella Vector Processor (NVP/VP) accelerator driver managing reserved CMA carveouts (`0x100000000 - 0x3ffffffff`, 12 GB), microcode staging (`0x25c00000 - 0x25ffffff`, 4 MB), command/message queues, doorbells, and IRQs (41/42).
 2. **`cavalry.bin`**: Hardware microcode executed directly by the on-chip Vector Processor scheduler.
 3. **`amba_virt.ko`**: POSIX shared memory / IVSHMEM transport driver providing zero-copy IPC between KVM HVM virtual machines and containerized workloads.
+4. **Proprietary & NDA Modules**: Out-of-tree drivers with commercial or NDA restrictions (`cavalry` for VisORC vector processor, `ambvideo` / `iav` for video DSP, `amba_otp` for security fuses, and `pwr_gpu` / `pvrsrvkm.ko` for Imagination PowerVR Rogue GPU) are decoupled from public Git tracking and ignored in `drivers/.gitignore`. The top-level `Makefile` dynamically compiles them when present in the workspace and cleanly skips them when absent.
 
 EVE-OS enforces strict security constraints:
 - **Module Signature Enforcement**: `CONFIG_MODULE_SIG_FORCE=y` requires every `.ko` module to carry a valid cryptographic signature matching a root/trusted X.509 certificate compiled into the kernel.
@@ -21,39 +22,30 @@ EVE-OS enforces strict security constraints:
 
 To reconcile these security guarantees with the need for fast developer turnaround, EVE-OS provides **two distinct operational modes**:
 
-```mermaid
-flowchart TD
-    subgraph DevMode["Development Mode (Host Out-of-Tree)"]
-        D_SRC["Driver Source Code (cavalry, amba_virt)"]
-        D_KEY["Persistent Local Key (eve-kernel/certs/signing_key.pem)"]
-        D_BLD["Host Build Script (build_kmod_out_of_tree.sh)"]
-        D_SIGN["Host sign-file (sha256)"]
-        D_STAGE["Writable Flash (/persist/modules, /persist/firmware)"]
-        D_INS["Dynamic Redirection & insmod (load-ambarella-drivers.sh)"]
-
-        D_SRC --> D_BLD
-        D_KEY --> D_SIGN
-        D_BLD --> D_SIGN
-        D_SIGN --> D_STAGE
-        D_STAGE --> D_INS
-    end
-
-    subgraph ProdMode["Production Mode (Hermetic Single-Image)"]
-        P_SRC["Driver Source Code (cavalry, amba_virt)"]
-        P_CTX["Docker BuildKit External Contexts (--build-context)"]
-        P_EPH["Ephemeral Single-Use Key (kbuild)"]
-        P_MOD["Kernel extra/ Directory (/lib/modules/.../extra/)"]
-        P_FW["Kernel Firmware Directory (/lib/firmware/cavalry.bin)"]
-        P_DEP["depmod (modules.alias from DTS compatible)"]
-        P_UDEV["udev Early Userspace (kmod load $MODALIAS)"]
-
-        P_SRC --> P_CTX
-        P_CTX --> P_EPH
-        P_EPH --> P_MOD
-        P_EPH --> P_FW
-        P_MOD --> P_DEP
-        P_DEP --> P_UDEV
-    end
+```text
++------------------------------------+      +-----------------------------------------+
+| Development Mode (Host Out-of-Tree)|      | Production Mode (Hermetic Single-Image) |
++------------------------------------+      +-----------------------------------------+
+| Driver Source Code                 |      | Driver Source Code                      |
+| (cavalry, amba_virt)               |      | (cavalry, amba_virt)                    |
+|                 |                  |      |                    |                    |
+|                 v                  |      |                    v                    |
+| Host Build Script                  |      | Docker BuildKit External Contexts       |
+| (build_kmod_out_of_tree.sh)        |      | (--build-context)                       |
+|        |                           |      |                    |                    |
+|        v                           |      |                    v                    |
+| Host sign-file (sha256)            |      | Ephemeral Single-Use Key (kbuild)       |
+| (via signing_key.pem)              |      |             /              \            |
+|        |                           |      |            v                v           |
+|        v                           |      | Kernel extra/ Dir    Firmware Dir       |
+| Writable Flash Staging             |      | (/lib/modules/extra) (/lib/firmware)    |
+| (/persist/modules, firmware)       |      |            |                            |
+|        |                           |      |            v                            |
+|        v                           |      | depmod (modules.alias from DTS)         |
+| Dynamic Redirection & insmod       |      |            |                            |
+| (load-ambarella-drivers.sh)        |      |            v                            |
+|                                    |      | udev Early Userspace (kmod load)        |
++------------------------------------+      +-----------------------------------------+
 ```
 
 ---
@@ -66,24 +58,36 @@ A core difference between Development and Production modes is how `cavalry.ko` i
 
 In Production Mode, module insertion is **100% automated by early userspace**:
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant K as Linux Kernel
-    participant DT as Device Tree (sub_scheduler0)
-    participant U as EVE udev daemon (80-drivers.rules)
-    participant M as kmod / modprobe
-    participant C as cavalry.ko
-    participant F as Firmware Loader (/lib/firmware)
-
-    K->>DT: Probes platform devices at boot
-    DT-->>K: Discovers "ambarella,sub-scheduler"
-    K->>U: Emits uevent: ACTION=add, MODALIAS=of:Nsub_scheduler0T...
-    U->>M: Rule triggers: RUN+="/bin/kmod load $env{MODALIAS}"
-    M->>C: Resolves alias via modules.alias -> loads /lib/modules/.../extra/cavalry.ko
-    C->>K: Calls request_firmware(&fw, "cavalry.bin", dev)
-    K->>F: Reads /lib/firmware/cavalry.bin (sealed in rootfs)
-    C->>C: Starts Vector Processor ucode & creates /dev/cavalry
+```text
++--------+       +------------+       +-----------+       +---------------+       +------------+       +-------------+
+| Linux  |       |Device Tree |       | EVE udev  |       | kmod /        |       | cavalry.ko |       | Firmware    |
+| Kernel |       |sub_sched0  |       |  daemon   |       | modprobe      |       |            |       | /lib/firmw. |
++--------+       +------------+       +-----------+       +---------------+       +------------+       +-------------+
+    |                  |                    |                     |                     |                     |
+    | 1. Probes HW     |                    |                     |                     |                     |
+    |----------------->|                    |                     |                     |                     |
+    |                  |                    |                     |                     |                     |
+    | 2. Discovers "ambarella,sub-scheduler"|                     |                     |                     |
+    |<-----------------|                    |                     |                     |                     |
+    |                                       |                     |                     |                     |
+    | 3. Emits uevent (MODALIAS=of:N...)    |                     |                     |                     |
+    |-------------------------------------->|                     |                     |                     |
+    |                                       |                     |                     |                     |
+    |                                       | 4. Rule triggers (kmod load $MODALIAS)    |                     |
+    |                                       |-------------------->|                     |                     |
+    |                                       |                     |                     |                     |
+    |                                       |                     | 5. Loads /lib/.../extra/cavalry.ko        |
+    |                                       |                     |-------------------->|                     |
+    |                                       |                     |                     |                     |
+    | 6. Calls request_firmware(&fw, "cavalry.bin", dev)          |                     |                     |
+    |<----------------------------------------------------------------------------------|                     |
+    |                                                                                                         |
+    | 7. Reads /lib/firmware/cavalry.bin (sealed in rootfs)                                                   |
+    |-------------------------------------------------------------------------------------------------------->|
+    |                                                                                                         |
+    |                                                             |                     | 8. Starts VP ucode  |
+    |                                                             |                     |    & creates        |
+    |                                                             |                     |    /dev/cavalry     |
 ```
 
 1. **Device Tree Binding**: The kernel parses the `sub_scheduler0` node (`compatible = "ambarella,sub-scheduler"`).
@@ -108,23 +112,35 @@ In Development Mode, `cavalry.ko` resides on the writable persistent partition (
 
 To initialize the driver in Development Mode, the dynamic redirection sequence must be executed:
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as /persist/bin/load-ambarella-drivers.sh
-    participant SYS as /sys/module/firmware_class/parameters/path
-    participant K as Linux Kernel
-    participant C as /persist/modules/cavalry.ko
-    participant P as /persist/firmware/cavalry.bin
-
-    S->>SYS: echo -n '/persist/firmware' > path
-    S->>K: insmod /persist/modules/cavalry.ko
-    K->>C: Executes module_init()
-    C->>K: request_firmware(&fw, "cavalry.bin", dev)
-    K->>SYS: Inspects firmware_class.path parameter
-    K->>P: Reads /persist/firmware/cavalry.bin
-    C->>C: Initializes NVP ucode (Ver.206)
-    C->>K: Creates /dev/cavalry and /dev/cavalry_profile
+```text
++-----------------------+   +-------------------+   +--------------+   +--------------------+   +---------------------+
+| load-ambarella-       |   | firmware_class    |   | Linux Kernel |   | /persist/modules/  |   | /persist/firmware/  |
+| drivers.sh            |   | parameters/path   |   |              |   | cavalry.ko         |   | cavalry.bin         |
++-----------------------+   +-------------------+   +--------------+   +--------------------+   +---------------------+
+           |                          |                    |                      |                        |
+           | 1. echo -n '/persist/fw' |                    |                      |                        |
+           |------------------------->|                    |                      |                        |
+           |                          |                    |                      |                        |
+           | 2. insmod /persist/modules/cavalry.ko         |                      |                        |
+           |---------------------------------------------->|                      |                        |
+           |                          |                    |                      |                        |
+           |                          |                    | 3. Executes module_init()                     |
+           |                          |                    |--------------------->|                        |
+           |                          |                    |                      |                        |
+           |                          |                    | 4. request_firmware("cavalry.bin")            |
+           |                          |                    |<---------------------|                        |
+           |                          |                    |                      |                        |
+           |                          | 5. Reads path param|                      |                        |
+           |                          |<-------------------|                      |                        |
+           |                          |                    |                      |                        |
+           |                          |                    | 6. Reads firmware    |                        |
+           |                          |                    |---------------------------------------------->|
+           |                          |                    |                      |                        |
+           |                          |                    |                      | 7. Initializes NVP     |
+           |                          |                    |                      |    ucode (Ver. 206)    |
+           |                          |                    |                      |                        |
+           |                          |                    | 8. Creates /dev/cavalry                       |
+           |                          |                    |<---------------------|                        |
 ```
 
 #### The Helper Script (`/persist/bin/load-ambarella-drivers.sh`)
@@ -223,7 +239,7 @@ Under the hood, this script:
 To push modified modules to a live board without rebooting:
 
 ```bash
-./scripts/deploy_and_insmod.sh 192.168.8.33 --reload
+./scripts/deploy_and_insmod.sh <target-node-ip> --reload
 ```
 
 This workflow executes in **under 3 seconds**:

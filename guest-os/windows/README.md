@@ -8,44 +8,50 @@ This directory contains the automated unattended build pipeline and runtime conf
 
 Unlike Linux and QNX guests which boot kernel images directly or from minimal ramdisks, Windows 11 on ARM64 boots strictly via **UEFI firmware (AAVMF / EDK2)** presenting **ACPI tables**. Storage and networking operate over high-performance paravirtualized VirtIO devices.
 
-```mermaid
-flowchart TB
-  subgraph host ["Ambarella SoC  |  EVE-OS Hypervisor (EL2)"]
-    direction TB
-    Qemu["QEMU (machine: virt, gic-version=host)"]
-    AAVMF["AAVMF / EDK2 (ARM64 UEFI Firmware)"]
-    SWTPM["swtpm (vTPM 2.0 Emulation)"]
-    VirtBlk["virtio-blk-pci (PCIe Root Port)"]
-    VirtNet["virtio-net-pci (PCIe Root Port)"]
-    VirtGPU["virtio-gpu-pci (Display Adapter)"]
-
-    Qemu --> AAVMF
-    Qemu --> SWTPM
-    Qemu --> VirtBlk
-    Qemu --> VirtNet
-    Qemu --> VirtGPU
-  end
-
-  subgraph guest ["Windows 11 ARM64 HVM Guest (EL1 / EL0)"]
-    direction TB
-    BootMgr["\EFI\Microsoft\Boot\bootmgfw.efi"]
-    WinKernel["ntoskrnl.exe"]
-    VioStor["viostor.sys (VirtIO Block Driver)"]
-    NetKVM["netkvm.sys (VirtIO Network Driver)"]
-    VioGPU["viogpu.sys (VirtIO GPU Driver)"]
-    RDP["TermService (Remote Desktop :3389)"]
-
-    BootMgr --> WinKernel
-    WinKernel --> VioStor
-    WinKernel --> NetKVM
-    WinKernel --> VioGPU
-    WinKernel --> RDP
-  end
-
-  VirtBlk -.-> VioStor
-  VirtNet -.-> NetKVM
-  VirtGPU -.-> VioGPU
-  AAVMF --> BootMgr
+```text
++-------------------------------------------------------------------------------+
+| Ambarella SoC | EVE-OS Hypervisor (EL2)                                       |
+|                                                                               |
+|   +-----------------------------------------------------------------------+   |
+|   |            QEMU (machine: virt, gic-version=host)                     |   |
+|   +-----------------------------------------------------------------------+   |
+|     |         |             |                 |                 |             |
+|     v         v             v                 v                 v             |
+|  +-----+  +-------+  +--------------+  +--------------+  +--------------+     |
+|  |AAVMF|  | swtpm |  |virtio-blk-pci|  |virtio-net-pci|  |virtio-gpu-pci|     |
+|  | EDK2|  | (vTPM |  |  (Storage)   |  |  (Network)   |  |  (Display)   |     |
+|  |(UEFI|  |  2.0) |  |              |  |              |  |              |     |
+|  +-----+  +-------+  +--------------+  +--------------+  +--------------+     |
++-----|---------:--------------:-----------------:----------------:-------------+
+      |         :              :                 :                :
+      v         :              :                 :                :
++---------------+--------------:-----------------:----------------:-------------+
+| Windows 11 ARM64 HVM Guest (EL1 / EL0)         :                :             |
+|               :              :                 :                :             |
+|   +---------------------------------------+    :                :             |
+|   | \EFI\Microsoft\Boot\bootmgfw.efi       |    :                :             |
+|   | (Windows Boot Manager)                |    :                :             |
+|   +---------------------------------------+    :                :             |
+|                       |                        :                :             |
+|                       v                        :                :             |
+|   +---------------------------------------+    :                :             |
+|   | ntoskrnl.exe (Windows Kernel)         |<...+                :             |
+|   +---------------------------------------+                     :             |
+|        |                  |             |                       :             |
+|        v                  v             v                       :             |
+|   +-----------+     +-----------+ +-----------+                 :             |
+|   |viostor.sys|     |netkvm.sys | |viogpu.sys |                 :             |
+|   |(Block Drv)|     |(Net Driver| |(GPU Driver|<................+             |
+|   +-----------+     +-----------+ +-----------+                               |
+|         ^                 ^                                                   |
+|         :                 +.....................................:             |
+|         +....................................:                                |
+|                                                                               |
+|   +---------------------------------------+                                   |
+|   | TermService (Remote Desktop :3389)    |                                   |
+|   +---------------------------------------+                                   |
+|                                                                               |
++-------------------------------------------------------------------------------+
 ```
 
 ---

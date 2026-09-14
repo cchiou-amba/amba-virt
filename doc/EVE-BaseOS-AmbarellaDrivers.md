@@ -45,8 +45,8 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 
 | Location | Role | Typical Files | Access Mode |
 |---|---|---|---|
-| `/persist/modules/` | Houses out-of-tree kernel modules compiled for the active kernel ABI | `cavalry.ko`, `amba_virt.ko` | Read / Write |
-| `/persist/firmware/` | Houses proprietary hardware microcode and DSP firmware | `cavalry.bin` | Read / Write |
+| `/persist/modules/` | Houses out-of-tree kernel modules compiled for the active kernel ABI | `amba_virt.ko`, `amba_pci_platform.ko`, `dsplog.ko`, plus optional proprietary modules (`cavalry.ko`, `iav.ko`, `dsp.ko`, `pvrsrvkm.ko`, `amba_otp.ko`) | Read / Write |
+| `/persist/firmware/` | Houses proprietary hardware microcode and DSP firmware | `cavalry.bin`, `orccode.bin`, etc. | Read / Write |
 | `/persist/status/` | EVE system state, microservice checkpoints, app configs | Managed by EVE | Read / Write |
 
 ---

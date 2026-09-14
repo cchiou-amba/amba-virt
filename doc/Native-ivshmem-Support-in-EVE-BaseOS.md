@@ -195,16 +195,50 @@ One caveat: `vmmOverhead` consults `VMMMaxMem` and the global `memory.vmm.limit.
 
 The update follows the validated dual-partition BaseOS procedure documented in `EVE-UpdateEVE-Firmware.md`.
 
-```mermaid
-graph TD
-    A["Modify kvm.go"] --> B["Build EVE BaseOS<br/>(make eve)"]
-    B --> C["Generate rootfs.img & eve_version"]
-    C --> D["Stage to Local HTTP Datastore<br/>(pub_eve_datastore.sh)"]
-    D --> E["Register in ZedControl<br/>(zcli image create + uplink)"]
-    E --> F["Deploy to Edge Node<br/>(zcli edge-node eveimage-update)"]
-    F --> G["EVE streams to Standby Partition (IMGB)"]
-    G --> H["Activate & Reboot Node"]
-    H --> I["Node boots into new BaseOS<br/>Edge apps automatically resume"]
+```text
++---------------------------------------------------------------+
+| 1. Modify kvm.go                                              |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 2. Build EVE BaseOS (make eve)                                |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 3. Generate rootfs.img & eve_version                          |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 4. Stage to Local HTTP Datastore (pub_eve_datastore.sh)       |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 5. Register in ZedControl (zcli image create + uplink)        |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 6. Deploy to Edge Node (zcli edge-node eveimage-update)       |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 7. EVE streams to Standby Partition (IMGB)                    |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 8. Activate & Reboot Node                                     |
++---------------------------------------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+| 9. Node boots into new BaseOS; edge apps automatically resume |
++---------------------------------------------------------------+
 ```
 
 ### 4.1 Compiling EVE

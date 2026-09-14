@@ -25,26 +25,25 @@ Host driver: **cavalry_v3** (`compatible = "ambarella,sub-scheduler"`).
 
 ## Architecture (proxy, not passthrough)
 
-```mermaid
-flowchart LR
-  subgraph hvm [HVM EL1]
-    App["NN app"]
-    FE["/dev/cavalry frontend"]
-    Virt["amba_virt.ko"]
-    App --> FE
-    FE --> Virt
-  end
-  subgraph nohyper [NOHYPER EL2-side]
-    Srv["proxy + arbitrator"]
-    HK["amba_virt.ko"]
-    Cav["cavalry.ko /dev/cavalry"]
-    VP["VisORC"]
-    Srv --> HK
-    Srv --> Cav
-    Cav --> VP
-  end
-  Virt -->|"vsock CID 2:5555"| Srv
-  Virt -->|"ivshmem"| HK
+```text
++------------------------------+                               +-----------------------------------+
+| HVM EL1                      |                               | NOHYPER EL2-side                  |
+|                              |                               |                                   |
+|   +----------------------+   |                               |   +---------------------------+   |
+|   |        NN app        |   |                               |   |    proxy + arbitrator     |   |
+|   +----------------------+   |                               |   +---------------------------+   |
+|              |               |                               |      /                     \      |
+|              v               |                               |     v                       v     |
+|   +----------------------+   |                               | +---------------+   +-----------+ |
+|   |/dev/cavalry frontend |   |                               | | amba_virt.ko  |   |cavalry.ko | |
+|   +----------------------+   |   vsock (CID 2 : 5555)        | +---------------+   |/dev/cav.  | |
+|              |               |------------------------------>|         ^           +-----------+ |
+|              v               |                               |         |                 |       |
+|   +----------------------+   |   ivshmem (shared DRAM)       |         |                 v       |
+|   |     amba_virt.ko     |---+-------------------------------+---------+           +-----------+ |
+|   +----------------------+   |                               |                     |  VisORC   | |
+|                              |                               |                     +-----------+ |
++------------------------------+                               +-----------------------------------+
 ```
 
 | | This architecture | Guest MMIO passthrough (rejected) |

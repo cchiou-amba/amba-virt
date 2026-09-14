@@ -10,42 +10,61 @@ System context: [Architecture.md](Architecture.md). Cavalry on top of this trans
 
 The architecture provides a unified character device interface (`/dev/amba_virt`) across both execution domains. Guest applications interact with hardware accelerators (such as the Ambarella Cavalry Neural Network processor and DSPs) without requiring physical hardware passthrough to the guest.
 
-```mermaid
-flowchart TB
-  subgraph Guest ["HVM Guest (Ubuntu 24.04 EL1)"]
-    direction TB
-    App["Guest Applications / Cavalry Frontend"]
-    Client["amba-virt-client (CppUTest / Bench)"]
-    DevHVM["/dev/amba_virt (UAPI chardev)"]
-    KModHVM["kmod/hvm/amba_virt.ko (PCI Driver)"]
-    App --> DevHVM
-    Client --> DevHVM
-    DevHVM --> KModHVM
-  end
-
-  subgraph Hypervisor ["EVE-OS / QEMU Hypervisor Layer"]
-    direction LR
-    VhostVsock["vhost-vsock-pci (CID 2, Port 5555)"]
-    Ivshmem["ivshmem-plain (PCI 1af4:1110)"]
-    ShmBackend["memory-backend-file (1 GiB DRAM window)"]
-    Ivshmem --- ShmBackend
-  end
-
-  subgraph Host ["NOHYPER Host (Ubuntu 24.04 Privileged EL2)"]
-    direction TB
-    KModHost["kmod/nohyper/amba_virt.ko"]
-    DevHost["/dev/amba_virt (Dynamic chardev)"]
-    Server["amba-virt-server (Daemon / Arbitrator)"]
-    AmbaHW["Ambarella Hardware Drivers (/dev/cavalry, /dev/iav)"]
-    KModHost --> DevHost
-    DevHost --> Server
-    Server --> AmbaHW
-  end
-
-  KModHVM -- "VFS ioctl(SEND/RECV)" --> VhostVsock
-  VhostVsock -- "AF_VSOCK stream" --> KModHost
-  KModHVM -- "VFS mmap() / BAR 2" --> Ivshmem
-  ShmBackend --- KModHost
+```text
++-----------------------------------------------------------------------------------------------+
+| HVM Guest (Ubuntu 24.04 EL1)                                                                  |
+|                                                                                               |
+|   +---------------------------------------+   +-------------------------------------------+   |
+|   | Guest Applications / Cavalry Frontend |   | amba-virt-client (CppUTest / Benchmarks)  |   |
+|   +---------------------------------------+   +-------------------------------------------+   |
+|                      \                                     /                                  |
+|                       v                                   v                                   |
+|   +---------------------------------------------------------------------------------------+   |
+|   |                         /dev/amba_virt (UAPI chardev)                                 |   |
+|   +---------------------------------------------------------------------------------------+   |
+|                                              |                                                |
+|                                              v                                                |
+|   +---------------------------------------------------------------------------------------+   |
+|   |                   kmod/hvm/amba_virt.ko (PCI Driver for 1af4:1110)                    |   |
+|   +---------------------------------------------------------------------------------------+   |
+|                           |                                       |                           |
++---------------------------|---------------------------------------|---------------------------+
+                            | VFS ioctl(SEND/RECV)                  | VFS mmap() / BAR 2
+                            v                                       v
++-----------------------------------------------------------------------------------------------+
+| EVE-OS / QEMU Hypervisor Layer                                                                |
+|                                                                                               |
+|   +-----------------------------------+               +-----------------------------------+   |
+|   |  vhost-vsock-pci (CID 2, :5555)   |               |     ivshmem-plain (1af4:1110)     |   |
+|   +-----------------------------------+               +-----------------------------------+   |
+|                     |                                                   |                     |
+|                     | AF_VSOCK stream                                   | memory-backend-file |
+|                     v                                                   v (1 GiB DRAM window) |
++---------------------|---------------------------------------------------|---------------------+
+                      |                                                   |
++---------------------|---------------------------------------------------|---------------------+
+| NOHYPER Host (Ubuntu 24.04 Privileged EL2)                              |                     |
+|                                                                         |                     |
+|   +---------------------------------------------------------------------------------------+   |
+|   |                          kmod/nohyper/amba_virt.ko <----------------+                 |   |
+|   +---------------------------------------------------------------------------------------+   |
+|                                              |                                                |
+|                                              v                                                |
+|   +---------------------------------------------------------------------------------------+   |
+|   |                        /dev/amba_virt (Dynamic chardev)                               |   |
+|   +---------------------------------------------------------------------------------------+   |
+|                                              |                                                |
+|                                              v                                                |
+|   +---------------------------------------------------------------------------------------+   |
+|   |                       amba-virt-server (Daemon / Arbitrator)                          |   |
+|   +---------------------------------------------------------------------------------------+   |
+|                                              |                                                |
+|                                              v                                                |
+|   +---------------------------------------------------------------------------------------+   |
+|   |              Ambarella Hardware Drivers (/dev/cavalry, /dev/iav)                      |   |
+|   +---------------------------------------------------------------------------------------+   |
+|                                                                                               |
++-----------------------------------------------------------------------------------------------+
 ```
 
 ### 1.1 One BAR, Many Frontends
@@ -175,28 +194,32 @@ All automated test orchestration scripts, test manifests, and agent runbooks res
 
 The test orchestrator (`automation/scripts/run_poc_autotest.py`) executes end-to-end continuous validation across target edge nodes:
 
-```mermaid
-flowchart TD
-  Agent["Autonomous Agent / CI Orchestrator"]
-  Manifest["automation/scripts/test_plan_manifest.json"]
-  Env["automation/scripts/test_nodes.env"]
-  Script["automation/scripts/run_poc_autotest.py"]
-
-  Agent --> Script
-  Manifest --> Script
-  Env --> Script
-
-  Script -->|Stage 1: build| BuildSrv["Build Server (make build-hvm, make build-nohyper)"]
-  Script -->|Stage 2: deploy| Deploy["SFTP Transfer (Binaries & kmods to HVM/NOHYPER)"]
-  Script -->|Stage 3: setup| NodeSetup["Node Setup (EVE Host insmod, start amba-virt-server)"]
-  Script -->|Stage 4: test| RunTests["Run CppUTest Suites (JUnit XML output)"]
-  Script -->|Stage 5: bench| RunBench["Run IPC Benchmarks (JSON metrics output)"]
-  Script -->|Stage 6: report| Report["Generate Markdown & JUnit Validation Report"]
-
-  Deploy --> NodeSetup
-  NodeSetup --> RunTests
-  RunTests --> RunBench
-  RunBench --> Report
+```text
++--------------------------------------+      +-----------------------------------------+      +---------------------------------------+
+| Autonomous Agent / CI Orchestrator   |      | test_plan_manifest.json                 |      | test_nodes.env                        |
++--------------------------------------+      +-----------------------------------------+      +---------------------------------------+
+                   \                                               |                                              /
+                    \                                              |                                             /
+                     v                                             v                                            v
++-----------------------------------------------------------------------------------------------------------------------+
+| Test Orchestrator (automation/scripts/run_poc_autotest.py)                                                            |
++-----------------------------------------------------------------------------------------------------------------------+
+  |
+  |---> [Stage 1: Build]  Build Server (make build-hvm, make build-nohyper)
+  |
+  |---> [Stage 2: Deploy] SFTP Transfer (Binaries & kmods to HVM / NOHYPER)
+  |        |
+  |        v
+  |---> [Stage 3: Setup]  Node Setup (EVE Host insmod, start amba-virt-server)
+  |        |
+  |        v
+  |---> [Stage 4: Test]   Run CppUTest Suites (JUnit XML output)
+  |        |
+  |        v
+  |---> [Stage 5: Bench]  Run IPC Benchmarks (JSON metrics output)
+  |        |
+  |        v
+  +---> [Stage 6: Report] Generate Markdown & JUnit Validation Report
 ```
 
 ### 5.2 Orchestrator Execution Commands

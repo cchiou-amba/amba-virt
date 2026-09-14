@@ -102,29 +102,38 @@ CIDs, but it has nowhere to route them because there is only one region.
 
 ## What N > 1 would require
 
-```mermaid
-flowchart LR
-  subgraph host ["dom0"]
-    kmod["amba_virt.ko (multi-instance)"]
-    d0["/dev/amba_virt0"]
-    d7["/dev/amba_virt7"]
-    f0["/dev/shm/amba-virt-0"]
-    f7["/dev/shm/amba-virt-7"]
-  end
-  subgraph guests ["HVMs"]
-    h0["HVM 0  CID 4"]
-    h7["HVM 7  CID 11"]
-  end
-  ctr["NOHYPER container"]
-
-  f0 -->|"memory-backend-file"| h0
-  f7 -->|"memory-backend-file"| h7
-  f0 --> kmod
-  f7 --> kmod
-  kmod --> d0 --> ctr
-  kmod --> d7 --> ctr
-  h0 -->|"vsock, demux by peer CID"| kmod
-  h7 -->|"vsock, demux by peer CID"| kmod
+```text
++-------------------------------------------------------------------------------------------------+
+| dom0                                                                                            |
+|                                                                                                 |
+|   +---------------------+        +-------------------------------+      +-------------------+   |
+|   | /dev/shm/amba-virt-0|------->| amba_virt.ko (multi-instance) |----->| /dev/amba_virt0   |   |
+|   +---------------------+        |                               |      +-------------------+   |
+|              |                   |                               |                |             |
+|              |                   |                               |                v             |
+|              |                   |                               |      +-------------------+   |
+|              |                   |                               |      | NOHYPER container |   |
+|              |                   |                               |      +-------------------+   |
+|              |                   |                               |                ^             |
+|              |                   |                               |                |             |
+|   +---------------------+        |                               |      +-------------------+   |
+|   | /dev/shm/amba-virt-7|------->|                               |----->| /dev/amba_virt7   |   |
+|   +---------------------+        +-------------------------------+      +-------------------+   |
+|              |                                   ^                                              |
++--------------|-----------------------------------|----------------------------------------------+
+               | memory-backend-file               |
+               v                                   | vsock (demux by peer CID)
++--------------------------------------------------+
+| HVMs                                             |
+|                                                  |
+|   +---------------+                              |
+|   | HVM 0 (CID 4) |------------------------------+
+|   +---------------+                              |
+|          ...                                     |
+|   +---------------+                              |
+|   | HVM 7 (CID 11)|------------------------------+
+|   +---------------+                              |
++--------------------------------------------------+
 ```
 
 Kernel module work:

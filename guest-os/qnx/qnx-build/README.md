@@ -11,11 +11,9 @@ This workspace builds the bootable QNX Neutrino RTOS 8.0 disk image for EVE-OS o
     - `startup_postpci.custom`: Starts `devc-virtio`, attaches root shell to `/dev/vcon1` for direct `tio` console connection.
     - `ifs_start.custom`: UEFI kernel initialization.
     - `system_files.custom` / `ifs_files.custom`: Extra system binaries and libraries.
-- `patches/`: Binary patches and scripts for QNX SDP 8.0:
-  - `apply_sdp_patches.py`: Automatically applies required patches to `devb-virtio`, `pci_hw-fdt.so.3.0`, and `mkqnximage`.
+- `patches/`: Binary patch automation for QNX SDP 8.0:
+  - `apply_sdp_patches.py`: Automatically inspects and patches the host's QNX SDP 8.0 binaries (`devb-virtio`, `pci_hw-fdt.so.3.0`, and `mkqnximage`) dynamically in-place.
   - `0001-mkqnximage-qemu-random-entropy.patch`: Unified diff for `opt_scripts/qemu`.
-  - `devb-virtio.patched`: Pre-patched `devb-virtio` binary.
-  - `pci_hw-fdt.so.3.0.patched`: Pre-patched `pci_hw-fdt.so.3.0` library.
 - `output/`: Generated build artifacts (ignored by git):
   - `disk-qemu`: Raw GPT disk image.
   - `ifs.bin`: Bootable QNX Image Filesystem.
@@ -38,11 +36,11 @@ source ~/qnx800/qnxsdp-env.sh
 
 ## Connecting to the Guest
 
-Once deployed on an EVE node (e.g. `n1-655-devkit` at `192.168.8.34`):
+Once deployed on an EVE node (e.g. target node at `<target-node-ip>`):
 
 ```bash
 # SSH over LAN via forwarded port 2322 (password: root, or using SSH key)
-ssh -p 2322 root@192.168.8.34
+ssh -p 2322 root@<target-node-ip>
 
 # Serial / VirtIO console access via EVE
 eve enter debug "eve app console"

@@ -22,68 +22,72 @@ Zedcontroller places two apps on the SoC: an Ubuntu **HVM** (KVM guest) and a
 privileged **NOHYPER** container on the EVE host. Guests never own VisORC.
 Control goes over virtio-vsock (CID 2, port 5555). Bulk data stays in ivshmem.
 
-```mermaid
-flowchart TB
-  Zed["Zededa Zedcontroller"]
-
-  subgraph soc ["Ambarella SoC  |  EVE-OS KVM"]
-    direction LR
-
-    subgraph hvm ["HVM  Ubuntu guest  EL1 / EL0"]
-      direction TB
-      App["Guest app"]
-      Gdev["/dev/amba_virt"]
-      Gkmod["amba_virt.ko"]
-      App --> Gdev --> Gkmod
-    end
-
-    subgraph hyp ["Hypervisor  QEMU"]
-      direction TB
-      Qemu["QEMU"]
-      Vsock["vhost-vsock-pci  host CID 2"]
-      Shm["ivshmem-plain  backing file"]
-      Qemu --- Vsock
-      Qemu --- Shm
-    end
-
-    subgraph nh ["NOHYPER  privileged container  EL2 host"]
-      direction TB
-      Srv["proxy / arbitrator"]
-      Hkmod["amba_virt.ko"]
-      Hdev["/dev/amba_virt"]
-      Cav["cavalry.ko  /dev/cavalry"]
-      VP["VisORC / other HW"]
-      Srv --> Hdev --> Hkmod
-      Srv --> Cav --> VP
-    end
-  end
-
-  Zed -->|"HVM spec"| Qemu
-  Zed -->|"app + PhyIo assign"| nh
-  Gkmod -->|"control: vsock :5555"| Vsock
-  Vsock --> Hkmod
-  Gkmod -->|"bulk: PCI ivshmem BAR"| Shm
-  Shm --> Hkmod
+```text
+                        +-----------------------+
+                        | Zededa Zedcontroller  |
+                        +-----------------------+
+                           /                 \
+                "HVM spec"/                   \"app + PhyIo assign"
+                         v                     v
++-------------------------------------------------------------------------------+
+| Ambarella SoC | EVE-OS KVM                                                    |
+|                                                                               |
+|  +--------------------+   +-------------------+   +------------------------+  |
+|  | HVM (Ubuntu guest) |   | Hypervisor (QEMU) |   | NOHYPER                |  |
+|  | EL1 / EL0          |   |                   |   | Privileged Container   |  |
+|  |                    |   |  +-------------+  |   | EL2 host process       |  |
+|  |   +------------+   |   |  |    QEMU     |  |   |                        |  |
+|  |   | Guest app  |   |   |  +-------------+  |   |  +------------------+  |  |
+|  |   +------------+   |   |      |      |     |   |  |proxy / arbitrator|  |  |
+|  |         |          |   |      |      |     |   |  +------------------+  |  |
+|  |         v          |   |      |      |     |   |     /            \     |  |
+|  |  +---------------+ |   |      |      |     |   |    v              v    |  |
+|  |  |/dev/amba_virt | |   |      |      |     |   |+------------+ +------+ |  |
+|  |  +---------------+ |   |      |      |     |   ||/dev/       | |/dev/ | |  |
+|  |         |          |   |      |      |     |   ||  amba_virt | | cav  | |  |
+|  |         v          |   |      |      |     |   |+------------+ +------+ |  |
+|  |  +---------------+ |   |      |      |     |   |    |              |    |  |
+|  |  | amba_virt.ko  | |   |      |      |     |   |    v              v    |  |
+|  |  +---------------+ |   |      |      |     |   |+------------+ +------+ |  |
+|  |      |       |     |   |      |      |     |   ||amba_virt.ko| |cav.ko| |  |
+|  +------|-------|-----+   |      |      |     |   |+------------+ +------+ |  |
+|         |       |         |      |      |     |   |    ^              |    |  |
+|         |       |         |      v      v     |   +----|--------------|----+  |
+|         |       |         |  +------+ +-----+ |        |              v       |
+|         |       |         |  |vhost-| |ivsh-| |        |          +--------+  |
+|         |       |         |  |vsock-| |mem- | |        |          | VisORC |  |
+|         |       |         |  | pci  | |plain| |        |          | other  |  |
+|         |       |         |  |(CID2)| |(file| |        |          |   HW   |  |
+|         |       |         |  +------+ +-----+ |        |          +--------+  |
+| control:|       |         +-----|--------|----+        |                      |
+|  vsock  |       |               |        |             |                      |
+|  :5555  +-------|-------------->+        |             |                      |
+|                 |               |        |             |                      |
+|                 |               +--------|------------>+                      |
+|                 |                        |             |                      |
+|                 |   bulk: PCI ivshmem BAR|             |                      |
+|                 +----------------------->+             |                      |
+|                                          |             |                      |
+|                                          +------------>+                      |
+|                                                                               |
++-------------------------------------------------------------------------------+
 ```
 
-```mermaid
-flowchart LR
-  subgraph guest ["Guest"]
-    Gapp["app ioctl / mmap"]
-    Gdev["/dev/amba_virt"]
-    Gapp --> Gdev
-  end
-
-  Gdev -->|"framed vsock  PING, later Cavalry ctrl"| HostSrv
-  Gdev -->|"mmap ivshmem  tensors, DVI"| ShmReg
-
-  subgraph host ["NOHYPER"]
-    HostSrv["userspace server"]
-    ShmReg["shared DRAM"]
-    RealCav["/dev/cavalry"]
-    HostSrv --> RealCav
-    HostSrv --> ShmReg
-  end
+```text
++-----------------------+                               +-------------------------+
+| Guest                 |                               | NOHYPER                 |
+|                       |                               |                         |
+| +-------------------+ |                               | +---------------------+ |
+| | app ioctl / mmap  | |                               | |  userspace server   | |
+| +-------------------+ |                               | +---------------------+ |
+|           |           |   framed vsock                |     |             |     |
+|           v           |   (PING, later Cavalry ctrl)  |     v             v     |
+| +-------------------+ |------------------------------>| +--------+  +---------+ |
+| |  /dev/amba_virt   | |                               | |/dev/   |  | shared  | |
+| +-------------------+ |   mmap ivshmem (tensors, DVI) | |cavalry |  |  DRAM   | |
+|           |           |------------------------------>| +--------+  +---------+ |
+|                       |                               |                         |
++-----------------------+                               +-------------------------+
 ```
 
 Do **not** copy bulk buffers on vsock. Do **not** use vsock port 2000 (EVE
@@ -93,13 +97,25 @@ VComLink). The container must not connect to a guest CID.
 
 ## Privilege model
 
-```mermaid
-flowchart TB
-  el3["EL3  secure monitor  unused"]
-  el2["EL2  EVE-OS kernel + KVM  NOHYPER container runs here as a process"]
-  el1["EL1  HVM guest kernel  amba_virt.ko"]
-  el0["EL0  HVM guest userspace  app, CLI"]
-  el3 --> el2 --> el1 --> el0
+```text
++----------------------------------------------------------------------------+
+| EL3  Secure monitor (unused)                                               |
++----------------------------------------------------------------------------+
+                                     |
+                                     v
++----------------------------------------------------------------------------+
+| EL2  EVE-OS kernel + KVM (NOHYPER container runs here as a host process)   |
++----------------------------------------------------------------------------+
+                                     |
+                                     v
++----------------------------------------------------------------------------+
+| EL1  HVM guest kernel (amba_virt.ko)                                       |
++----------------------------------------------------------------------------+
+                                     |
+                                     v
++----------------------------------------------------------------------------+
+| EL0  HVM guest userspace (app, CLI)                                        |
++----------------------------------------------------------------------------+
 ```
 
 | Role | What it is | ARM exception level |

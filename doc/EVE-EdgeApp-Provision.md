@@ -152,7 +152,7 @@ separate HTTPS store (this is **`UbuntuCloud`**, UUID
 
 If `UbuntuCloud` already exists, skip create.
 
-**HVM image** — official noble ARM64 cloudimg, not the Selfso-customized
+**HVM image** — official noble ARM64 cloudimg, not a customized
 `ubuntu-24_04`. Relative URL is under datastore path `releases`:
 
 ```bash
@@ -693,7 +693,7 @@ sets the password, and often never finishes DHCP.
 **Connection refused** on 2222 is a different bug (guest has an IP, sshd
 is down). **No route to host** is “guest never spoke on the tap”.
 
-Inspect on the EVE host (Devkit `root@192.168.8.34`; Pro host `:22` may
+Inspect on the EVE host (Devkit `root@<devkit-ip>`; Pro host `:22` may
 be closed — use serial):
 
 ```bash
@@ -897,7 +897,7 @@ has no `Cloud-init`. If `user-data` is 0 bytes, recreate with
 
 Worked on `ubuntu_24_04.n1-655-devkit`
 (`22457359-76b4-4fd5-bdd1-2ed7415f8879`) 2026-09-08: after seed,
-`enp3s0` `10.1.0.129`, `ssh -p 2222 ubuntu@192.168.8.34`.
+`enp3s0` `10.1.0.129`, `ssh -p 2222 ubuntu@<devkit-ip>`.
 
 #### 1. Stop the HVM (QEMU must not hold the qcow2)
 

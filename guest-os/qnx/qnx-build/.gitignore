@@ -12,6 +12,16 @@ dist/
 __pycache__/
 *.pyc
 
+# Proprietary binary patches
+patches/*.patched
+
+# Credentials, keys, and security sensitive files
+local/misc_files/ssh_host_*
+local/misc_files/qtd_*
+local/misc_files/shadow
+local/misc_files/authorized_keys
+local/ssh-ident
+
 # Editor backups
 *~
 *.swp
