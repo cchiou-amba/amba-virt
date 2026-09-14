@@ -140,7 +140,7 @@ mode-prod: set-mode-production
 
 
 eve: $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
-	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init
+	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
 		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD)) live && \
 		$(EVE_MAKE_DONE)
