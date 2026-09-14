@@ -78,7 +78,7 @@ device is assigned).
 | Hardware | VisORC MMIO, RCT reset/clocks, scratchpad kicks, 4 IRQs |
 
 **cavalry_v2** is CV2/CV22/CV25/CV28/CV5/CV52. **cavalry_v3** is N1, CV72/CV75,
-CV7, CV8. This document is v3 / N1-655.
+CV7. This document is v3 / N1-655.
 
 ---
 
@@ -191,7 +191,7 @@ HPA, release reset, wait first sched IRQ. Host can
 
 | | v2 | v3 (N1-655) |
 |---|---|---|
-| Chips | CV2x, CV5, CV52 | N1, CV72/75, CV7, CV8 |
+| Chips | CV2x, CV5, CV52 | N1, CV72/75, CV7 |
 | Kick | Sync counters in VisORC | Scratchpad `0xFFF0200004` |
 | IRQs | VP + FEX + FMA + sched | job-submit + job-done |
 | Cmd queue entry | `u32` phys | `u64` phys |

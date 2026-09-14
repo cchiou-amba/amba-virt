@@ -39,6 +39,9 @@ endif
 
 # Dynamically discover all out-of-tree driver suites in drivers/
 OOT_DRIVERS := $(notdir $(patsubst %/,%,$(wildcard $(DRIVERS_DIR)/*/)))
+ifeq ($(wildcard $(DRIVERS_DIR)/ambvideo),)
+    OOT_DRIVERS := $(filter-out dsplog,$(OOT_DRIVERS))
+endif
 
 CURRENT_KERNEL_TAG = $(shell $(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD) 2>/dev/null)
 
