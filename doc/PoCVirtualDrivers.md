@@ -188,11 +188,9 @@ Simulates high-framerate neural network dispatch:
 
 ## 5. Automated Orchestration & AI Agent Runbook
 
-All automated test orchestration scripts, test manifests, and agent runbooks reside in `automation/` (isolated from public repository releases).
+All automated test orchestration scripts, test manifests, and agent runbooks execute end-to-end continuous validation across target edge nodes:
 
 ### 5.1 Orchestration Architecture
-
-The test orchestrator (`automation/scripts/run_poc_autotest.py`) executes end-to-end continuous validation across target edge nodes:
 
 ```text
 +--------------------------------------+      +-----------------------------------------+      +---------------------------------------+
@@ -202,7 +200,7 @@ The test orchestrator (`automation/scripts/run_poc_autotest.py`) executes end-to
                     \                                              |                                             /
                      v                                             v                                            v
 +-----------------------------------------------------------------------------------------------------------------------+
-| Test Orchestrator (automation/scripts/run_poc_autotest.py)                                                            |
+| Test Orchestrator (scripts/run_poc_autotest.py)                                                                       |
 +-----------------------------------------------------------------------------------------------------------------------+
   |
   |---> [Stage 1: Build]  Build Server (make build-hvm, make build-nohyper)
@@ -228,15 +226,15 @@ Agents execute the pipeline using specific stage selectors:
 
 ```bash
 # Full end-to-end validation pipeline
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage all
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage all
 
 # Step-by-step modular execution
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage build
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage deploy
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage setup
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage test
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage bench
-python3 automation/scripts/run_poc_autotest.py --node n1-655-devkit --stage report
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage build
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage deploy
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage setup
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage test
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage bench
+python3 scripts/run_poc_autotest.py --node n1-655-devkit --stage report
 ```
 
 ### 5.3 Diagnostic & Error Recovery Triage

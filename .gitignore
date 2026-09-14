@@ -3,6 +3,6 @@
 .vscode
 apps/*.json
 build/
-automation/
+auto*/
 .mode
 plan/

@@ -117,8 +117,8 @@ The script will:
 
 ## 5. Related documentation
 
-- [`automation/doc/WindowsEdgeAppHVM.md`](../../automation/doc/WindowsEdgeAppHVM.md) — cloud image, edge-app, and RDP deployment
-- [`automation/doc/WindowsPortingDetails.md`](../../automation/doc/WindowsPortingDetails.md) — boot, DISM, BCD, and specialize log
+- [guest-os/README.md](../README.md) — HVM guest architecture and compilation guide
+- [doc/Guest-OS-Cross-Compilation.md](../../doc/Guest-OS-Cross-Compilation.md) — Guest cross-compilation pipeline
 
 ---
 

@@ -17,7 +17,6 @@ deployment and automated loading on EVE BaseOS.
 | [tools/](tools/) | Host flashing and utility binaries (`usb-matrix` for x86 Linux USB programming) |
 | [doc/](doc/) | Architecture, transport, Cavalry virtualization, and EVE guides |
 | [guest-os/](guest-os/) | Guest OS kernel drivers, resource managers, and test clients (Ubuntu, Alpine, QNX) |
-| `automation/` (optional) | Internal test automation and orchestrator (private repository; clone separately if authorized) |
 
 ## Repository Setup & Submodules
 
@@ -27,16 +26,6 @@ Clone this repository with all public submodules initialized:
 git clone --recursive https://github.com/cchiou-amba/amba-virt.git
 cd amba-virt
 ```
-
-### Internal Test Automation (Optional)
-
-The test automation orchestrator and internal validation runbooks reside in a separate private repository (`amba-virt-automation`). Authorized internal developers can clone it into `automation/`:
-
-```bash
-git clone https://github.com/cchiou-amba/amba-virt-automation.git automation
-```
-
-The `automation/` directory is gitignored by default and operates as a standalone repository.
 
 ## Building & Targets
 
@@ -179,5 +168,3 @@ Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/`. See [guest-o
 - [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Ambarella drivers in EVE BaseOS.
 - [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — ivshmem support in EVE BaseOS.
 - [tools/README.md](tools/README.md) — Host tools guide and `usb-matrix` USB flash programming reference.
-- [automation/doc/Issues.md](automation/doc/Issues.md) — Known issues, tracking, and upstream integration notes (internal `automation` repository).
-- [automation/doc/PrivateKernelModuleRelease.md](automation/doc/PrivateKernelModuleRelease.md) — Distributing private out-of-tree kernel modules without source (internal `automation` repository).

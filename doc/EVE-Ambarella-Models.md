@@ -28,7 +28,7 @@ Both are ARM64, 4 CPUs, 32G memory, 32G storage, watchdog on, HSM/LEDs off.
 > - **`iav` is a pending adapter.** It advertises `/dev/iav`, but no
 >   `iav.ko` exists in `eve-kernel` yet. It is preserved in the model
 >   for backwards container compatibility; do not assign it to new apps
->   until the vendor BSP driver lands ([CV3_AD655_BSP_Request.md](../automation/doc/CV3_AD655_BSP_Request.md)).
+>   until the vendor BSP driver lands.
 > - **`hwrng` is published.** `/dev/hwrng` is created by the active
 >   `ambarella-rng.c` hardware RNG driver and published in the model.
 >
@@ -53,10 +53,7 @@ All ZedControl wrappers: [ZedControl-scripts.md](ZedControl-scripts.md).
 | `IO_TYPE_CAN` | `PhyIoCAN` | 15 |
 | `IO_TYPE_OTHER` | `PhyIoOther` | 255 |
 
-Those are the types in use. The full 18-value enum, and which
-N1-655 device should map to which, is in
-[automation/doc/EnableAllKernelDeviceDrivers.md](../automation/doc/EnableAllKernelDeviceDrivers.md)
-§8.2–8.3. Prefer a specific type over `IO_TYPE_OTHER` wherever EVE
+Those are the types in use. Prefer a specific type over `IO_TYPE_OTHER` wherever EVE
 has native semantics for it.
 
 `PhyIoOther` uses `phyaddrs.Ifname` as a host chardev. EVE injects that path

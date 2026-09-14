@@ -30,9 +30,7 @@ Ambarella hardware models (`N1-655-Cooper-Devkit` and `N1-655-Cooper-Pro`) publi
 > OCI spec, so assigning `iav` appears to succeed and then the device
 > is simply absent in the container. The `--adapter=iav:iav`
 > arguments below are kept as a record of what was configured; omit
-> them for new instances. Tracked in
-> [automation/doc/EnableAllKernelDeviceDrivers.md](../automation/doc/EnableAllKernelDeviceDrivers.md)
-> §8 and in Design.md Phase 7.
+> them for new instances.
 
 > [!NOTE]
 > When assigning adapters via `zcli edge-app-instance create --adapter=INTF:ADP`, the parameter syntax is `<manifest-intfname>:<model-adapter-name>`. For the GPIO controller, the model adapter name is `gpio0` (`--adapter=gpio0:gpio0`).

@@ -4,14 +4,14 @@ This workspace builds the bootable QNX Neutrino RTOS 8.0 disk image for EVE-OS o
 
 ## Directory Layout
 
-- `build.sh`: Master build automation script. Checks SDP patches, invokes `mkqnximage`, and converts raw disk to compressed QCOW2.
+- `build.sh`: Master build script. Checks SDP patches, invokes `mkqnximage`, and converts raw disk to compressed QCOW2.
 - `local/`: `mkqnximage` workspace configuration:
   - `options`: Build options (AArch64, UEFI boot, GPT disk layout, users, daemons).
   - `snippets/`: Custom startup scripts and files included into the build:
     - `startup_postpci.custom`: Starts `devc-virtio`, attaches root shell to `/dev/vcon1` for direct `tio` console connection.
     - `ifs_start.custom`: UEFI kernel initialization.
     - `system_files.custom` / `ifs_files.custom`: Extra system binaries and libraries.
-- `patches/`: Binary patch automation for QNX SDP 8.0:
+- `patches/`: Binary patch helper for QNX SDP 8.0:
   - `apply_sdp_patches.py`: Automatically inspects and patches the host's QNX SDP 8.0 binaries (`devb-virtio`, `pci_hw-fdt.so.3.0`, and `mkqnximage`) dynamically in-place.
   - `0001-mkqnximage-qemu-random-entropy.patch`: Unified diff for `opt_scripts/qemu`.
 - `output/`: Generated build artifacts (ignored by git):

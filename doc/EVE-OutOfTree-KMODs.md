@@ -2,8 +2,7 @@
 
 - **Date**: 2026-09-11
 - **Platform**: Ambarella N1-655 (`cv3ad655`) / EVE-OS (kernel 6.1.112)
-- **Target Boards**: `n1-655-devkit`, `n1-655-pro`
-- **Related Documents**: [TODO.md](../automation/doc/TODO.md) §5.3, §5.4, [Issues.md](../automation/doc/Issues.md), [Design.md](../automation/doc/Design.md), [EveBootTimeOptimization.md](../automation/doc/EveBootTimeOptimization.md)
+- **Related Documents**: [EVE-BaseOS-AmbarellaDrivers.md](EVE-BaseOS-AmbarellaDrivers.md), [Architecture.md](Architecture.md), [CavalryVirtualization.md](CavalryVirtualization.md)
 
 ---
 
