@@ -31,6 +31,9 @@ make guest-qnx
 
 # Build full bootable QNX 8.0 QCOW2 cloud image
 make guest-qnx-image
+
+# Windows 11 ARM64 HVM cloud image (DISM/bcdboot pipeline, not amba_virt)
+make guest-windows
 ```
 
 ### Clean Targets

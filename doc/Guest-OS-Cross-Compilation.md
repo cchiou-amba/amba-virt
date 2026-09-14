@@ -3,7 +3,7 @@
 - **Status**: Production Architecture & Engineering Guide
 - **Target Platform**: Ambarella N1-655 SoC / EVE-OS Hypervisor
 - **Supported Guests**: Ubuntu 24.04 LTS (AArch64), Alpine Linux 3.20 (AArch64), BlackBerry QNX Neutrino 8.0 (AArch64)
-- **References**: [guest-os/README.md](../guest-os/README.md), [doc/Architecture.md](Architecture.md), [automation/doc/UbuntuEdgeAppHVM.md](../automation/doc/UbuntuEdgeAppHVM.md)
+- **References**: [guest-os/README.md](../guest-os/README.md), [Architecture.md](Architecture.md), [UbuntuEdgeAppHVM.md](../automation/doc/UbuntuEdgeAppHVM.md), [AlpineLinuxEdgeAppHVM.md](../automation/doc/AlpineLinuxEdgeAppHVM.md), [QnxEdgeAppHVM.md](../automation/doc/QnxEdgeAppHVM.md), [WindowsEdgeAppHVM.md](../automation/doc/WindowsEdgeAppHVM.md)
 
 ---
 

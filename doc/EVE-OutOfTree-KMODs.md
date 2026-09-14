@@ -3,7 +3,7 @@
 - **Date**: 2026-09-11
 - **Platform**: Ambarella N1-655 (`cv3ad655`) / EVE-OS (kernel 6.1.112)
 - **Target Boards**: `n1-655-devkit`, `n1-655-pro`
-- **Related Documents**: [TODO.md](TODO.md) §5.3, §5.4, [Issues.md](Issues.md), [Design.md](Design.md), [EveBootTimeOptimization.md](EveBootTimeOptimization.md)
+- **Related Documents**: [TODO.md](../automation/doc/TODO.md) §5.3, §5.4, [Issues.md](../automation/doc/Issues.md), [Design.md](../automation/doc/Design.md), [EveBootTimeOptimization.md](../automation/doc/EveBootTimeOptimization.md)
 
 ---
 

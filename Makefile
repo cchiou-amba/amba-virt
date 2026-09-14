@@ -53,7 +53,7 @@ EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 	drivers $(OOT_DRIVERS) nohyper everything clean distclean \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
 	guest guest-all guest-ubuntu guest-alpine guest-qnx guest-qnx-image \
-	clean-guest distclean-guest
+	guest-windows clean-guest distclean-guest
 
 .DEFAULT_GOAL := all
 
@@ -279,6 +279,9 @@ guest-qnx:
 
 guest-qnx-image:
 	@$(ROOT_DIR)/scripts/build_guest.sh --distro=qnx --qnx-image
+
+guest-windows:
+	@$(ROOT_DIR)/guest-os/windows/windows-build/build.sh
 
 clean-guest:
 	@$(ROOT_DIR)/scripts/build_guest.sh --clean

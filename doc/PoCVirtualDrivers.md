@@ -178,8 +178,8 @@ The test orchestrator (`automation/scripts/run_poc_autotest.py`) executes end-to
 ```mermaid
 flowchart TD
   Agent["Autonomous Agent / CI Orchestrator"]
-  Manifest["automation/test_plan_manifest.json"]
-  Env["automation/test_nodes.env"]
+  Manifest["automation/scripts/test_plan_manifest.json"]
+  Env["automation/scripts/test_nodes.env"]
   Script["automation/scripts/run_poc_autotest.py"]
 
   Agent --> Script
