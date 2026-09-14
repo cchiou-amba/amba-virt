@@ -22,3 +22,6 @@
 	path = boot/u-boot
 	url = https://github.com/cchiou-amba/u-boot
 	branch = eve
+[submodule "eden"]
+	path = eden
+	url = https://github.com/cchiou-amba/eden
