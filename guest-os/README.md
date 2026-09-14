@@ -1,10 +1,6 @@
 # Ambarella HVM Guest OS Cross-Compilation Guide
 
-This directory contains drivers, resource managers, and test client applications for guest operating systems running as Hardware Virtual Machines (HVM) on the **Ambarella N1-655** edge virtualization platform:
-
-1. **Ubuntu 24.04 LTS HVM** (`glibc` 2.39 / Linux kernel 6.8+ AArch64)
-2. **Alpine Linux 3.20 HVM** (`musl` / Linux `linux-virt` 6.6+ AArch64)
-3. **BlackBerry QNX Neutrino 8.0 HVM** (Microkernel RTOS / Userspace Resource Manager)
+This directory contains drivers, resource managers, and test client applications for guest operating systems running as Hardware Virtual Machines (HVM) on the **Ambarella N1-655** edge virtualization platform across supported Linux distributions, RTOS environments, and cloud guest images.
 
 ---
 
@@ -12,7 +8,7 @@ This directory contains drivers, resource managers, and test client applications
 
 ### Build All Guest Artifacts
 ```bash
-# Build Ubuntu, Alpine, and QNX artifacts consecutively (~20s total)
+# Build guest artifacts consecutively (~20s total)
 make guest-all
 # Or alias
 make guest

@@ -33,10 +33,14 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 │
 /persist (ext4 - Read-Write, Persistent across OTA & Reboot)
 ├── modules/                    (Out-of-tree .ko drivers)
-│   ├── cavalry.ko
-│   └── amba_virt.ko
-└── firmware/                   (Proprietary microcode binaries)
-    └── cavalry.bin
+│   ├── amba_virt.ko
+│   ├── amba_pci_platform.ko
+│   ├── dsplog.ko               (optional, built when ambvideo present)
+│   └── cavalry.ko              (optional proprietary module)
+├── firmware/                   (Hardware microcode binaries)
+│   └── cavalry.bin             (optional proprietary microcode)
+└── bin/                        (Runtime loader scripts)
+    └── load-ambarella-drivers.sh
 ```
 
 ---
@@ -123,17 +127,19 @@ Upon restart, `domainmgr` detects the existing `/dev/cavalry` and `/dev/amba_vir
 ## 5. Development & Deployment Workflow
 
 ### Step 1: Build Modules Out-of-Tree on the Host
-Compile the modules against the target kernel build tree (`kernel-out` or target headers):
+Compile the out-of-tree drivers against the extracted kernel headers using the top-level build target:
 
 ```bash
-# Example for amba_virt
-make -C /path/to/kernel-out M=drivers/amba_virt modules
+# Extract headers and signing keys from LinuxKit cache (if not already extracted)
+make eve-kernel-headers
 
-# Example for cavalry_drv
-make -C /path/to/kernel-out M=/path/to/cavalry_drv \
-     AMBARELLA_DRV_CFLAGS="-I/path/to/cavalry_include -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" \
-     modules
+# Compile and cryptographically sign all out-of-tree drivers
+make drivers
+
+# Or use the standalone helper script:
+./scripts/build_kmod_out_of_tree.sh
 ```
+This automatically compiles `amba_virt.ko`, `amba_pci_platform.ko` (and proprietary modules such as `cavalry.ko` when present), signs each binary with `build/certs/signing_key.pem`, and stages them to `build/modules/`.
 
 ### Step 2: Stage Artifacts to the Edge Node
 Create the directory structure on the target node and copy the compiled `.ko` files and firmware:
@@ -212,22 +218,30 @@ Because `/persist` is non-volatile flash, staged files persist through reboots a
 
 ---
 
-## 7. Automated Boot Helper (Optional)
+## 7. Integrated EVE `storage-init` Boot Hook
+In modern EVE BaseOS builds, driver loading at boot time is fully automated via an early hook in EVE's `storage-init` service.
 
-During active development, dynamic loading can be automated using a lightweight boot check script stored in `/persist/bin/load-ambarella-drivers.sh`:
+Upon mounting the `/persist` filesystem on system startup, `storage-init` automatically executes `/persist/bin/load-ambarella-drivers.sh` inside `/hostfs`:
 
 ```bash
 #!/bin/sh
-# /persist/bin/load-ambarella-drivers.sh
+# /persist/bin/load-ambarella-drivers.sh (deployed by scripts/deploy_and_insmod.sh)
 
 set -e
 
+# 1. Configure kernel firmware search path to persistent storage
 if [ -f /persist/firmware/cavalry.bin ]; then
     echo -n "/persist/firmware" > /sys/module/firmware_class/parameters/path
 fi
 
+# 2. Insert out-of-tree hardware drivers if present
 if [ -f /persist/modules/cavalry.ko ] && ! lsmod | grep -q cavalry; then
     insmod /persist/modules/cavalry.ko
+fi
+
+# 3. Insert virtualization transport drivers
+if [ -f /persist/modules/amba_pci_platform.ko ] && ! lsmod | grep -q amba_pci_platform; then
+    insmod /persist/modules/amba_pci_platform.ko
 fi
 
 if [ -f /persist/modules/amba_virt.ko ] && ! lsmod | grep -q amba_virt; then
@@ -235,7 +249,7 @@ if [ -f /persist/modules/amba_virt.ko ] && ! lsmod | grep -q amba_virt; then
 fi
 ```
 
-This ensures that developers can rapidly iterate on kernel drivers without modifying or rebuilding the base EVE operating system.
+Because `storage-init` executes before edge applications and hypervisor domains launch, character devices (`/dev/cavalry`, `/dev/amba_virt`) are created up front, eliminating the container startup race condition. Deploying drivers via `./scripts/deploy_and_insmod.sh <target-node>` automatically installs this loader into `/persist/bin/`.
 
 ---
 

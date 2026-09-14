@@ -208,22 +208,25 @@ Because `CONFIG_MODULE_SIG_FORCE=y` is enforced by the kernel:
 
 ### 4.2 Building Out-of-Tree on the Host
 
-The script `scripts/build_kmod_out_of_tree.sh` automates the compilation and signing:
+The top-level `make drivers` target and `scripts/build_kmod_out_of_tree.sh` automate compilation and cryptographic signing:
 
 ```bash
-# Build both cavalry.ko and amba_virt.ko against active kernel headers
+# Compile and sign all available out-of-tree drivers against extracted headers
+make drivers
+
+# Or run the standalone helper:
 ./scripts/build_kmod_out_of_tree.sh
 ```
 
-Under the hood, this script:
+Under the hood:
 1. Locates the extracted kernel headers (`build/usr/src/linux-headers-...` extracted via `make eve-kernel-headers`).
 2. Invokes kbuild out-of-tree:
    ```bash
    make -C "$KDIR" M="$SRC_DIR" modules ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
    ```
-3. Uses `sign-file` to append a CMS cryptographic signature to the ELF binary:
+3. Uses `sign-file` to append a CMS cryptographic signature to each ELF binary (`amba_virt.ko`, `amba_pci_platform.ko`, and `cavalry.ko` if present):
    ```bash
-   $KDIR/scripts/sign-file sha256 build/certs/signing_key.pem build/certs/signing_key.x509 cavalry.ko
+   $KDIR/scripts/sign-file sha256 build/certs/signing_key.pem build/certs/signing_key.x509 amba_virt.ko
    ```
 4. Verifies the module signature footer with `modinfo`:
    ```text
@@ -277,21 +280,15 @@ In Production Mode, the developer's workstation holds **no private keys**:
 
 If Development Mode modules must be inserted automatically upon board cold boot, EVE-OS can be configured with an onboot hook.
 
-### 6.1 Recommended Approach: `storage-init` Hook
+### 6.1 Implemented `storage-init` Boot Hook
 
 In EVE's startup architecture, `storage-init` is the onboot container responsible for checking, formatting, and mounting `/persist`.
 
-Because `/persist` is mounted before core services launch:
-1. Mount `/persist` on `/persist`.
-2. Check for the existence of `/persist/bin/load-ambarella-drivers.sh`.
-3. Execute the script inside `storage-init` or before `pillar` starts:
-   ```bash
-   if [ -x /persist/bin/load-ambarella-drivers.sh ]; then
-       echo "Loading Ambarella development drivers..."
-       /persist/bin/load-ambarella-drivers.sh
-   fi
-   ```
-4. This ensures `/dev/cavalry` and `/dev/amba_virt` exist **before** `domainmgr` begins starting edge containers, avoiding container startup device assignment race conditions.
+In the Ambarella EVE fork, `pkg/storage-init` is enhanced with a native boot hook:
+1. Mounts `/persist` on `/persist`.
+2. Checks for `/persist/bin/load-ambarella-drivers.sh`.
+3. Automatically executes `/persist/bin/load-ambarella-drivers.sh` inside `/hostfs` before `pillar` starts.
+4. This guarantees `/dev/cavalry` and `/dev/amba_virt` exist **before** `domainmgr` begins starting edge containers, completely preventing device assignment race conditions. Deploying drivers via `./scripts/deploy_and_insmod.sh <node>` automatically installs this script into `/persist/bin/`.
 
 ---
 

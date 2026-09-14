@@ -5,22 +5,27 @@ app types and device assignment. Hardware stays on the hypervisor side.
 KVM guests talk to a privileged container over **virtio-vsock** (control) and
 **ivshmem** (bulk).
 
-Related: [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport),
+Related: [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport and IPC benchmarks),
 [CavalryVirtualization.md](CavalryVirtualization.md) (Cavalry proxy),
 [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (cloud PhyIo models),
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (do not update in place),
+[EVE-BaseOS-AmbarellaDrivers.md](EVE-BaseOS-AmbarellaDrivers.md) (driver layout and storage-init hook),
+[EVE-OutOfTree-KMODs.md](EVE-OutOfTree-KMODs.md) (dual compile modes and signing),
+[EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md) (OTA firmware updates),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
-(the EVE-side change),
+(native KVM ivshmem implementation),
 [EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (scaling past one pair, deferred),
+[Guest-OS-Cross-Compilation.md](Guest-OS-Cross-Compilation.md) (guest toolchain),
 [drivers/amba_virt/](../drivers/amba_virt/README.md) and [guest-os/](../guest-os/).
 
 ## Diagram
 
-Zedcontroller places two apps on the SoC: an Ubuntu **HVM** (KVM guest) and a
-privileged **NOHYPER** container on the EVE host. Guests never own VisORC.
-Control goes over virtio-vsock (CID 2, port 5555). Bulk data stays in ivshmem.
+Zedcontroller places two apps on the SoC: an **HVM** guest (KVM virtual machine)
+and a privileged **NOHYPER** container on the EVE host. Guests never own VisORC
+directly. Control goes over virtio-vsock (CID 2, port 5555). Bulk data stays in
+ivshmem.
 
 ```text
                         +-----------------------+
@@ -122,15 +127,15 @@ VComLink). The container must not connect to a guest CID.
 |---|---|---|
 | EVE-OS / KVM | Hypervisor OS on the SoC | EL2 (host kernel) |
 | **NOHYPER** | Privileged Ubuntu **container** on that host kernel, not a VM | EL2-side process |
-| **HVM** | KVM guest (Ubuntu). Guest kernel / userspace | EL1 / EL0 |
+| **HVM** | KVM guest domain. Guest kernel / userspace | EL1 / EL0 |
 | Secure monitor | Not used by this stack | EL3 |
 
-Do not call the Ubuntu VM EL3. The NOHYPER container does not “run at EL2” as a
+Do not call the guest VM EL3. The NOHYPER container does not “run at EL2” as a
 hypervisor; it runs **on the hypervisor OS**. `insmod` inside a privileged
 NOHYPER app loads a module into the **EVE host kernel**. Build that module
 against `eve-kernel` (or the running EVE `/lib/modules/$(uname -r)/build`).
-Build HVM modules against Ubuntu `linux-headers`. Do not give the guest the
-Ambarella kernel tree.
+Build HVM modules against target guest distribution headers or toolchains.
+Do not give the guest the Ambarella kernel tree.
 
 Zedcontroller assigns devices (PhyIo / assigngrp) to the NOHYPER app so it can
 open `/dev/cavalry` and similar nodes. HVMs must not own VisORC. Cloud model

@@ -2,7 +2,7 @@
 
 - **Status**: Production Architecture & Engineering Guide
 - **Target Platform**: Ambarella N1-655 SoC / EVE-OS Hypervisor
-- **References**: [guest-os/README.md](../guest-os/README.md), [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md)
+- **References**: [guest-os/README.md](../guest-os/README.md), [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md), [guest-os/windows/README.md](../guest-os/windows/README.md)
 
 ---
 
@@ -26,7 +26,7 @@ On the **Ambarella N1-655** architecture, the hypervisor host runs **EVE-OS** (K
 |                v                                v                  |
 |  +--------------------------------------------------------------+  |
 |  |                 KVM HVM Guest VM (AArch64)                   |  |
-|  |  - Distributions: Ubuntu 24.04 / Alpine 3.20 / QNX 8.0        |  |
+|  |  - Supported Guest Operating Systems                         |  |
 |  |  - Kernel Driver: amba_virt (guest).ko / amba-virt-resmgr    |  |
 |  |  - Userspace App: amba-virt-client                           |  |
 |  +--------------------------------------------------------------+  |
@@ -151,5 +151,6 @@ source ~/qnx/qnx800/qnxsdp-env.sh
 | `make guest-alpine` | Build Alpine 3.20 kernel module and client | `build/guest/alpine/` |
 | `make guest-qnx` | Build QNX 8.0 resource manager and client | `build/guest/qnx/` |
 | `make guest-qnx-image` | Generate bootable QNX 8.0 QCOW2 cloud image | `build/guest/qnx/qnx-8.0-arm64-cloudimg.qcow2` |
+| `make guest-windows` | Build Windows 11 ARM64 HVM QCOW2 cloud image | `guest-os/windows/windows-build/output/dist/windows-11-arm64-cloudimg.qcow2` |
 | `make clean-guest` | Clean staged binaries (preserves cached headers) | `build/guest/{ubuntu,alpine,qnx}` |
 | `make distclean-guest` | Remove all guest artifacts and cached headers | `build/guest/` |

@@ -14,9 +14,10 @@ deployment and automated loading on EVE BaseOS.
 | [scripts/](scripts/) | Deployment, OTA update, driver loader, and management scripts |
 | [models/](models/) | Hardware-details JSON for Cooper cloud models |
 | [apps/](apps/) | Edge-app manifests and instance configurations |
+| [eden/](eden/) | LF Edge Eden test harness and client orchestration framework for EVE |
 | [tools/](tools/) | Host flashing and utility binaries (`usb-matrix` for x86 Linux USB programming) |
 | [doc/](doc/) | Architecture, transport, Cavalry virtualization, and EVE guides |
-| [guest-os/](guest-os/) | Guest OS kernel drivers, resource managers, and test clients (Ubuntu, Alpine, QNX) |
+| [guest-os/](guest-os/) | Guest OS kernel drivers, resource managers, test clients, and cloud images |
 
 ## Repository Setup & Submodules
 
@@ -46,10 +47,10 @@ make set-mode-production
 make
 make all
 
-# Build NOHYPER drivers/apps + all guest side (Ubuntu, Alpine, QNX)
+# Build NOHYPER drivers/apps + all guest side artifacts
 make everything
 
-# Build all HVM guest side artifacts (Ubuntu, Alpine, QNX)
+# Build all HVM guest side artifacts
 make guest
 
 # Build all NOHYPER host drivers and apps
@@ -142,9 +143,12 @@ sudo ./tools/bin/usb-matrix -c cv3ad655 -f /path/to/firmware.bin
 
 See [tools/README.md](tools/README.md) for full usage, prerequisites (`libusb-1.0`), and boot mode preparation.
 
-### Guest OS Cross-Compilation (Ubuntu, Alpine, QNX)
+### Guest OS Cross-Compilation & Cloud Images
 
-The repository provides automated cross-compilation for HVM guest operating systems running on Ambarella N1-655. To achieve rapid turnaround (**~7–8s per distribution**), builds execute on the host's native cross-compiler rather than through slow QEMU CPU emulation:
+The repository provides automated cross-compilation and image build pipelines for HVM guest operating systems running on Ambarella N1-655:
+
+- **Linux & QNX Fast Path**: Native host cross-compilation (**~7–8s per distribution**) via the host's native toolchains rather than slow QEMU CPU emulation.
+- **Windows 11 on ARM64**: Automated unattended image assembly using UEFI/ACPI (`AAVMF` / `EDK2`) and paravirtualized VirtIO drivers.
 
 ```bash
 # Recommended host prerequisite (Ubuntu/Debian host):
@@ -155,16 +159,39 @@ make guest-ubuntu     # Ubuntu 24.04: amba_virt.ko + amba-virt-client
 make guest-alpine     # Alpine Linux 3.20: amba_virt.ko + static client
 make guest-qnx        # BlackBerry QNX 8.0: amba-virt-resmgr + client
 make guest-all        # Build all three consecutively (~20s total)
+make guest-qnx-image  # Bootable QNX 8.0 QCOW2 cloud image
+make guest-windows    # Windows 11 ARM64 QCOW2 cloud image
 ```
 
-Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/`. See [guest-os/README.md](guest-os/README.md) and [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md) for architecture, header extraction caching, and benchmarks.
+Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/` and cloud images into `build/guest/images/`. See [guest-os/README.md](guest-os/README.md), [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md), and [guest-os/windows/README.md](guest-os/windows/README.md) for architectures and guides.
 
 ## Documentation
 
-- [doc/Architecture.md](doc/Architecture.md) — EVE architecture and device assignment.
-- [guest-os/README.md](guest-os/README.md) — HVM guest OS cross-compilation developer guide.
-- [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md) — Fast cross-compilation architecture and benchmarks.
-- [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry architecture and memory management.
-- [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Ambarella drivers in EVE BaseOS.
-- [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — ivshmem support in EVE BaseOS.
+### Core Architecture & Transports
+- [doc/Architecture.md](doc/Architecture.md) — System architecture, privilege levels, and device assignment.
+- [doc/PoCVirtualDrivers.md](doc/PoCVirtualDrivers.md) — Virtual driver transport, IPC performance benchmarks, and CppUTest specification.
+- [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — Native `ivshmem-plain` device support in EVE Pillar KVM.
+
+### Hardware Accelerator Virtualization
+- [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry VisORC NPU/VP virtualization, host DMA mapping, and proxy architecture.
+
+### Driver & Firmware Operations
+- [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Persistent storage layout (`/persist`), dynamic firmware loading, and boot hooks.
+- [doc/EVE-OutOfTree-KMODs.md](doc/EVE-OutOfTree-KMODs.md) — Dual compile modes (Development vs. Production) and cryptographic signature enforcement.
+- [doc/EVE-UpdateEVE-Firmware.md](doc/EVE-UpdateEVE-Firmware.md) — BaseOS OTA image upgrade workflows and A/B dual-partition preservation.
+
+### Edge Application Provisioning & Cloud Models
+- [doc/EVE-Ambarella-Models.md](doc/EVE-Ambarella-Models.md) — ZEDEDA Cloud hardware models (`N1-655-Cooper-Pro`, `N1-655-Cooper-Devkit`) and `ioMemberList`.
+- [doc/EVE-EdgeApp-Provision.md](doc/EVE-EdgeApp-Provision.md) — End-to-end deployment guide for paired HVM and NOHYPER edge application instances.
+- [doc/EVE-ReconfigureEdgeApps.md](doc/EVE-ReconfigureEdgeApps.md) — Edge application interface update rules and immutable instance policies.
+- [doc/EVE-Create-NOHYPER-EdgeApp-Instance.md](doc/EVE-Create-NOHYPER-EdgeApp-Instance.md) — Standalone NOHYPER edge application provisioning procedures.
+- [doc/ZedControl-scripts.md](doc/ZedControl-scripts.md) — Catalog of `zcli` orchestration wrappers for cloud orchestration.
+
+### Guest Operating Systems & Scaling
+- [guest-os/README.md](guest-os/README.md) — Guest OS developer guide, cross-compilation pipeline, and cloud images.
+- [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md) — Native host cross-compilation pipeline architecture and benchmarks.
+- [doc/EVE-Multiple-HVM.md](doc/EVE-Multiple-HVM.md) — Multi-HVM scaling architecture, memory overhead modeling, and future design.
+
+### Host Tools
 - [tools/README.md](tools/README.md) — Host tools guide and `usb-matrix` USB flash programming reference.
+

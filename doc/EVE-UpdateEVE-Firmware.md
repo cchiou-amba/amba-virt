@@ -45,7 +45,8 @@ EVE uses an **A/B dual-partitioning scheme** with priority boot support in GRUB 
    - `tools/`: Host flash programming utilities ([`tools/bin/usb-matrix`](../tools/README.md)).
    - `eve/`: LF-Edge EVE system source and tools.
    - `eve-kernel/`: Ambarella Linux kernel and device drivers.
-   - `drivers/`: Out-of-tree Ambarella vendor drivers (`cavalry/`, `amba_virt/`, optional `amba_otp/`, `pwr_gpu/`).
+   - `drivers/`: Out-of-tree Ambarella drivers (`amba_virt/`, `dsplog/`, `pci_platform/`, and optional proprietary modules when present).
+   - `eden/`: LF Edge Eden orchestration framework and test harness.
    - `boot/`: Hardware bootloaders and ARM Trusted Firmware.
 
 2. **ZedControl Access**:

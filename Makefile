@@ -71,7 +71,7 @@ help:
 	@echo
 	@echo "  <empty> / all       Build EVE BaseOS + all NOHYPER drivers and apps (default)"
 	@echo "  everything          Build all NOHYPER drivers/apps + all HVM guests"
-	@echo "  guest               Build all HVM guest side artifacts (Ubuntu, Alpine, QNX)"
+	@echo "  guest               Build all HVM guest side artifacts"
 	@echo "  guest-ubuntu        Build Ubuntu 24.04 HVM driver & client"
 	@echo "  guest-alpine        Build Alpine 3.20 HVM driver & client"
 	@echo "  guest-qnx           Build QNX 8.0 HVM resource manager & client"
