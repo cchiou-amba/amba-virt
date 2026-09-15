@@ -68,7 +68,7 @@ and host `/dev/shm` is ~8.9 GB.
 **Production `cbattr.shmsize`: `1G`.** Power of two. Guest RAM
 (`resources.memory` 1 GiB) is a different number; the window is extra and must
 be charged in full by `ivshmemVMMOverhead` or QEMU is OOM-killed.
-[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
+[EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md)
 §3.4.1. Changing `shmsize` after the instance exists does not resize a live BAR.
 
 ## SSH port-forwards

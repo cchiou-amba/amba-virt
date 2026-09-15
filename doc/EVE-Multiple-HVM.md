@@ -6,8 +6,8 @@ scoped to a single pair. This records what breaks at N > 1 so the topic can be
 picked up later without re-deriving it.
 
 Related: [Architecture.md](Architecture.md) (the N=1 split),
-[PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport),
-[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
+[AmbaVirtServer.md](AmbaVirtServer.md) (transport and daemon architecture),
+[EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md)
 (the EVE-side patch), [drivers/amba_virt/README.md](../drivers/amba_virt/README.md) (the modules discussed
 below).
 

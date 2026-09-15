@@ -169,8 +169,8 @@ Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/` and cloud ima
 
 ### Core Architecture & Transports
 - [doc/Architecture.md](doc/Architecture.md) — System architecture, privilege levels, and device assignment.
-- [doc/PoCVirtualDrivers.md](doc/PoCVirtualDrivers.md) — Virtual driver transport, IPC performance benchmarks, and CppUTest specification.
-- [doc/Native-ivshmem-Support-in-EVE-BaseOS.md](doc/Native-ivshmem-Support-in-EVE-BaseOS.md) — Native `ivshmem-plain` device support in EVE Pillar KVM.
+- [doc/AmbaVirtServer.md](doc/AmbaVirtServer.md) — Host daemon (`amba-virt-server`), transport architecture, IPC benchmarks, and memory layouts.
+- [doc/EVE-Native-ivshmem-Support.md](doc/EVE-Native-ivshmem-Support.md) — Native `ivshmem-plain` device support in EVE Pillar KVM.
 
 ### Hardware Accelerator Virtualization
 - [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry VisORC NPU/VP virtualization, host DMA mapping, and proxy architecture.

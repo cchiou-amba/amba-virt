@@ -5,7 +5,7 @@ app types and device assignment. Hardware stays on the hypervisor side.
 KVM guests talk to a privileged container over **virtio-vsock** (control) and
 **ivshmem** (bulk).
 
-Related: [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport and IPC benchmarks),
+Related: [AmbaVirtServer.md](AmbaVirtServer.md) (amba-virt-server architecture, transport, and IPC benchmarks),
 [CavalryVirtualization.md](CavalryVirtualization.md) (Cavalry proxy),
 [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (cloud PhyIo models),
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
@@ -14,7 +14,7 @@ Related: [PoCVirtualDrivers.md](PoCVirtualDrivers.md) (transport and IPC benchma
 [EVE-OutOfTree-KMODs.md](EVE-OutOfTree-KMODs.md) (dual compile modes and signing),
 [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md) (OTA firmware updates),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
-[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md)
+[EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md)
 (native KVM ivshmem implementation),
 [EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (scaling past one pair, deferred),
 [Guest-OS-Cross-Compilation.md](Guest-OS-Cross-Compilation.md) (guest toolchain),
@@ -170,7 +170,7 @@ cannot be the BAR, and `/dev/shm` is only ~8.9 GB.
 **Production `cbattr.shmsize` is `1G`.** 16M is PoC `ping`/`shm` only. Guest
 RAM is a different number; the window is extra and must be charged in full by
 `ivshmemVMMOverhead`.
-[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md).
+[EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md).
 The `amba_shm` adapter on the HVM is what makes `kvm.go` emit `ivshmem-plain`.
 The container reaches the same DRAM through `/dev/amba_virt`, not by opening
 the backing file (NOHYPER `/dev/shm` is a private tmpfs).

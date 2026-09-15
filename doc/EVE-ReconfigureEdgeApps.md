@@ -19,7 +19,7 @@ ivshmem *is* now driven by an `ioMemberList` entry. `amba_shm` is an
 guest; assigning it is what makes `kvm.go` emit the `ivshmem-plain` device and
 size its backing file. Because the same "already has instances" rule applies to
 `ubuntu_24_04`, that needed a new edge-app too —
-[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md) §6.1.
+[EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md) §6.1.
 
 **Do this instead:** create a **new** edge-app that already lists those
 interfaces, then create a **new** instance and pass `--adapter=` at

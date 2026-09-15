@@ -4,7 +4,7 @@ ZEDEDA Cloud inventory for Ambarella N1-655. **Cloud `ioMemberList` is
 authoritative.** This is not an app-instance or QEMU recipe.
 
 Related: [Architecture.md](Architecture.md) (PhyIo / NOHYPER),
-[PoCVirtualDrivers.md](PoCVirtualDrivers.md) (vsock + ivshmem),
+[AmbaVirtServer.md](AmbaVirtServer.md) (vsock + ivshmem server),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (do not update in place),
@@ -235,5 +235,5 @@ The QEMU device is still emulated; the adapter only requests the window.
 NOHYPER reaches that DRAM through `amba_virt`, not a bind-mount of the
 backing file.
 
-See [drivers/amba_virt/README.md](../drivers/amba_virt/README.md), [PoCVirtualDrivers.md](PoCVirtualDrivers.md),
-[Native-ivshmem-Support-in-EVE-BaseOS.md](Native-ivshmem-Support-in-EVE-BaseOS.md).
+See [drivers/amba_virt/README.md](../drivers/amba_virt/README.md), [AmbaVirtServer.md](AmbaVirtServer.md),
+[EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md).
