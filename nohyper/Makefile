@@ -5,7 +5,7 @@
 
 CROSS_COMPILE ?= aarch64-linux-gnu-
 
-SUBDIRS := cavalry_shm_test
+SUBDIRS := cavalry_shm_test cavalry_native_demo
 
 .PHONY: all clean $(SUBDIRS)
 
