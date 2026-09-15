@@ -316,3 +316,56 @@ In the Ambarella EVE fork, `pkg/storage-init` is enhanced with a native boot hoo
   ```bash
   eve app restart <app-name>
   ```
+
+---
+
+## 8. Host Diagnostic & Validation Modules (`drivers/diag/`)
+
+For hypervisor-level verification and hardware validation on the EVE Dom0 host, standalone diagnostic drivers are maintained under `drivers/diag/`:
+
+```text
+drivers/diag/
+├── Kbuild
+├── Makefile
+├── diag_gdma.c         # Ambarella native GDMA validation suite
+└── diag_stage2_pte.c   # KVM hypervisor Stage-2 PTE introspection tool
+```
+
+### 8.1 Building Diagnostic Modules
+The suite can be built and signed individually or alongside standard out-of-tree drivers:
+```bash
+# Build and sign diag modules into build/modules/
+make diag
+```
+This generates:
+- `build/modules/diag_gdma.ko`
+- `build/modules/diag_stage2_pte.ko`
+
+### 8.2 Native GDMA Hardware Validation (`diag_gdma.ko`)
+Verifies hardware DMA engine operations directly against physical memory (`CAVALRY_MEM_USER` at `0x100000000`):
+```bash
+# Load module and trigger validation
+insmod diag_gdma.ko run=1
+
+# Output in dmesg confirms linear, reverse, pitch, and boundary copy tests:
+# [ 9217.408679] diag_gdma: 10/10 cases passed at USER phys 0x0000000100000000
+rmmod diag_gdma
+```
+
+### 8.3 KVM Stage-2 Hypervisor Page Table Inspector (`diag_stage2_pte.ko`)
+Inspects Stage-2 translation for a guest VM process (QEMU) by dynamically resolving `kvm_pgtable_get_leaf` via kprobe:
+```bash
+# Target the guest QEMU process PID and GPA (e.g., ivshmem BAR2 at 0x8000000000)
+insmod diag_stage2_pte.ko target_pid=<qemu-pid> target_gpa=0x8000000000
+
+# Output in dmesg confirms physical HPA mapping and memory attributes:
+# Stage-2 PTE Dump for PID 31651 GPA 0x8000000000:
+#   Raw PTE:      0x00400001000007d7 (Level 3, VALID)
+#   Target HPA:   0x0100000000
+#   MemAttr[5:2]: 0x5 -> Normal-NC (MT_S2_FWB_NORMAL_NC / MT_S2_NORMAL_NC)
+#   S2AP[7:6]:    0x3 (Read/Write)
+#   SH[9:8]:      0x3 (Inner Shareable)
+#   AF[10]:       1 (Access Flag)
+rmmod diag_stage2_pte
+```
+

@@ -79,7 +79,7 @@
       "assigngrp": "amba_shm",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
-        "shmpath": "/dev/shm/amba-virt",
+        "shmpath": "/dev/amba_virt_shm",
         "shmsize": "1G"
       },
       "usagePolicy": {},

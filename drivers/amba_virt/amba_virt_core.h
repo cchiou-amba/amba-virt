@@ -15,6 +15,8 @@
 #include <linux/net.h>
 #include <linux/wait.h>
 
+struct amba_virt_gdma_copy;
+
 struct amba_virt_dev {
 	struct cdev cdev;
 	struct class *class;
@@ -28,12 +30,15 @@ struct amba_virt_dev {
 	struct file *shm_file;	/* host backing file */
 	const char *shm_path;	/* host: attached lazily, see amba_virt_attach_shm */
 	struct mutex shm_lock;	/* serialises the lazy attach */
+	int (*gdma_copy)(struct amba_virt_dev *dev,
+			 struct amba_virt_gdma_copy *copy);
 
 	struct socket *listen_sock;
 	struct socket *conn_sock;
 	struct mutex sock_lock;
 	struct mutex send_lock;
 	struct mutex recv_lock;
+	struct mutex rpc_lock;
 	struct task_struct *accept_thread;
 
 	unsigned int vsock_cid;
@@ -44,10 +49,15 @@ int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host);
 void amba_virt_core_exit(struct amba_virt_dev *dev);
 
 int amba_virt_attach_shm(struct amba_virt_dev *dev);
+int amba_virt_mmap_window(struct amba_virt_dev *dev,
+			  struct vm_area_struct *vma);
 
 int amba_virt_vsock_listen(struct amba_virt_dev *dev);
 int amba_virt_vsock_connect(struct amba_virt_dev *dev);
 void amba_virt_vsock_disconnect(struct amba_virt_dev *dev);
+int amba_virt_rpc_dev(struct amba_virt_dev *dev, const void *request,
+		      u32 request_len, void *response, u32 *response_len,
+		      unsigned int timeout_ms);
 
 extern const struct file_operations amba_virt_fops;
 

@@ -9,6 +9,7 @@ EVE_KERNEL_DIR ?= $(or $(wildcard $(ROOT_DIR)/eve-kernel),$(wildcard $(ROOT_DIR)
 DRIVERS_DIR    ?= $(or $(wildcard $(ROOT_DIR)/drivers),$(wildcard $(ROOT_DIR)/../drivers))
 BOOT_DIR       ?= $(or $(wildcard $(ROOT_DIR)/boot),$(wildcard $(ROOT_DIR)/../boot))
 EVE_DIR        ?= $(EVE_SYSTEM_DIR)
+EVE_KERNEL_BUILD_USER ?= custom
 
 # Parallel build configuration
 MAKE_JOBS = $(shell echo "$(MAKEFLAGS)" | sed -n -E 's/.*-j([0-9]+).*/\1/p')
@@ -43,7 +44,8 @@ ifeq ($(wildcard $(DRIVERS_DIR)/ambvideo),)
     OOT_DRIVERS := $(filter-out dsplog,$(OOT_DRIVERS))
 endif
 
-CURRENT_KERNEL_TAG = $(shell $(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD) 2>/dev/null)
+CURRENT_KERNEL_TAG = $(shell $(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
+	-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD) 2>/dev/null)
 
 define my-depend
 $(if $(and $(filter eve-kernel,$(1)),$(filter-out $(shell cat $(BUILD_DIR)/.eve-kernel.done 2>/dev/null),$(CURRENT_KERNEL_TAG))),$(1),$(if $(wildcard $(BUILD_DIR)/.$(1).done),,$(if $(and $(filter eve-kernel-headers,$(1)),$(wildcard $(BUILD_DIR)/usr/src/linux-headers-*)),,$(if $(and $(filter eve-kernel-keys,$(1)),$(wildcard $(BUILD_DIR)/certs/signing_key.pem)),,$(1)))))
@@ -54,6 +56,7 @@ EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
 	drivers $(OOT_DRIVERS) nohyper everything clean distclean \
+	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
 	guest guest-all guest-ubuntu guest-alpine guest-qnx guest-qnx-image \
 	guest-windows clean-guest distclean-guest
@@ -78,6 +81,7 @@ help:
 	@echo "  guest-qnx-image     Build bootable QNX 8.0 QCOW2 disk image"
 	@echo "  nohyper             Build all NOHYPER host drivers and apps"
 	@echo "  drivers             Build and sign all detected out-of-tree drivers (dev mode)"
+	@echo "  diag                Build host diagnostic drivers (diag_stage2_pte, diag_gdma)"
 	@echo "  eve                 Build EVE BaseOS live installer image for active mode"
 	@echo "  eve-kernel          Build EVE kernel package via Docker ($(EVE_KERNEL_TARGET))"
 	@echo "  eve-kernel-headers  Extract linux-headers and signing keys to build/"
@@ -142,20 +146,26 @@ mode-prod: set-mode-production
 eve: $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
-		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD)) live && \
+		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
+			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD)) live && \
 		$(EVE_MAKE_DONE)
 
 
 eve-kernel:
 	@mkdir -p $(BUILD_DIR)
-	+$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve $(EVE_KERNEL_TARGET) && \
+	+$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve \
+		BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TARGET) && \
 		rm -f $(BUILD_DIR)/.eve-kernel-headers.done $(BUILD_DIR)/.drivers.done && \
-		$(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD) > $(BUILD_DIR)/.eve-kernel.done
+		$(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
+			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) \
+			$(EVE_KERNEL_TAG_CMD) > $(BUILD_DIR)/.eve-kernel.done
 
 eve-kernel-headers: $(call my-depend,eve-kernel)
 	@mkdir -p $(BUILD_DIR)/certs $(BUILD_DIR)/bin
-	+@$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve linuxkit
-	+@TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory -f Makefile.eve $(EVE_KERNEL_TAG_CMD)) && \
+	+@$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve \
+		BUILD_USER=$(EVE_KERNEL_BUILD_USER) linuxkit
+	+@TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
+		-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD)) && \
 		TAG=$${TAG#docker.io/} && \
 		CLEAN_TAG=$$(echo "$$TAG" | sed 's/-dirty//') && \
 		rm -f $(BUILD_DIR)/kernel-dev.tar && rm -rf $(BUILD_DIR)/usr/src/linux-headers-* && \
@@ -265,6 +275,8 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	else \
 		echo "[skip] $@: driver source not present in tree"; \
 	fi
+
+test-gdma: diag
 
 guest: guest-all
 

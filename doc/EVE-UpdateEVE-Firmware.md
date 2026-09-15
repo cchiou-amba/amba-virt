@@ -286,7 +286,7 @@ If you wish to proceed with the pending update:
      pwr off -y
      pwr on
      ```
-     Wait **5+ minutes** for hardware memory training, early boot, and EVE pillar startup.
+     Wait **90 seconds** for early boot to console and EVE pillar startup (boot-time issues improved).
 
 ### Avoiding `domainmgr` Fatal Panic During Model Updates
 

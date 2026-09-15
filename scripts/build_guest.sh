@@ -93,6 +93,8 @@ do_clean() {
     echo "=== Cleaning guest build artifacts ==="
     rm -rf "${UBUNTU_OUT}" "${ALPINE_OUT}" "${QNX_OUT}"
     make -C "${ROOT_DIR}/guest-os/linux/amba-virt" clean 2>/dev/null || true
+    make -C "${ROOT_DIR}/guest-os/linux/amba-gdma" clean 2>/dev/null || true
+    make -C "${ROOT_DIR}/guest-os/linux/test-gdma" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/client" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/qnx/amba-virt" clean 2>/dev/null || true
     echo "Guest build artifacts cleaned."
@@ -238,6 +240,22 @@ build_ubuntu() {
             clean modules
         cp -vf "${ROOT_DIR}/guest-os/linux/amba-virt/amba_virt.ko" "${UBUNTU_OUT}/"
 
+        log_step "Compiling ambarella-gdma.ko natively..."
+        make -C "${ROOT_DIR}/guest-os/linux/amba-gdma" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/amba-gdma/ambarella-gdma.ko" "${UBUNTU_OUT}/"
+
+        log_step "Compiling testGDMA.ko natively..."
+        make -C "${ROOT_DIR}/guest-os/linux/test-gdma" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/test-gdma/testGDMA.ko" "${UBUNTU_OUT}/"
+
         log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ glibc)..."
         make -C "${ROOT_DIR}/guest-os/client" \
             clean all \
@@ -257,6 +275,14 @@ build_ubuntu() {
                 echo "[*] Compiling amba_virt.ko against ${KDIR}..."
                 make -C /workspace/guest-os/linux/amba-virt KDIR_HVM="${KDIR}" clean modules
                 cp -vf /workspace/guest-os/linux/amba-virt/amba_virt.ko /workspace/build/guest/ubuntu/
+
+                echo "[*] Compiling ambarella-gdma.ko..."
+                make -C /workspace/guest-os/linux/amba-gdma KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/amba-gdma/ambarella-gdma.ko /workspace/build/guest/ubuntu/
+
+                echo "[*] Compiling testGDMA.ko..."
+                make -C /workspace/guest-os/linux/test-gdma KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/test-gdma/testGDMA.ko /workspace/build/guest/ubuntu/
 
                 echo "[*] Compiling amba-virt-client..."
                 make -C /workspace/guest-os/client clean all
@@ -289,6 +315,24 @@ build_alpine() {
             clean modules
         cp -vf "${ROOT_DIR}/guest-os/linux/amba-virt/amba_virt.ko" "${ALPINE_OUT}/"
 
+        log_step "Compiling ambarella-gdma.ko natively..."
+        make -C "${ROOT_DIR}/guest-os/linux/amba-gdma" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_GCC_PLUGINS=n \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/amba-gdma/ambarella-gdma.ko" "${ALPINE_OUT}/"
+
+        log_step "Compiling testGDMA.ko natively..."
+        make -C "${ROOT_DIR}/guest-os/linux/test-gdma" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_GCC_PLUGINS=n \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/test-gdma/testGDMA.ko" "${ALPINE_OUT}/"
+
         log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ -static musl/standalone)..."
         make -C "${ROOT_DIR}/guest-os/client" \
             clean all \
@@ -309,6 +353,14 @@ build_alpine() {
                 echo "[*] Compiling amba_virt.ko against ${KDIR}..."
                 make -C /workspace/guest-os/linux/amba-virt KDIR_HVM="${KDIR}" clean modules
                 cp -vf /workspace/guest-os/linux/amba-virt/amba_virt.ko /workspace/build/guest/alpine/
+
+                echo "[*] Compiling ambarella-gdma.ko..."
+                make -C /workspace/guest-os/linux/amba-gdma KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/amba-gdma/ambarella-gdma.ko /workspace/build/guest/alpine/
+
+                echo "[*] Compiling testGDMA.ko..."
+                make -C /workspace/guest-os/linux/test-gdma KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/test-gdma/testGDMA.ko /workspace/build/guest/alpine/
 
                 echo "[*] Compiling amba-virt-client (static musl)..."
                 make -C /workspace/guest-os/client clean all STATIC=1

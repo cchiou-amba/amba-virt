@@ -85,7 +85,8 @@ static int frame_send(struct socket *sock, const void *payload, u32 len)
 	return send_exact(sock, payload, len);
 }
 
-static int frame_recv(struct socket *sock, void *payload, u32 *len, long timeout_jiffies)
+static int frame_recv(struct socket *sock, void *payload, u32 payload_cap,
+		      u32 *len, long timeout_jiffies)
 {
 	__le32 hdr;
 	u32 n;
@@ -95,7 +96,7 @@ static int frame_recv(struct socket *sock, void *payload, u32 *len, long timeout
 	if (ret)
 		return ret;
 	n = le32_to_cpu(hdr);
-	if (n == 0 || n > AMBA_VIRT_MAX_MSG)
+	if (n == 0 || n > AMBA_VIRT_MAX_MSG || n > payload_cap)
 		return -EPROTO;
 	ret = recv_exact(sock, payload, n, timeout_jiffies);
 	if (ret)
@@ -146,6 +147,51 @@ int amba_virt_vsock_connect(struct amba_virt_dev *dev)
 	sock = NULL;
 out:
 	mutex_unlock(&dev->sock_lock);
+	return ret;
+}
+
+int amba_virt_rpc_dev(struct amba_virt_dev *dev, const void *request,
+		      u32 request_len, void *response, u32 *response_len,
+		      unsigned int timeout_ms)
+{
+	struct socket *sock = NULL;
+	u32 capacity;
+	u32 received = 0;
+	int ret;
+
+	if (!dev || dev->is_host || !request || !response || !response_len)
+		return -EINVAL;
+	if (!request_len || request_len > AMBA_VIRT_MAX_MSG)
+		return -EMSGSIZE;
+	capacity = *response_len;
+	if (!capacity || capacity > AMBA_VIRT_MAX_MSG)
+		return -EMSGSIZE;
+
+	mutex_lock(&dev->rpc_lock);
+	ret = amba_virt_vsock_connect(dev);
+	if (ret)
+		goto out_unlock;
+
+	mutex_lock(&dev->sock_lock);
+	sock = dev->conn_sock;
+	if (!sock) {
+		ret = -ENOTCONN;
+		mutex_unlock(&dev->sock_lock);
+		goto out_unlock;
+	}
+
+	ret = frame_send(sock, request, request_len);
+	if (!ret)
+		ret = frame_recv(sock, response, capacity, &received,
+			msecs_to_jiffies(timeout_ms ? timeout_ms : 5000));
+	mutex_unlock(&dev->sock_lock);
+	if (!ret)
+		*response_len = received;
+
+	if (ret && ret != -EINVAL && ret != -EMSGSIZE)
+		amba_virt_vsock_disconnect(dev);
+out_unlock:
+	mutex_unlock(&dev->rpc_lock);
 	return ret;
 }
 
@@ -275,10 +321,11 @@ out:
 }
 EXPORT_SYMBOL_GPL(amba_virt_attach_shm);
 
-static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
+int amba_virt_mmap_window(struct amba_virt_dev *dev,
+			  struct vm_area_struct *vma)
 {
-	struct amba_virt_dev *dev = filp->private_data;
 	unsigned long size = vma->vm_end - vma->vm_start;
+	u64 offset;
 
 	if (!dev)
 		return -ENODEV;
@@ -286,7 +333,10 @@ static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
 	amba_virt_attach_shm(dev);
 	if (!dev->shm_size)
 		return -ENODEV;
-	if (size > dev->shm_size)
+	if (vma->vm_pgoff > (dev->shm_size >> PAGE_SHIFT))
+		return -EINVAL;
+	offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	if (offset > dev->shm_size || size > dev->shm_size - offset)
 		return -EINVAL;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
@@ -299,16 +349,28 @@ static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
 		if (vma->vm_file)
 			fput(vma->vm_file);
 		vma->vm_file = get_file(dev->shm_file);
-		vma->vm_pgoff = 0;
 		return dev->shm_file->f_op->mmap(dev->shm_file, vma);
 	}
 	if (dev->shm_phys) {
+#ifdef VM_ALLOW_ANY_UNCACHED
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+		vm_flags_set(vma, VM_ALLOW_ANY_UNCACHED);
+#else
+		vma->vm_flags |= VM_ALLOW_ANY_UNCACHED;
+#endif
+#endif
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return remap_pfn_range(vma, vma->vm_start,
-				       PHYS_PFN(dev->shm_phys), size,
+				       PHYS_PFN(dev->shm_phys + offset), size,
 				       vma->vm_page_prot);
 	}
 	return -ENODEV;
+}
+EXPORT_SYMBOL_GPL(amba_virt_mmap_window);
+
+static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	return amba_virt_mmap_window(filp->private_data, vma);
 }
 
 static int amba_virt_open(struct inode *inode, struct file *filp)
@@ -353,8 +415,31 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 			return 0;
 		return amba_virt_vsock_connect(dev);
 
+	case AMBA_VIRT_IOC_HOST_GDMA_COPY:
+	{
+		struct amba_virt_gdma_copy copy;
+
+		if (!dev->is_host)
+			return -EPERM;
+		if (!dev->gdma_copy)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&copy, (void __user *)arg, sizeof(copy)))
+			return -EFAULT;
+		ret = dev->gdma_copy(dev, &copy);
+		copy.status = ret;
+		if (copy_to_user((void __user *)arg, &copy, sizeof(copy)))
+			return -EFAULT;
+		return ret;
+	}
+
 	case AMBA_VIRT_IOC_SEND:
 	case AMBA_VIRT_IOC_RECV:
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		break;
+	case AMBA_VIRT_IOC_RPC:
+		if (dev->is_host)
+			return -EOPNOTSUPP;
 		break;
 	default:
 		return -ENOTTY;
@@ -366,6 +451,21 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 
 	if (copy_from_user(xfer, (void __user *)arg, sizeof(*xfer))) {
 		ret = -EFAULT;
+		goto out_xfer;
+	}
+
+	if (cmd == AMBA_VIRT_IOC_RPC) {
+		u32 response_len = sizeof(xfer->data);
+		unsigned int timeout_ms = xfer->timeout_ms > 0 ?
+			xfer->timeout_ms : 5000;
+
+		ret = amba_virt_rpc_dev(dev, xfer->data, xfer->len,
+					xfer->data, &response_len, timeout_ms);
+		if (ret)
+			goto out_xfer;
+		xfer->len = response_len;
+		if (copy_to_user((void __user *)arg, xfer, sizeof(*xfer)))
+			ret = -EFAULT;
 		goto out_xfer;
 	}
 
@@ -382,22 +482,19 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		}
 		mutex_lock(&dev->sock_lock);
 		sock = dev->conn_sock;
-		if (sock && sock->sk)
-			sock_hold(sock->sk);
-		mutex_unlock(&dev->sock_lock);
 
 		if (!sock) {
+			mutex_unlock(&dev->sock_lock);
 			mutex_unlock(&dev->send_lock);
 			ret = -ENOTCONN;
 			goto out_xfer;
 		}
 
 		ret = frame_send(sock, xfer->data, xfer->len);
+		mutex_unlock(&dev->sock_lock);
 		if (ret < 0 && ret != -EINVAL && ret != -ETIMEDOUT) {
 			amba_virt_vsock_disconnect(dev);
 		}
-		if (sock->sk)
-			sock_put(sock->sk);
 		mutex_unlock(&dev->send_lock);
 		goto out_xfer;
 	}
@@ -426,22 +523,20 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 			mutex_lock(&dev->sock_lock);
 			sock = dev->conn_sock;
 		}
-		if (sock && sock->sk)
-			sock_hold(sock->sk);
-		mutex_unlock(&dev->sock_lock);
 
 		if (!sock) {
+			mutex_unlock(&dev->sock_lock);
 			mutex_unlock(&dev->recv_lock);
 			ret = -ENOTCONN;
 			goto out_xfer;
 		}
 
-		ret = frame_recv(sock, xfer->data, &n, timeout);
+		ret = frame_recv(sock, xfer->data, sizeof(xfer->data), &n,
+				 timeout);
+		mutex_unlock(&dev->sock_lock);
 		if (ret < 0 && ret != -ETIMEDOUT) {
 			amba_virt_vsock_disconnect(dev);
 		}
-		if (sock->sk)
-			sock_put(sock->sk);
 		mutex_unlock(&dev->recv_lock);
 
 		if (ret)
@@ -477,7 +572,7 @@ static char *amba_virt_devnode(const struct device *dev, umode_t *mode)
 #endif
 {
 	if (mode)
-		*mode = 0666;
+		*mode = 0600;
 	return NULL;
 }
 
@@ -491,6 +586,7 @@ int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
 	mutex_init(&dev->sock_lock);
 	mutex_init(&dev->send_lock);
 	mutex_init(&dev->recv_lock);
+	mutex_init(&dev->rpc_lock);
 	mutex_init(&dev->shm_lock);
 
 	ret = alloc_chrdev_region(&dev->devt, 0, 1, AMBA_VIRT_DEV_NAME);
@@ -561,8 +657,6 @@ void amba_virt_core_exit(struct amba_virt_dev *dev)
 		filp_close(dev->shm_file, NULL);
 		dev->shm_file = NULL;
 	}
-	if (dev->shm_iomem) {
-		iounmap(dev->shm_iomem);
-		dev->shm_iomem = NULL;
-	}
+	/* Guest shm_iomem is pcim_iomap-managed by the PCI device. */
+	dev->shm_iomem = NULL;
 }

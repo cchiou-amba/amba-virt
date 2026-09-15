@@ -82,14 +82,14 @@ static int ensure_dev_node(const char *path)
 	}
 
 create_node:
-	if (mknod(path, S_IFCHR | 0666, makedev(major, minor)) < 0) {
+	if (mknod(path, S_IFCHR | 0600, makedev(major, minor)) < 0) {
 		if (errno != EEXIST) {
 			fprintf(stderr, "mknod %s (c %d %d) failed: %s\n",
 				path, major, minor, strerror(errno));
 			return -1;
 		}
 	} else {
-		chmod(path, 0666);
+		chmod(path, 0600);
 		printf("Auto-created device node %s (c %d %d)\n", path, major, minor);
 	}
 
@@ -199,6 +199,31 @@ int main(void)
 			out = (struct amba_virt_msg *)tx.data;
 			out->type = AMBA_VIRT_MSG_BENCH_ACK;
 			tx.len = rx.len;
+		} else if (in->type == AMBA_VIRT_MSG_GDMA_COPY_REQ ||
+			   in->type == AMBA_VIRT_MSG_GDMA_PITCH_REQ) {
+			struct amba_virt_gdma_copy copy;
+			uint32_t response_type =
+				in->type == AMBA_VIRT_MSG_GDMA_PITCH_REQ ?
+				AMBA_VIRT_MSG_GDMA_PITCH_RESP :
+				AMBA_VIRT_MSG_GDMA_COPY_RESP;
+
+			memset(&copy, 0, sizeof(copy));
+			if (rx.len != sizeof(*in) + sizeof(copy)) {
+				fprintf(stderr, "bad GDMA request length %u\n", rx.len);
+				copy.status = -EPROTO;
+			} else {
+				memcpy(&copy, rx.data + sizeof(*in), sizeof(copy));
+				if (ioctl(fd, AMBA_VIRT_IOC_HOST_GDMA_COPY,
+					  &copy) < 0)
+					copy.status = -errno;
+			}
+
+			out = (struct amba_virt_msg *)tx.data;
+			memset(out, 0, sizeof(*out));
+			out->type = response_type;
+			out->seq = in->seq;
+			memcpy(tx.data + sizeof(*out), &copy, sizeof(copy));
+			tx.len = sizeof(*out) + sizeof(copy);
 		} else if (in->type == AMBA_VIRT_MSG_CAVALRY_MOCK_REQ) {
 			struct amba_virt_cavalry_mock *job =
 				(struct amba_virt_cavalry_mock *)(rx.data + sizeof(struct amba_virt_msg));

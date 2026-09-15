@@ -95,11 +95,11 @@ public:
             return -ENODEV;
 
 create_node:
-        if (mknod(path.c_str(), S_IFCHR | 0666, makedev(major, minor)) < 0) {
+        if (mknod(path.c_str(), S_IFCHR | 0600, makedev(major, minor)) < 0) {
             if (errno != EEXIST)
                 return -errno;
         }
-        chmod(path.c_str(), 0666);
+        chmod(path.c_str(), 0600);
         return 0;
 #else
         return -ENOSYS;
@@ -123,11 +123,13 @@ create_node:
     AmbaVirtDevice(AmbaVirtDevice &&other) noexcept
         : _path(std::move(other._path)), _fd(other._fd),
           _shmMap(other._shmMap), _mappedSize(other._mappedSize),
-          _shmSize(other._shmSize), _info(other._info) {
+          _shmSize(other._shmSize), _info(other._info),
+          _pendingRequest(std::move(other._pendingRequest)) {
         other._fd = -1;
         other._shmMap = MAP_FAILED;
         other._mappedSize = 0;
         other._shmSize = 0;
+        other._pendingRequest.clear();
         memset(&other._info, 0, sizeof(other._info));
     }
 
@@ -140,10 +142,12 @@ create_node:
             _mappedSize = other._mappedSize;
             _shmSize = other._shmSize;
             _info = other._info;
+            _pendingRequest = std::move(other._pendingRequest);
             other._fd = -1;
             other._shmMap = MAP_FAILED;
             other._mappedSize = 0;
             other._shmSize = 0;
+            other._pendingRequest.clear();
             memset(&other._info, 0, sizeof(other._info));
         }
         return *this;
@@ -167,6 +171,7 @@ create_node:
 
     void closeDevice() {
         unmapShm();
+        _pendingRequest.clear();
         if (_fd >= 0) {
             close(_fd);
             _fd = -1;
@@ -198,9 +203,18 @@ create_node:
     int send(const void *data, uint32_t len) {
         if (_fd < 0)
             return -EBADF;
-        if (len > AMBA_VIRT_MAX_MSG)
+        if (len == 0 || len > AMBA_VIRT_MAX_MSG)
             return -EINVAL;
 
+#if defined(__linux__)
+        if (!data)
+            return -EINVAL;
+        if (!_pendingRequest.empty())
+            return -EBUSY;
+        const uint8_t *bytes = static_cast<const uint8_t *>(data);
+        _pendingRequest.assign(bytes, bytes + len);
+        return 0;
+#else
         struct amba_virt_xfer xfer;
         memset(&xfer, 0, sizeof(xfer));
         xfer.len = len;
@@ -210,6 +224,7 @@ create_node:
         if (ioctl(_fd, AMBA_VIRT_IOC_SEND, &xfer) < 0)
             return -errno;
         return 0;
+#endif
     }
 
     int recv(void *buf, uint32_t maxLen, uint32_t &receivedLen, int32_t timeoutMs = 5000) {
@@ -220,8 +235,18 @@ create_node:
         memset(&rx, 0, sizeof(rx));
         rx.timeout_ms = timeoutMs;
 
+#if defined(__linux__)
+        if (_pendingRequest.empty())
+            return -ENODATA;
+        rx.len = static_cast<uint32_t>(_pendingRequest.size());
+        memcpy(rx.data, _pendingRequest.data(), rx.len);
+        _pendingRequest.clear();
+        if (ioctl(_fd, AMBA_VIRT_IOC_RPC, &rx) < 0)
+            return -errno;
+#else
         if (ioctl(_fd, AMBA_VIRT_IOC_RECV, &rx) < 0)
             return -errno;
+#endif
 
         receivedLen = rx.len;
         if (buf && rx.len > 0) {
@@ -234,6 +259,11 @@ create_node:
     int flushRx(int maxDrain = 100) {
         if (_fd < 0)
             return -EBADF;
+#if defined(__linux__)
+        (void)maxDrain;
+        _pendingRequest.clear();
+        return 0;
+#else
         struct amba_virt_xfer rx;
         int drained = 0;
         while (drained < maxDrain) {
@@ -245,6 +275,7 @@ create_node:
             drained++;
         }
         return drained;
+#endif
     }
 
     void *mapShm(size_t size = 0, int prot = PROT_READ | PROT_WRITE, int flags = MAP_SHARED, off_t offset = 0) {
@@ -283,6 +314,7 @@ private:
     size_t _mappedSize{0};
     uint32_t _shmSize{0};
     struct amba_virt_info _info{};
+    std::vector<uint8_t> _pendingRequest;
 };
 
 #endif /* AMBA_VIRT_DEV_HXX */

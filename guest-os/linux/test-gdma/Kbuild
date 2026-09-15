@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0
+
+ccflags-y += -I$(src)/../amba-gdma/include
+
+obj-m := testGDMA.o
+testGDMA-y := test_gdma.o

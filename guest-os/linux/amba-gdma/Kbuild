@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
+
+ccflags-y += -I$(src)/include -I$(src)/../amba-virt/include/uapi \
+	-I$(src)/../amba-virt
+
+obj-m := ambarella-gdma.o
+ambarella-gdma-y := amba_gdma_hvm.o
