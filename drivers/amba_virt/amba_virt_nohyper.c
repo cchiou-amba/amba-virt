@@ -11,6 +11,8 @@
 #include <linux/miscdevice.h>
 #include <linux/dma-mapping.h>
 #include <linux/overflow.h>
+#include <linux/fdtable.h>
+#include <linux/uaccess.h>
 
 #include <amba_virt.h>
 #include <soc/ambarella/gdma.h>
@@ -112,10 +114,32 @@ static int amba_virt_shm_mmap(struct file *filp, struct vm_area_struct *vma)
 	return amba_virt_mmap_window(&gdev, vma);
 }
 
+static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	int dmabuf_fd = -1;
+	int ret;
+
+	switch (cmd) {
+	case AMBA_VIRT_IOC_EXPORT_DMABUF:
+		ret = amba_virt_export_dmabuf(&gdev, &dmabuf_fd);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
+			close_fd(dmabuf_fd);
+			return -EFAULT;
+		}
+		return 0;
+	default:
+		return -ENOTTY;
+	}
+}
+
 static const struct file_operations amba_virt_shm_fops = {
 	.owner = THIS_MODULE,
 	.open = amba_virt_shm_open,
 	.mmap = amba_virt_shm_mmap,
+	.unlocked_ioctl = amba_virt_shm_ioctl,
+	.compat_ioctl = amba_virt_shm_ioctl,
 	.llseek = no_llseek,
 };
 

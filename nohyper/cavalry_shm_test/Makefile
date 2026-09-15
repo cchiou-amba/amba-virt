@@ -31,14 +31,22 @@ SRCS = cavalry_shm_dag_test.c \
 
 OBJS = $(SRCS:.c=.o)
 TARGET = cavalry_shm_dag_test
+PROBE_TARGET = cavalry_host_dvi_probe
+
+PROBE_SRCS = cavalry_host_dvi_probe.c \
+	$(MEM_DIR)/src/cavalry_mem.c \
+	$(wildcard $(NNCTRL_DIR)/src/*.c)
 
 .PHONY: all clean
 
-all: $(TARGET)
+all: $(TARGET) $(PROBE_TARGET)
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+$(PROBE_TARGET): $(PROBE_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 clean:
-	rm -f $(TARGET) *.o
+	rm -f $(TARGET) $(PROBE_TARGET) *.o
 

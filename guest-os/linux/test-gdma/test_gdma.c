@@ -17,7 +17,7 @@
 #include <soc/ambarella/gdma.h>
 
 #define TEST_SIZE		4096U
-#define STRESS_LARGE_SIZE	(48U * 1024U * 1024U)
+#define STRESS_LARGE_SIZE	(7U * 1024U * 1024U)
 
 #define PITCH_1080P_WIDTH	1920U
 #define PITCH_1080P_PITCH	2048U
@@ -193,7 +193,7 @@ out:
 	return ret;
 }
 
-/* Phase 4 Stress 1: 48 MiB linear transfer across BAR window */
+/* Phase 4 Stress 1: 7 MiB linear transfer across BAR window */
 static int test_large_transfer(void)
 {
 	void __iomem *src;
@@ -203,11 +203,11 @@ static int test_large_transfer(void)
 	u64 i;
 	int ret = -ENOMEM;
 
-	pr_info("testGDMA: starting 48 MiB transfer test...\n");
+	pr_info("testGDMA: starting 7 MiB transfer test...\n");
 	src = gdma_window_alloc(&src_phys, STRESS_LARGE_SIZE);
 	dst = gdma_window_alloc(&dst_phys, STRESS_LARGE_SIZE);
 	if (!src || !dst) {
-		pr_err("testGDMA: failed to allocate 48 MiB buffers in window\n");
+		pr_err("testGDMA: failed to allocate 7 MiB buffers in window\n");
 		goto out;
 	}
 
@@ -221,7 +221,7 @@ static int test_large_transfer(void)
 	ret = dma_noncache_memcpy((u8 *)(uintptr_t)dst_phys,
 				  (u8 *)(uintptr_t)src_phys, STRESS_LARGE_SIZE);
 	if (ret) {
-		pr_err("testGDMA: 48 MiB dma_noncache_memcpy failed: %d\n", ret);
+		pr_err("testGDMA: 7 MiB dma_noncache_memcpy failed: %d\n", ret);
 		goto out;
 	}
 	mb();
@@ -230,7 +230,7 @@ static int test_large_transfer(void)
 		u64 exp = i ^ 0x5a5a5a5a12345678ULL;
 		u64 act = readq_relaxed(dst + i * sizeof(u64));
 		if (act != exp) {
-			pr_err("testGDMA: 48 MiB mismatch at word %llu (offset 0x%llx): exp 0x%016llx, got 0x%016llx\n",
+			pr_err("testGDMA: 7 MiB mismatch at word %llu (offset 0x%llx): exp 0x%016llx, got 0x%016llx\n",
 			       (unsigned long long)i,
 			       (unsigned long long)(i * sizeof(u64)),
 			       (unsigned long long)exp,
@@ -239,7 +239,7 @@ static int test_large_transfer(void)
 			goto out;
 		}
 	}
-	pr_info("testGDMA: 48 MiB transfer passed (100%% byte identity verified)\n");
+	pr_info("testGDMA: 7 MiB transfer passed (100%% byte identity verified)\n");
 	ret = 0;
 
 out:

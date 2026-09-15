@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+
+ccflags-y += -I$(src)/include -I$(src)/../amba-virt/include/uapi \
+	-I$(src)/../amba-virt \
+	-DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655
+
+obj-m := amba_cavalry.o
+amba_cavalry-y := amba_cavalry_hvm.o

@@ -51,6 +51,7 @@ void amba_virt_core_exit(struct amba_virt_dev *dev);
 int amba_virt_attach_shm(struct amba_virt_dev *dev);
 int amba_virt_mmap_window(struct amba_virt_dev *dev,
 			  struct vm_area_struct *vma);
+int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd);
 
 int amba_virt_vsock_listen(struct amba_virt_dev *dev);
 int amba_virt_vsock_connect(struct amba_virt_dev *dev);

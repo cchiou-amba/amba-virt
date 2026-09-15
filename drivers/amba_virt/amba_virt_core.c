@@ -21,6 +21,9 @@
 #include <linux/socket.h>
 #include <linux/vm_sockets.h>
 #include <net/sock.h>
+#include <linux/dma-buf.h>
+#include <linux/scatterlist.h>
+#include <linux/fdtable.h>
 
 #include <amba_virt.h>
 #include "amba_virt_core.h"
@@ -368,6 +371,105 @@ int amba_virt_mmap_window(struct amba_virt_dev *dev,
 }
 EXPORT_SYMBOL_GPL(amba_virt_mmap_window);
 
+static int amba_virt_dmabuf_attach(struct dma_buf *dmabuf,
+				   struct dma_buf_attachment *attachment)
+{
+	return 0;
+}
+
+static void amba_virt_dmabuf_detach(struct dma_buf *dmabuf,
+				    struct dma_buf_attachment *attachment)
+{
+}
+
+static struct sg_table *amba_virt_dmabuf_map(struct dma_buf_attachment *attachment,
+					     enum dma_data_direction dir)
+{
+	struct amba_virt_dev *dev = attachment->dmabuf->priv;
+	struct sg_table *table;
+	int ret;
+
+	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	if (!table)
+		return ERR_PTR(-ENOMEM);
+
+	ret = sg_alloc_table(table, 1, GFP_KERNEL);
+	if (ret) {
+		kfree(table);
+		return ERR_PTR(ret);
+	}
+
+	if (pfn_valid(PHYS_PFN(dev->shm_phys)))
+		sg_set_page(table->sgl, pfn_to_page(PHYS_PFN(dev->shm_phys)),
+			    dev->shm_size, 0);
+
+	sg_dma_address(table->sgl) = dev->shm_phys;
+	sg_dma_len(table->sgl) = dev->shm_size;
+
+	return table;
+}
+
+static void amba_virt_dmabuf_unmap(struct dma_buf_attachment *attachment,
+				   struct sg_table *table,
+				   enum dma_data_direction dir)
+{
+	sg_free_table(table);
+	kfree(table);
+}
+
+static void amba_virt_dmabuf_release(struct dma_buf *dmabuf)
+{
+}
+
+static int amba_virt_dmabuf_mmap(struct dma_buf *dmabuf,
+				 struct vm_area_struct *vma)
+{
+	struct amba_virt_dev *dev = dmabuf->priv;
+	return amba_virt_mmap_window(dev, vma);
+}
+
+static const struct dma_buf_ops amba_virt_dmabuf_ops = {
+	.attach = amba_virt_dmabuf_attach,
+	.detach = amba_virt_dmabuf_detach,
+	.map_dma_buf = amba_virt_dmabuf_map,
+	.unmap_dma_buf = amba_virt_dmabuf_unmap,
+	.release = amba_virt_dmabuf_release,
+	.mmap = amba_virt_dmabuf_mmap,
+};
+
+int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
+{
+	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
+	struct dma_buf *dmabuf;
+	int fd;
+
+	if (!dev)
+		return -ENODEV;
+
+	amba_virt_attach_shm(dev);
+	if (!dev->shm_phys || !dev->shm_size)
+		return -ENODEV;
+
+	exp_info.ops = &amba_virt_dmabuf_ops;
+	exp_info.size = dev->shm_size;
+	exp_info.flags = O_RDWR | O_CLOEXEC;
+	exp_info.priv = dev;
+
+	dmabuf = dma_buf_export(&exp_info);
+	if (IS_ERR(dmabuf))
+		return PTR_ERR(dmabuf);
+
+	fd = dma_buf_fd(dmabuf, O_CLOEXEC);
+	if (fd < 0) {
+		dma_buf_put(dmabuf);
+		return fd;
+	}
+
+	*out_fd = fd;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(amba_virt_export_dmabuf);
+
 static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	return amba_virt_mmap_window(filp->private_data, vma);
@@ -430,6 +532,22 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		if (copy_to_user((void __user *)arg, &copy, sizeof(copy)))
 			return -EFAULT;
 		return ret;
+	}
+
+	case AMBA_VIRT_IOC_EXPORT_DMABUF:
+	{
+		int dmabuf_fd = -1;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		ret = amba_virt_export_dmabuf(dev, &dmabuf_fd);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
+			close_fd(dmabuf_fd);
+			return -EFAULT;
+		}
+		return 0;
 	}
 
 	case AMBA_VIRT_IOC_SEND:
@@ -660,3 +778,7 @@ void amba_virt_core_exit(struct amba_virt_dev *dev)
 	/* Guest shm_iomem is pcim_iomap-managed by the PCI device. */
 	dev->shm_iomem = NULL;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
+MODULE_IMPORT_NS(DMA_BUF);
+#endif

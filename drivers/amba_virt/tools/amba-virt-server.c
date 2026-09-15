@@ -22,6 +22,7 @@
 
 #include "amba_virt.h"
 #include "amba_virt_test.h"
+#include "cavalry_proxy.h"
 
 static int ensure_dev_node(const char *path)
 {
@@ -135,6 +136,8 @@ int main(void)
 			perror("mmap (continuing without shm)");
 	}
 
+	cavalry_proxy_init(fd, map, info.shm_size);
+
 	for (;;) {
 		struct amba_virt_xfer rx, tx;
 		struct amba_virt_msg *in;
@@ -234,6 +237,23 @@ int main(void)
 			out = (struct amba_virt_msg *)tx.data;
 			out->type = AMBA_VIRT_MSG_CAVALRY_MOCK_RESP;
 			tx.len = rx.len;
+		} else if (in->type == AMBA_VIRT_MSG_CAVALRY_REQ) {
+			struct amba_virt_cavalry_rpc *cav_req;
+			struct amba_virt_cavalry_rpc *cav_resp;
+
+			if (rx.len < sizeof(*in) + sizeof(*cav_req)) {
+				fprintf(stderr, "short cavalry rpc %u (expected >= %zu)\n",
+					rx.len, sizeof(*in) + sizeof(*cav_req));
+				continue;
+			}
+			cav_req = (struct amba_virt_cavalry_rpc *)(rx.data + sizeof(*in));
+			out = (struct amba_virt_msg *)tx.data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_CAVALRY_RESP;
+			out->seq = in->seq;
+			cav_resp = (struct amba_virt_cavalry_rpc *)(tx.data + sizeof(*out));
+			cavalry_proxy_handle_rpc(cav_req, cav_resp, 1 /* default client_cid */);
+			tx.len = sizeof(*out) + sizeof(*cav_resp);
 		} else {
 			fprintf(stderr, "unknown type %u\n", in->type);
 			continue;

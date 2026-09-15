@@ -332,8 +332,11 @@ static int __init amba_gdma_init(void)
 				   &gdma.window_size);
 	if (ret)
 		return ret;
-	if (gdma.window_size > (size_t)U32_MAX + 1ULL)
-		return -E2BIG;
+#define AMBA_GDMA_MAX_WINDOW_SIZE  (31UL * 1024 * 1024)
+
+	if (gdma.window_size > AMBA_GDMA_MAX_WINDOW_SIZE)
+		gdma.window_size = AMBA_GDMA_MAX_WINDOW_SIZE;
+
 	gdma.window_pages = gdma.window_size >> PAGE_SHIFT;
 	gdma.window_bitmap = bitmap_zalloc(gdma.window_pages, GFP_KERNEL);
 	if (!gdma.window_bitmap)

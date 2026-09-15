@@ -55,7 +55,7 @@ V ?= 1
 EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
-	drivers $(OOT_DRIVERS) nohyper everything clean distclean \
+	drivers $(OOT_DRIVERS) nohyper nohyper-apps everything clean distclean \
 	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
 	guest guest-all guest-ubuntu guest-alpine guest-qnx guest-qnx-image \
@@ -65,9 +65,16 @@ EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 
 all: eve $(DRIVER_DEPENDENCY)
 
-nohyper: drivers
+nohyper: drivers nohyper-apps
+
+nohyper-apps:
+	@if [ -f "$(ROOT_DIR)/nohyper/Makefile" ]; then \
+		echo "Building NOHYPER target applications and tests..."; \
+		$(MAKE) -C $(ROOT_DIR)/nohyper CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
+	fi
 
 everything: nohyper guest
+
 
 help:
 	@echo "Ambarella N1-655 EVE-OS Firmware & Driver Build Targets:"
@@ -316,6 +323,9 @@ clean: clean-guest
 			$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools clean 2>/dev/null || true; \
 		fi; \
 	done
+	@if [ -f "$(ROOT_DIR)/nohyper/Makefile" ]; then \
+		$(MAKE) -C $(ROOT_DIR)/nohyper clean 2>/dev/null || true; \
+	fi
 	@echo "Cleaned build artifacts."
 
 distclean: clean distclean-guest

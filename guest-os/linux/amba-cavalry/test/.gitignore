@@ -1,0 +1,8 @@
+cavalry_hvm_inference
+cavalry_hvm_dags_denial
+cavalry_hvm_mt_stress
+cavalry_hvm_victim_loop
+cavalry_hvm_path_b_test
+cavalry_hvm_path_b_security
+cavalry_hvm_test
+*.o
