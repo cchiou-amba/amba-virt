@@ -558,7 +558,7 @@ static int run_mode_bench(const char *model_path, int iterations)
 	       avg_lat_us / 1000.0, (double)min_lat / 1000.0, (double)max_lat / 1000.0);
 	printf(" Latency Percentiles:   p50: %.2f ms | p95: %.2f ms | p99: %.2f ms\n",
 	       (double)p50 / 1000.0, (double)p95 / 1000.0, (double)p99 / 1000.0);
-	printf(" Virtualization Tax:    %.2f ms dispatch overhead over raw silicon (< 0.5 ms)\n",
+	printf(" Dispatch & RPC RTT:    Avg %.2f ms (Wall-Clock RTT minus VisORC Exec Time)\n",
 	       overhead_us / 1000.0);
 	printf("===============================================================================\n");
 
@@ -791,7 +791,10 @@ static int run_mode_compare(const char *model_path, int iterations)
 	printf(" Microcode DVI Location         | Guest-Writable BAR               | Private Host AMA (> 1 GiB) \n");
 	printf(" TOCTOU Corrupt-BAR Immunity    | VULNERABLE (Open)                | IMMUNE (Hardware Proven)   \n");
 	printf(" Tenant Memory Protection       | Unchecked Pointers               | Explicit Handle Validation \n");
-	printf(" Performance Overhead for Sec.  | Baseline Reference               | ZERO (Delta <= 1 tick)     \n");
+	printf(" Silicon Hardware Exec Tax      | Baseline Reference               | ZERO (Delta <= 1 tick)     \n");
+	printf(" Security Dispatch Latency Delta| Baseline Reference               | +%4.2f ms (+%4.1f%% RTT)   \n",
+	       (avg_lat_b - avg_lat_a) / 1000.0,
+	       avg_lat_a > 0 ? ((avg_lat_b - avg_lat_a) / avg_lat_a) * 100.0 : 0.0);
 	printf("===============================================================================================\n");
 
 out_free_m:
