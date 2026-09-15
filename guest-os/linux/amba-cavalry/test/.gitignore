@@ -4,5 +4,6 @@ cavalry_hvm_mt_stress
 cavalry_hvm_victim_loop
 cavalry_hvm_path_b_test
 cavalry_hvm_path_b_security
+cavalry_hvm_demo
 cavalry_hvm_test
 *.o

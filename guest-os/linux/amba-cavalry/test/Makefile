@@ -35,7 +35,8 @@ TARGETS = cavalry_hvm_inference \
 	cavalry_hvm_mt_stress \
 	cavalry_hvm_victim_loop \
 	cavalry_hvm_path_b_test \
-	cavalry_hvm_path_b_security
+	cavalry_hvm_path_b_security \
+	cavalry_hvm_demo
 
 .PHONY: all clean
 
@@ -57,6 +58,9 @@ cavalry_hvm_path_b_test: cavalry_hvm_path_b_test.c $(COMMON_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 cavalry_hvm_path_b_security: cavalry_hvm_path_b_security.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+cavalry_hvm_demo: cavalry_hvm_demo.c $(COMMON_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
