@@ -790,7 +790,7 @@ static int run_mode_compare(const char *model_path, int iterations)
 	       (strcmp(md5_path_a, md5_path_b) == 0) ? "100% BIT-EXACT MATCH (PASS)" : "MISMATCH (FAIL)");
 	printf(" Microcode DVI Location         | Guest-Writable BAR               | Private Host AMA (> 1 GiB) \n");
 	printf(" TOCTOU Corrupt-BAR Immunity    | VULNERABLE (Open)                | IMMUNE (Hardware Proven)   \n");
-	printf(" Tenant Memory Protection       | Unchecked Pointers               | Explicit Handle Validation \n");
+	printf(" Memory Addressing Model        | Guest BAR Offsets                | Validated Session Handles  \n");
 	printf(" Silicon Hardware Exec Tax      | Baseline Reference               | ZERO (Delta <= 1 tick)     \n");
 	printf(" Security Dispatch Latency Delta| Baseline Reference               | +%4.2f ms (+%4.1f%% RTT)   \n",
 	       (avg_lat_b - avg_lat_a) / 1000.0,
