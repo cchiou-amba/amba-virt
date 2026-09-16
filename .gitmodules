@@ -25,3 +25,12 @@
 [submodule "eden"]
 	path = eden
 	url = https://github.com/cchiou-amba/eden
+[submodule "guest-os/userspace/cavalry_mem"]
+	path = guest-os/userspace/cavalry_mem
+	url = https://github.com/cchiou-amba/cavalry_mem
+	branch = eve
+[submodule "guest-os/userspace/nnctrl"]
+	path = guest-os/userspace/nnctrl
+	url = https://github.com/cchiou-amba/nnctrl
+	branch = eve
+
