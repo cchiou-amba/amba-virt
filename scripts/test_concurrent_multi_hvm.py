@@ -4,7 +4,7 @@ test_concurrent_multi_hvm.py
 
 Concurrent Multi-HVM Validation Test for Ambarella N1-655 amba-virt
 Launches concurrent hardware-accelerated deep learning inference across:
-  - Tenant 0: Ubuntu 24.04 HVM (n1-655-devkit-hvm, CID 7, /dev/amba_virt_shm0)
+  - Tenant 0: Ubuntu 24.04 HVM (n1-655-devkit-ubuntu, CID 7, /dev/amba_virt_shm0)
   - Tenant 1: Alpine Linux HVM (n1-655-devkit-alpine, CID 6, /dev/amba_virt_shm1)
 
 Copyright (C) 2026, Ambarella International LLC
@@ -55,7 +55,7 @@ def main():
     ).stdout.strip()
 
     t_launch = time.time()
-    th_ubuntu = threading.Thread(target=run_guest, args=("Tenant-0-Ubuntu", "n1-655-devkit-hvm", UBUNTU_CMD))
+    th_ubuntu = threading.Thread(target=run_guest, args=("Tenant-0-Ubuntu", "n1-655-devkit-ubuntu", UBUNTU_CMD))
     th_alpine = threading.Thread(target=run_guest, args=("Tenant-1-Alpine", "n1-655-devkit-alpine", ALPINE_CMD))
 
     th_ubuntu.start()
