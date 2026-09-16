@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Ambarella Cavalry HVM Guest Inference Test Makefile
+# Ambarella Cavalry HVM Guest Driver Test Suite Makefile
 # Copyright (C) 2026, Ambarella International LLC
 
 CROSS_COMPILE ?= aarch64-linux-gnu-
@@ -29,42 +29,42 @@ LDFLAGS = -lpthread -lm
 COMMON_SRCS = $(MEM_DIR)/src/cavalry_mem.c \
 	$(wildcard $(NNCTRL_DIR)/src/*.c)
 
-TARGETS = cavalry_hvm_inference \
-	cavalry_hvm_dags_denial \
-	cavalry_hvm_mt_stress \
-	cavalry_hvm_victim_loop \
-	cavalry_hvm_path_b_test \
-	cavalry_hvm_path_b_security \
-	cavalry_hvm_demo \
-	cavalry_multi_tenant_test
+TARGETS = test_basic \
+	test_inference \
+	test_path_b \
+	test_path_b_security \
+	test_dags_denial \
+	test_mt_stress \
+	test_victim_loop \
+	test_multi_tenant
 
 .PHONY: all clean
 
 all: $(TARGETS)
 
-cavalry_multi_tenant_test: cavalry_multi_tenant_test.c $(COMMON_SRCS)
+test_basic: test_basic.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_inference: test_inference.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_path_b: test_path_b.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_path_b_security: test_path_b_security.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_dags_denial: test_dags_denial.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_mt_stress: test_mt_stress.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_victim_loop: test_victim_loop.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_multi_tenant: test_multi_tenant.c $(COMMON_SRCS)
 	$(CC) $(CFLAGS) -static -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_inference: cavalry_hvm_inference.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_dags_denial: cavalry_hvm_dags_denial.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_mt_stress: cavalry_hvm_mt_stress.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_victim_loop: cavalry_hvm_victim_loop.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_path_b_test: cavalry_hvm_path_b_test.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_path_b_security: cavalry_hvm_path_b_security.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-cavalry_hvm_demo: cavalry_hvm_demo.c $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS) *.o

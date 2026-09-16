@@ -128,6 +128,7 @@ struct amba_virt_cavalry_rpc {
 #define CAVALRY_SHA256_LEN	32
 
 struct amba_virt_cavalry_port_bind {
+	__u32 dag_idx;
 	__u32 port_idx;
 	__u32 handle_id;
 	__u32 offset;

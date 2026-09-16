@@ -1,0 +1,5 @@
+cavalry_hvm_demo
+cavalry_hvm_demo-musl
+cavalry_hvm_demo-alpine
+*.o
+*.bin

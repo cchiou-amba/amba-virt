@@ -745,7 +745,7 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 	unsigned long host_phys = 0;
 	uint32_t src_base = 0;
 	int slot = -1, i;
-	uint32_t d;
+	uint32_t d, p;
 	int ret = 0;
 
 	tenant = cavalry_proxy_get_tenant(client_cid);
@@ -932,6 +932,15 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		memcpy(dst->reverse_dep_dag_id, src->reverse_dep_dag_id, sizeof(dst->reverse_dep_dag_id));
 		memcpy(dst->port_desc, src->port_desc, sizeof(dst->port_desc));
 		memcpy(dst->poke_desc, src->poke_desc, sizeof(dst->poke_desc));
+
+		for (p = 0; p < dst->port_cnt && p < CAVALRY_MAX_PORTS; p++) {
+			dst->port_dram_addr_fd[p] = CAVALRY_DMABUF_FD_REPRESENT_PHYS;
+			if (dst->port_desc[p].port_dram_addr >= src_base &&
+			    dst->port_desc[p].port_dram_addr < src_base + reg_desc->staging_size) {
+				dst->port_desc[p].port_dram_addr =
+					host_phys + (dst->port_desc[p].port_dram_addr - src_base);
+			}
+		}
 	}
 
 	/* Flush host ARM cache for newly copied DVI / extra_dag */
@@ -1111,13 +1120,29 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 			goto out_free;
 		}
 
+		uint32_t d_idx = bind->dag_idx;
 		uint32_t p_idx = bind->port_idx;
-		for (d = 0; d < mfd->dag_cnt; d++) {
-			if (p_idx < mfd->dag_desc[d].port_cnt) {
-				mfd->dag_desc[d].port_dram_addr_fd[p_idx] = tenant->window_fd;
-				mfd->dag_desc[d].port_desc[p_idx].port_dram_addr =
-					tenant->slice_offset + hend.bar_offset + bind->offset;
-				mfd->dag_desc[d].port_desc[p_idx].port_dram_size = bind->size;
+
+		if (d_idx >= mfd->dag_cnt || p_idx >= mfd->dag_desc[d_idx].port_cnt) {
+			fprintf(stderr, "cavalry_proxy: invalid dag/port index [%u][%u] (dag_cnt=%u)\n",
+				d_idx, p_idx, mfd->dag_cnt);
+			resp->status = -EINVAL;
+			goto out_free;
+		}
+
+		mfd->dag_desc[d_idx].port_dram_addr_fd[p_idx] = tenant->window_fd;
+		mfd->dag_desc[d_idx].port_desc[p_idx].port_dram_addr =
+			tenant->slice_offset + hend.bar_offset + bind->offset;
+		mfd->dag_desc[d_idx].port_desc[p_idx].port_dram_size = bind->size;
+	}
+
+	/* Verify no unclassified port still points to zero fd or untranslated memory */
+	for (d = 0; d < mfd->dag_cnt; d++) {
+		for (p = 0; p < mfd->dag_desc[d].port_cnt; p++) {
+			if (mfd->dag_desc[d].port_dram_addr_fd[p] == 0) {
+				fprintf(stderr, "cavalry_proxy: uninitialized port_dram_addr_fd at DAG %u port %u\n", d, p);
+				resp->status = -EINVAL;
+				goto out_free;
 			}
 		}
 	}

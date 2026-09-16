@@ -1,0 +1,33 @@
+#!/sbin/openrc-run
+# cavalry-hvm-yolo.openrc
+#
+# Ambarella Cavalry HVM YOLOX Detection Service (Alpine OpenRC)
+# Copyright (C) 2026, Ambarella International LLC
+
+name="cavalry-hvm-yolo"
+description="Ambarella Cavalry HVM YOLOX Detection Service"
+command="/usr/local/bin/cavalry_hvm_yolo"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    if [ -f /etc/cavalry-hvm-yolo.env ]; then
+        . /etc/cavalry-hvm-yolo.env
+    fi
+    command_args="--model ${CAVALRY_HVM_YOLO_MODEL:-/opt/cavalry/n1-655_yolox_s_amba_optimized.bin} --bind ${CAVALRY_HVM_YOLO_BIND:-0.0.0.0:8080}"
+
+    # Wait up to 10 seconds for /dev/cavalry to appear
+    local count=0
+    while [ ! -c /dev/cavalry ] && [ $count -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    if [ ! -c /dev/cavalry ]; then
+        eerror "/dev/cavalry device node not found"
+        return 1
+    fi
+}

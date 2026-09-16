@@ -1,0 +1,19 @@
+# cavalry-hvm-yolo.service
+#
+# Ambarella Cavalry HVM YOLOX Detection Service (Ubuntu systemd)
+# Copyright (C) 2026, Ambarella International LLC
+
+[Unit]
+Description=Ambarella Cavalry HVM YOLOX Detection Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/cavalry-hvm-yolo.env
+ExecStart=/usr/local/bin/cavalry_hvm_yolo --model ${CAVALRY_HVM_YOLO_MODEL} --bind ${CAVALRY_HVM_YOLO_BIND}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

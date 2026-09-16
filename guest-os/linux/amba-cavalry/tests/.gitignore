@@ -1,0 +1,9 @@
+test_basic
+test_inference
+test_path_b
+test_path_b_security
+test_dags_denial
+test_mt_stress
+test_victim_loop
+test_multi_tenant
+*.o

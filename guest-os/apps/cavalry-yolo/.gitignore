@@ -1,0 +1,7 @@
+cavalry_hvm_yolo
+cavalry_hvm_yolo-musl
+cavalry_hvm_yolo-alpine
+*.o
+*.bin
+*.jpg
+!assets/dog.jpg
