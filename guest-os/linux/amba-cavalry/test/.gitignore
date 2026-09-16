@@ -6,4 +6,5 @@ cavalry_hvm_path_b_test
 cavalry_hvm_path_b_security
 cavalry_hvm_demo
 cavalry_hvm_test
+cavalry_multi_tenant_test
 *.o

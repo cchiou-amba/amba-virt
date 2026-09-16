@@ -198,12 +198,61 @@ out_unlock:
 	return ret;
 }
 
+static int conn_rx_worker(void *data)
+{
+	struct amba_virt_conn *conn = data;
+	struct amba_virt_dev *dev = conn->dev;
+	u8 *buf;
+	int ret;
+
+	buf = kmalloc(AMBA_VIRT_MAX_MSG, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	pr_info("amba_virt: rx worker started for CID %u\n", conn->cid);
+
+	while (!kthread_should_stop()) {
+		u32 len = 0;
+		ret = frame_recv(conn->sock, buf, AMBA_VIRT_MAX_MSG, &len,
+				 msecs_to_jiffies(500));
+		if (ret == -ETIMEDOUT)
+			continue;
+		if (ret < 0) {
+			if (ret != -ECONNRESET && ret != -EPIPE && !kthread_should_stop())
+				pr_debug("amba_virt: CID %u rx closed (%d)\n", conn->cid, ret);
+			break;
+		}
+		if (len > 0) {
+			struct amba_virt_rx_msg *msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+			if (msg) {
+				unsigned long flags;
+				msg->len = len;
+				msg->client_cid = conn->cid;
+				memcpy(msg->data, buf, len);
+
+				spin_lock_irqsave(&dev->rx_lock, flags);
+				list_add_tail(&msg->list, &dev->rx_queue);
+				spin_unlock_irqrestore(&dev->rx_lock, flags);
+
+				wake_up_interruptible(&dev->rx_wait);
+			}
+		}
+	}
+
+	kfree(buf);
+	pr_info("amba_virt: rx worker exiting for CID %u\n", conn->cid);
+	return 0;
+}
+
 static int accept_one(void *data)
 {
 	struct amba_virt_dev *dev = data;
 
 	while (!kthread_should_stop()) {
 		struct socket *newsock = NULL;
+		struct sockaddr_vm peer_addr = { 0 };
+		unsigned int peer_cid = 0;
+		int slot = -1, i;
 		int ret;
 
 		if (!dev->listen_sock) {
@@ -222,14 +271,59 @@ static int accept_one(void *data)
 			msleep_interruptible(200);
 			continue;
 		}
-		mutex_lock(&dev->sock_lock);
-		if (dev->conn_sock) {
-			kernel_sock_shutdown(dev->conn_sock, SHUT_RDWR);
-			sock_release(dev->conn_sock);
+
+		ret = kernel_getpeername(newsock, (struct sockaddr *)&peer_addr);
+		if (ret >= 0 && peer_addr.svm_family == AF_VSOCK)
+			peer_cid = peer_addr.svm_cid;
+
+		mutex_lock(&dev->conn_lock);
+		if (peer_cid != 0) {
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (dev->conns[i].in_use && dev->conns[i].cid == peer_cid) {
+					slot = i;
+					break;
+				}
+			}
 		}
-		dev->conn_sock = newsock;
-		mutex_unlock(&dev->sock_lock);
-		pr_info("amba_virt: accepted vsock connection\n");
+		if (slot < 0) {
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (!dev->conns[i].in_use) {
+					slot = i;
+					break;
+				}
+			}
+		}
+
+		if (slot < 0) {
+			mutex_unlock(&dev->conn_lock);
+			pr_warn("amba_virt: connection table full, rejecting CID %u\n", peer_cid);
+			kernel_sock_shutdown(newsock, SHUT_RDWR);
+			sock_release(newsock);
+			continue;
+		}
+
+		if (dev->conns[slot].in_use) {
+			if (dev->conns[slot].rx_thread) {
+				kthread_stop(dev->conns[slot].rx_thread);
+				dev->conns[slot].rx_thread = NULL;
+			}
+			if (dev->conns[slot].sock) {
+				kernel_sock_shutdown(dev->conns[slot].sock, SHUT_RDWR);
+				sock_release(dev->conns[slot].sock);
+			}
+		}
+
+		dev->conns[slot].dev = dev;
+		dev->conns[slot].sock = newsock;
+		dev->conns[slot].cid = peer_cid;
+		dev->conns[slot].in_use = true;
+
+		dev->conns[slot].rx_thread = kthread_run(conn_rx_worker, &dev->conns[slot],
+							 "amba_rx_%u", peer_cid);
+		mutex_unlock(&dev->conn_lock);
+
+		pr_info("amba_virt: accepted vsock connection from CID %u on slot %d\n",
+			peer_cid, slot);
 	}
 	return 0;
 }
@@ -382,11 +476,19 @@ static void amba_virt_dmabuf_detach(struct dma_buf *dmabuf,
 {
 }
 
+struct amba_virt_dmabuf_priv {
+	struct amba_virt_dev *dev;
+	size_t offset;
+	size_t size;
+};
+
 static struct sg_table *amba_virt_dmabuf_map(struct dma_buf_attachment *attachment,
 					     enum dma_data_direction dir)
 {
-	struct amba_virt_dev *dev = attachment->dmabuf->priv;
+	struct amba_virt_dmabuf_priv *priv = attachment->dmabuf->priv;
+	struct amba_virt_dev *dev = priv->dev;
 	struct sg_table *table;
+	phys_addr_t phys;
 	int ret;
 
 	table = kzalloc(sizeof(*table), GFP_KERNEL);
@@ -399,12 +501,13 @@ static struct sg_table *amba_virt_dmabuf_map(struct dma_buf_attachment *attachme
 		return ERR_PTR(ret);
 	}
 
-	if (pfn_valid(PHYS_PFN(dev->shm_phys)))
-		sg_set_page(table->sgl, pfn_to_page(PHYS_PFN(dev->shm_phys)),
-			    dev->shm_size, 0);
+	phys = dev->shm_phys + priv->offset;
+	if (pfn_valid(PHYS_PFN(phys)))
+		sg_set_page(table->sgl, pfn_to_page(PHYS_PFN(phys)),
+			    priv->size, 0);
 
-	sg_dma_address(table->sgl) = dev->shm_phys;
-	sg_dma_len(table->sgl) = dev->shm_size;
+	sg_dma_address(table->sgl) = phys;
+	sg_dma_len(table->sgl) = priv->size;
 
 	return table;
 }
@@ -419,13 +522,33 @@ static void amba_virt_dmabuf_unmap(struct dma_buf_attachment *attachment,
 
 static void amba_virt_dmabuf_release(struct dma_buf *dmabuf)
 {
+	kfree(dmabuf->priv);
 }
 
 static int amba_virt_dmabuf_mmap(struct dma_buf *dmabuf,
 				 struct vm_area_struct *vma)
 {
-	struct amba_virt_dev *dev = dmabuf->priv;
-	return amba_virt_mmap_window(dev, vma);
+	struct amba_virt_dmabuf_priv *priv = dmabuf->priv;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	u64 offset;
+
+	if (vma->vm_pgoff > (priv->size >> PAGE_SHIFT))
+		return -EINVAL;
+	offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	if (offset > priv->size || size > priv->size - offset)
+		return -EINVAL;
+
+#ifdef VM_ALLOW_ANY_UNCACHED
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_ALLOW_ANY_UNCACHED);
+#else
+	vma->vm_flags |= VM_ALLOW_ANY_UNCACHED;
+#endif
+#endif
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start,
+			       PHYS_PFN(priv->dev->shm_phys + priv->offset + offset),
+			       size, vma->vm_page_prot);
 }
 
 static const struct dma_buf_ops amba_virt_dmabuf_ops = {
@@ -437,9 +560,14 @@ static const struct dma_buf_ops amba_virt_dmabuf_ops = {
 	.mmap = amba_virt_dmabuf_mmap,
 };
 
-int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
+int amba_virt_export_dmabuf_slice(struct amba_virt_dev *dev,
+				  unsigned int slice_idx,
+				  size_t offset,
+				  size_t size,
+				  int *out_fd)
 {
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
+	struct amba_virt_dmabuf_priv *priv;
 	struct dma_buf *dmabuf;
 	int fd;
 
@@ -450,14 +578,31 @@ int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
 	if (!dev->shm_phys || !dev->shm_size)
 		return -ENODEV;
 
+	if (!size)
+		size = 0x40000000UL; /* Default 1 GiB */
+	if (!offset && slice_idx > 0)
+		offset = (size_t)slice_idx * size;
+
+	if (offset + size > dev->shm_size)
+		return -EINVAL;
+
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+	priv->dev = dev;
+	priv->offset = offset;
+	priv->size = size;
+
 	exp_info.ops = &amba_virt_dmabuf_ops;
-	exp_info.size = dev->shm_size;
+	exp_info.size = size;
 	exp_info.flags = O_RDWR | O_CLOEXEC;
-	exp_info.priv = dev;
+	exp_info.priv = priv;
 
 	dmabuf = dma_buf_export(&exp_info);
-	if (IS_ERR(dmabuf))
+	if (IS_ERR(dmabuf)) {
+		kfree(priv);
 		return PTR_ERR(dmabuf);
+	}
 
 	fd = dma_buf_fd(dmabuf, O_CLOEXEC);
 	if (fd < 0) {
@@ -468,7 +613,50 @@ int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
 	*out_fd = fd;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(amba_virt_export_dmabuf_slice);
+
+int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
+{
+	return amba_virt_export_dmabuf_slice(dev, 0, 0, dev->shm_size, out_fd);
+}
 EXPORT_SYMBOL_GPL(amba_virt_export_dmabuf);
+
+int amba_virt_mmap_slice(struct amba_virt_dev *dev,
+			 struct vm_area_struct *vma,
+			 unsigned int slice_idx)
+{
+	unsigned long size = vma->vm_end - vma->vm_start;
+	size_t slice_size = 0x40000000UL; /* 1 GiB per slice */
+	size_t slice_offset = (size_t)slice_idx * slice_size;
+	u64 offset;
+
+	if (!dev)
+		return -ENODEV;
+	amba_virt_attach_shm(dev);
+	if (!dev->shm_phys)
+		return -ENODEV;
+
+	if (slice_offset >= dev->shm_size)
+		return -EINVAL;
+	if (vma->vm_pgoff > (slice_size >> PAGE_SHIFT))
+		return -EINVAL;
+	offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	if (offset > slice_size || size > slice_size - offset)
+		return -EINVAL;
+
+#ifdef VM_ALLOW_ANY_UNCACHED
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_ALLOW_ANY_UNCACHED);
+#else
+	vma->vm_flags |= VM_ALLOW_ANY_UNCACHED;
+#endif
+#endif
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start,
+			       PHYS_PFN(dev->shm_phys + slice_offset + offset),
+			       size, vma->vm_page_prot);
+}
+EXPORT_SYMBOL_GPL(amba_virt_mmap_slice);
 
 static int amba_virt_mmap(struct file *filp, struct vm_area_struct *vma)
 {
@@ -498,19 +686,32 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 	int ret = 0;
 
 	switch (cmd) {
-	case AMBA_VIRT_IOC_GET_INFO:
+	case AMBA_VIRT_IOC_GET_INFO: {
+		int i, active_conns = 0;
 		memset(&info, 0, sizeof(info));
 		info.proto = AMBA_VIRT_PROTO;
 		info.role = dev->is_host ? AMBA_VIRT_ROLE_HOST : AMBA_VIRT_ROLE_GUEST;
 		info.shm_size = (u32)dev->shm_size;
+		info.shm_phys = (u64)dev->shm_phys;
 		info.vsock_cid = dev->vsock_cid;
 		info.vsock_port = dev->vsock_port;
-		mutex_lock(&dev->sock_lock);
-		info.connected = dev->conn_sock ? 1 : 0;
-		mutex_unlock(&dev->sock_lock);
+		if (dev->is_host) {
+			mutex_lock(&dev->conn_lock);
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (dev->conns[i].in_use)
+					active_conns++;
+			}
+			mutex_unlock(&dev->conn_lock);
+			info.connected = active_conns > 0 ? 1 : 0;
+		} else {
+			mutex_lock(&dev->sock_lock);
+			info.connected = dev->conn_sock ? 1 : 0;
+			mutex_unlock(&dev->sock_lock);
+		}
 		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
+	}
 
 	case AMBA_VIRT_IOC_CONNECT:
 		if (dev->is_host)
@@ -545,6 +746,26 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
 			close_fd(dmabuf_fd);
+			return -EFAULT;
+		}
+		return 0;
+	}
+
+	case AMBA_VIRT_IOC_EXPORT_DMABUF_SLICE:
+	{
+		struct amba_virt_dmabuf_slice slice;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&slice, (void __user *)arg, sizeof(slice)))
+			return -EFAULT;
+		ret = amba_virt_export_dmabuf_slice(dev, slice.slice_idx,
+						    slice.offset, slice.size,
+						    &slice.fd);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &slice, sizeof(slice))) {
+			close_fd(slice.fd);
 			return -EFAULT;
 		}
 		return 0;
@@ -590,78 +811,136 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 	if (cmd == AMBA_VIRT_IOC_SEND) {
 		struct socket *sock = NULL;
 
-		mutex_lock(&dev->send_lock);
 		if (!dev->is_host) {
+			mutex_lock(&dev->send_lock);
 			ret = amba_virt_vsock_connect(dev);
 			if (ret) {
 				mutex_unlock(&dev->send_lock);
 				goto out_xfer;
 			}
+			mutex_lock(&dev->sock_lock);
+			sock = dev->conn_sock;
+			if (!sock) {
+				mutex_unlock(&dev->sock_lock);
+				mutex_unlock(&dev->send_lock);
+				ret = -ENOTCONN;
+				goto out_xfer;
+			}
+			ret = frame_send(sock, xfer->data, xfer->len);
+			mutex_unlock(&dev->sock_lock);
+			if (ret < 0 && ret != -EINVAL && ret != -ETIMEDOUT)
+				amba_virt_vsock_disconnect(dev);
+			mutex_unlock(&dev->send_lock);
+			goto out_xfer;
 		}
-		mutex_lock(&dev->sock_lock);
-		sock = dev->conn_sock;
+
+		/* Host mode: lookup socket by target CID */
+		mutex_lock(&dev->conn_lock);
+		if (xfer->client_cid != 0) {
+			int i;
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (dev->conns[i].in_use && dev->conns[i].cid == xfer->client_cid) {
+					sock = dev->conns[i].sock;
+					break;
+				}
+			}
+		} else {
+			/* Fallback to first available socket */
+			int i;
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (dev->conns[i].in_use && dev->conns[i].sock) {
+					sock = dev->conns[i].sock;
+					break;
+				}
+			}
+		}
 
 		if (!sock) {
-			mutex_unlock(&dev->sock_lock);
-			mutex_unlock(&dev->send_lock);
+			mutex_unlock(&dev->conn_lock);
 			ret = -ENOTCONN;
 			goto out_xfer;
 		}
 
 		ret = frame_send(sock, xfer->data, xfer->len);
-		mutex_unlock(&dev->sock_lock);
-		if (ret < 0 && ret != -EINVAL && ret != -ETIMEDOUT) {
-			amba_virt_vsock_disconnect(dev);
-		}
-		mutex_unlock(&dev->send_lock);
+		mutex_unlock(&dev->conn_lock);
 		goto out_xfer;
 	}
 
 	/* RECV */
 	{
-		struct socket *sock = NULL;
 		long timeout = MAX_SCHEDULE_TIMEOUT;
-		u32 n = 0;
+		struct amba_virt_rx_msg *msg = NULL;
+		unsigned long flags;
 
 		if (xfer->timeout_ms > 0)
 			timeout = msecs_to_jiffies(xfer->timeout_ms);
 		else if (xfer->timeout_ms == 0)
 			timeout = msecs_to_jiffies(5000);
 
-		mutex_lock(&dev->recv_lock);
-		mutex_lock(&dev->sock_lock);
-		sock = dev->conn_sock;
-		if (!sock && !dev->is_host) {
-			mutex_unlock(&dev->sock_lock);
-			ret = amba_virt_vsock_connect(dev);
-			if (ret) {
-				mutex_unlock(&dev->recv_lock);
-				goto out_xfer;
-			}
+		if (!dev->is_host) {
+			/* Guest mode RECV */
+			struct socket *sock = NULL;
+			u32 n = 0;
+
+			mutex_lock(&dev->recv_lock);
 			mutex_lock(&dev->sock_lock);
 			sock = dev->conn_sock;
-		}
-
-		if (!sock) {
+			if (!sock) {
+				mutex_unlock(&dev->sock_lock);
+				ret = amba_virt_vsock_connect(dev);
+				if (ret) {
+					mutex_unlock(&dev->recv_lock);
+					goto out_xfer;
+				}
+				mutex_lock(&dev->sock_lock);
+				sock = dev->conn_sock;
+			}
+			if (!sock) {
+				mutex_unlock(&dev->sock_lock);
+				mutex_unlock(&dev->recv_lock);
+				ret = -ENOTCONN;
+				goto out_xfer;
+			}
+			ret = frame_recv(sock, xfer->data, sizeof(xfer->data), &n, timeout);
 			mutex_unlock(&dev->sock_lock);
+			if (ret < 0 && ret != -ETIMEDOUT)
+				amba_virt_vsock_disconnect(dev);
 			mutex_unlock(&dev->recv_lock);
-			ret = -ENOTCONN;
+			if (!ret) {
+				xfer->len = n;
+				if (copy_to_user((void __user *)arg, xfer, sizeof(*xfer)))
+					ret = -EFAULT;
+			}
 			goto out_xfer;
 		}
 
-		ret = frame_recv(sock, xfer->data, sizeof(xfer->data), &n,
-				 timeout);
-		mutex_unlock(&dev->sock_lock);
-		if (ret < 0 && ret != -ETIMEDOUT) {
-			amba_virt_vsock_disconnect(dev);
-		}
-		mutex_unlock(&dev->recv_lock);
+		/* Host mode RECV from rx_queue */
+		ret = wait_event_interruptible_timeout(dev->rx_wait, ({
+			spin_lock_irqsave(&dev->rx_lock, flags);
+			msg = list_first_entry_or_null(&dev->rx_queue, struct amba_virt_rx_msg, list);
+			if (msg)
+				list_del(&msg->list);
+			spin_unlock_irqrestore(&dev->rx_lock, flags);
+			msg != NULL;
+		}), timeout);
 
-		if (ret)
+		if (ret < 0)
 			goto out_xfer;
-		xfer->len = n;
+		if (!msg) {
+			ret = -ETIMEDOUT;
+			goto out_xfer;
+		}
+
+		xfer->len = msg->len;
+		xfer->client_cid = msg->client_cid;
+		memcpy(xfer->data, msg->data, msg->len);
+		kfree(msg);
+
 		if (copy_to_user((void __user *)arg, xfer, sizeof(*xfer)))
 			ret = -EFAULT;
+		else
+			ret = 0;
+		goto out_xfer;
 	}
 
 out_xfer:
@@ -706,6 +985,11 @@ int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
 	mutex_init(&dev->recv_lock);
 	mutex_init(&dev->rpc_lock);
 	mutex_init(&dev->shm_lock);
+	mutex_init(&dev->conn_lock);
+	spin_lock_init(&dev->rx_lock);
+	init_waitqueue_head(&dev->rx_wait);
+	INIT_LIST_HEAD(&dev->rx_queue);
+	memset(dev->conns, 0, sizeof(dev->conns));
 
 	ret = alloc_chrdev_region(&dev->devt, 0, 1, AMBA_VIRT_DEV_NAME);
 	if (ret)
@@ -748,10 +1032,39 @@ err_unreg:
 
 void amba_virt_core_exit(struct amba_virt_dev *dev)
 {
+	int i;
+	struct amba_virt_rx_msg *msg, *tmp;
+	unsigned long flags;
+
 	if (dev->accept_thread) {
 		kthread_stop(dev->accept_thread);
 		dev->accept_thread = NULL;
 	}
+
+	mutex_lock(&dev->conn_lock);
+	for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+		if (dev->conns[i].in_use) {
+			if (dev->conns[i].rx_thread) {
+				kthread_stop(dev->conns[i].rx_thread);
+				dev->conns[i].rx_thread = NULL;
+			}
+			if (dev->conns[i].sock) {
+				kernel_sock_shutdown(dev->conns[i].sock, SHUT_RDWR);
+				sock_release(dev->conns[i].sock);
+				dev->conns[i].sock = NULL;
+			}
+			dev->conns[i].in_use = false;
+		}
+	}
+	mutex_unlock(&dev->conn_lock);
+
+	spin_lock_irqsave(&dev->rx_lock, flags);
+	list_for_each_entry_safe(msg, tmp, &dev->rx_queue, list) {
+		list_del(&msg->list);
+		kfree(msg);
+	}
+	spin_unlock_irqrestore(&dev->rx_lock, flags);
+
 	amba_virt_vsock_disconnect(dev);
 	if (dev->listen_sock) {
 		kernel_sock_shutdown(dev->listen_sock, SHUT_RDWR);

@@ -64,7 +64,11 @@ if [ -d "$MODULES_DIR" ]; then
             LOADED_LIST="$LOADED_LIST $mod"
             if ! lsmod | grep -q "^${mod} "; then
                 echo "Inserting $ko..."
-                insmod "$ko" 2>&1 || echo "Warning: failed to insert $ko" >&2
+                extra_args=""
+                if [ "$mod" = "cavalry" ]; then
+                    extra_args="virt_user_window_mb=2048"
+                fi
+                insmod "$ko" $extra_args 2>&1 || echo "Warning: failed to insert $ko" >&2
             else
                 echo "Module $mod already loaded"
             fi

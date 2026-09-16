@@ -17,6 +17,23 @@
 
 struct amba_virt_gdma_copy;
 
+#define AMBA_VIRT_MAX_CONNS 8
+
+struct amba_virt_conn {
+	struct amba_virt_dev *dev;
+	struct socket *sock;
+	unsigned int cid;
+	struct task_struct *rx_thread;
+	bool in_use;
+};
+
+struct amba_virt_rx_msg {
+	struct list_head list;
+	u32 len;
+	u32 client_cid;
+	u8  data[AMBA_VIRT_MAX_MSG];
+};
+
 struct amba_virt_dev {
 	struct cdev cdev;
 	struct class *class;
@@ -34,7 +51,14 @@ struct amba_virt_dev {
 			 struct amba_virt_gdma_copy *copy);
 
 	struct socket *listen_sock;
-	struct socket *conn_sock;
+	struct amba_virt_conn conns[AMBA_VIRT_MAX_CONNS];
+	struct mutex conn_lock;
+
+	struct list_head rx_queue;
+	spinlock_t rx_lock;
+	wait_queue_head_t rx_wait;
+
+	struct socket *conn_sock; /* for guest mode */
 	struct mutex sock_lock;
 	struct mutex send_lock;
 	struct mutex recv_lock;
@@ -51,7 +75,15 @@ void amba_virt_core_exit(struct amba_virt_dev *dev);
 int amba_virt_attach_shm(struct amba_virt_dev *dev);
 int amba_virt_mmap_window(struct amba_virt_dev *dev,
 			  struct vm_area_struct *vma);
+int amba_virt_mmap_slice(struct amba_virt_dev *dev,
+			 struct vm_area_struct *vma,
+			 unsigned int slice_idx);
 int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd);
+int amba_virt_export_dmabuf_slice(struct amba_virt_dev *dev,
+				  unsigned int slice_idx,
+				  size_t offset,
+				  size_t size,
+				  int *out_fd);
 
 int amba_virt_vsock_listen(struct amba_virt_dev *dev);
 int amba_virt_vsock_connect(struct amba_virt_dev *dev);

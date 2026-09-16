@@ -105,13 +105,14 @@ static int amba_virt_host_gdma_copy(struct amba_virt_dev *dev,
 
 static int amba_virt_shm_open(struct inode *inode, struct file *filp)
 {
-	i_size_write(file_inode(filp), gdev.shm_size);
+	filp->private_data = (void *)0;
+	i_size_write(file_inode(filp), 0x40000000ULL);
 	return 0;
 }
 
 static int amba_virt_shm_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return amba_virt_mmap_window(&gdev, vma);
+	return amba_virt_mmap_slice(&gdev, vma, 0);
 }
 
 static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -121,7 +122,7 @@ static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 
 	switch (cmd) {
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf(&gdev, &dmabuf_fd);
+		ret = amba_virt_export_dmabuf_slice(&gdev, 0, 0, 0x40000000ULL, &dmabuf_fd);
 		if (ret)
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
@@ -147,6 +148,102 @@ static struct miscdevice amba_virt_shm_miscdev = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = AMBA_VIRT_SHM_DEV_NAME,
 	.fops = &amba_virt_shm_fops,
+	.mode = 0600,
+};
+
+static int amba_virt_shm0_open(struct inode *inode, struct file *filp)
+{
+	filp->private_data = (void *)0;
+	i_size_write(file_inode(filp), 0x40000000ULL);
+	return 0;
+}
+
+static int amba_virt_shm0_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	return amba_virt_mmap_slice(&gdev, vma, 0);
+}
+
+static long amba_virt_shm0_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	int dmabuf_fd = -1;
+	int ret;
+
+	switch (cmd) {
+	case AMBA_VIRT_IOC_EXPORT_DMABUF:
+		ret = amba_virt_export_dmabuf_slice(&gdev, 0, 0, 0x40000000ULL, &dmabuf_fd);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
+			close_fd(dmabuf_fd);
+			return -EFAULT;
+		}
+		return 0;
+	default:
+		return -ENOTTY;
+	}
+}
+
+static const struct file_operations amba_virt_shm0_fops = {
+	.owner = THIS_MODULE,
+	.open = amba_virt_shm0_open,
+	.mmap = amba_virt_shm0_mmap,
+	.unlocked_ioctl = amba_virt_shm0_ioctl,
+	.compat_ioctl = amba_virt_shm0_ioctl,
+	.llseek = no_llseek,
+};
+
+static struct miscdevice amba_virt_shm0_miscdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "amba_virt_shm0",
+	.fops = &amba_virt_shm0_fops,
+	.mode = 0600,
+};
+
+static int amba_virt_shm1_open(struct inode *inode, struct file *filp)
+{
+	filp->private_data = (void *)1;
+	i_size_write(file_inode(filp), 0x40000000ULL);
+	return 0;
+}
+
+static int amba_virt_shm1_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	return amba_virt_mmap_slice(&gdev, vma, 1);
+}
+
+static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	int dmabuf_fd = -1;
+	int ret;
+
+	switch (cmd) {
+	case AMBA_VIRT_IOC_EXPORT_DMABUF:
+		ret = amba_virt_export_dmabuf_slice(&gdev, 1, 0x40000000ULL, 0x40000000ULL, &dmabuf_fd);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
+			close_fd(dmabuf_fd);
+			return -EFAULT;
+		}
+		return 0;
+	default:
+		return -ENOTTY;
+	}
+}
+
+static const struct file_operations amba_virt_shm1_fops = {
+	.owner = THIS_MODULE,
+	.open = amba_virt_shm1_open,
+	.mmap = amba_virt_shm1_mmap,
+	.unlocked_ioctl = amba_virt_shm1_ioctl,
+	.compat_ioctl = amba_virt_shm1_ioctl,
+	.llseek = no_llseek,
+};
+
+static struct miscdevice amba_virt_shm1_miscdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "amba_virt_shm1",
+	.fops = &amba_virt_shm1_fops,
 	.mode = 0600,
 };
 
@@ -216,13 +313,22 @@ static int __init amba_virt_host_init(void)
 			}
 			return ret;
 		}
+		ret = misc_register(&amba_virt_shm0_miscdev);
+		if (ret)
+			pr_warn("amba_virt: register shm0 failed %d (continuing)\n", ret);
+		ret = misc_register(&amba_virt_shm1_miscdev);
+		if (ret)
+			pr_warn("amba_virt: register shm1 failed %d (continuing)\n", ret);
 	}
 
 	ret = amba_virt_vsock_listen(&gdev);
 	if (ret) {
 		pr_err("amba_virt: vsock listen failed %d\n", ret);
-		if (gdev.shm_phys)
+		if (gdev.shm_phys) {
+			misc_deregister(&amba_virt_shm1_miscdev);
+			misc_deregister(&amba_virt_shm0_miscdev);
 			misc_deregister(&amba_virt_shm_miscdev);
+		}
 		amba_virt_core_exit(&gdev);
 		if (cavalry_window_held) {
 			symbol_put(cavalry_user_window_get);
@@ -251,8 +357,11 @@ static int __init amba_virt_host_init(void)
 
 static void __exit amba_virt_host_exit(void)
 {
-	if (gdev.shm_phys)
+	if (gdev.shm_phys) {
+		misc_deregister(&amba_virt_shm1_miscdev);
+		misc_deregister(&amba_virt_shm0_miscdev);
 		misc_deregister(&amba_virt_shm_miscdev);
+	}
 	amba_virt_core_exit(&gdev);
 	if (cavalry_window_held)
 		symbol_put(cavalry_user_window_get);

@@ -39,7 +39,7 @@ Host driver: **cavalry_v3** (`compatible = "ambarella,sub-scheduler"`).
 |              v               |                               |      /                     \      |
 |   +----------------------+   |                               |     v                       v     |
 |   | /dev/cavalry frontend|   |                               | +---------------+   +-----------+ |
-|   | (amba_cavalry.ko)    |   |   vsock (CID 2 : 5555/5556)   | | amba_virt.ko  |   |cavalry.ko | |
+|   | (amba_cavalry.ko)    |   |   vsock (CID 2 : Port 5555)   | | amba_virt.ko  |   |cavalry.ko | |
 |   +----------------------+   |------------------------------>| +---------------+   |/dev/cav.  | |
 |              |               |                               |         ^           +-----------+ |
 |              v               |                               |         |                 |       |
@@ -276,7 +276,73 @@ Path A vs. Path B is strictly an architectural property of **Cavalry (VisORC NPU
 
 ---
 
-## 7. Multi-Tenant Memory Sizing Guidelines
+## 7. Multi-Tenant Architecture & Memory Sizing Guidelines
+
+### 7.1 Multi-Tenant Defense-in-Depth Architecture
+
+```text
++-------------------------------------------------------------------------------------------------------+
+|                                           ARM64 Silicon / Dom0                                        |
+|                                                                                                       |
+|  Total Physical CVMEM Carveout (Dynamically Discovered base `shm_phys` and length)                    |
+|  +-----------------------------+-----------------------------+--------------------------------------+ |
+|  | Tenant 0 Slice (1 GiB)      | Tenant 1 Slice (1 GiB)      | Host-Private AMA Pool (Remaining)    | |
+|  | [shm_phys + 0, + 1G)        | [shm_phys + 1G, + 2G)       | [shm_phys + 2G, carveout_end)        | |
+|  +-----------------------------+-----------------------------+--------------------------------------+ |
+|               |                             |                                    ^                    |
+|               v                             v                                    |                    |
+|     /dev/amba_virt_shm0           /dev/amba_virt_shm1                            |                    |
+|  (Host amba_virt.ko Minor 0)   (Host amba_virt.ko Minor 1)                       |                    |
+|               |                             |                                    |                    |
++---------------|-----------------------------|------------------------------------|--------------------+
+                |                             |                                    |
+  Stage-2 MMU   | Stage-2 MMU                 | (Hidden behind Stage-2 MMU)        |
+                v                             v                                    |
++-----------------------------+ +-----------------------------+                    |
+|   Ubuntu 24.04 HVM (EL1)    | |    Alpine Linux HVM (EL1)   |                    |
+|                             | |                             |                    |
+|  ivshmem BAR (1 GiB @ 1110) | |  ivshmem BAR (1 GiB @ 1110) |                    |
+|  - [0, 31 MB): GDMA Pool    | |  - [0, 31 MB): GDMA Pool    |                    |
+|  - [31, 32 MB): RPC Arena   | |  - [31, 32 MB): RPC Arena   |                    |
+|  - [32 MB, 1GB): Tensor I/O | |  - [32 MB, 1GB): Tensor I/O |                    |
+|                             | |                             |                    |
+|  libnnctrl.so (Path B only) | |  libnnctrl.so (Path B only) |                    |
+|  - Detects HVM on init      | |  - Detects HVM on init      |                    |
+|  - Opaque Handle I/O        | |  - Opaque Handle I/O        |                    |
+|  - Mutex: rpc_arena_mutex   | |  - Mutex: rpc_arena_mutex   |                    |
+|                             | |                             |                    |
+|  Frontend Drivers (Linux):  | |  Frontend Drivers (musl):   |                    |
+|  - amba_virt.ko             | |  - amba_virt.ko             |                    |
+|  - amba_cavalry.ko          | |  - amba_cavalry.ko          |                    |
+|  - amba_gdma.ko             | |  - amba_gdma.ko             |                    |
++-----------------------------+ +-----------------------------+                    |
+                \                             /                                    |
+                 \-- Connect (Host CID 2, Port 5555)                               |
+                  \                         /                                      |
+                   v                       v                                       |
++----------------------------------------------------------------------------------|--------------------+
+| amba-virt-server (Host Daemon in NOHYPER)                                        |                    |
+|   - Unified Service Listener: Port 5555 (Standard well-known port for ALL guests)|                    |
+|   - Authenticated Peer CID Demux: getpeername() -> caller CID                     |                    |
+|   - Dynamic CID -> Tenant Context Lookup: `tenant_ctx[t_idx]`                     |                    |
+|       * Tenant 0: HPA Base = shm_phys + 0,  Map = shm0_map, Arena = [31,32MB)     |                    |
+|       * Tenant 1: HPA Base = shm_phys + 1G, Map = shm1_map, Arena = [31,32MB)     |                    |
+|   - Path B Enforcement Policy: configurable via `--enforce-path-b` flag           |                    |
+|   - Model Registry in Host AMA: Deep-copies DVI into Host AMA Pool --------------+                    |
+|   - Opaque Handle Translation: Maps handle_id to Tenant.phys_base + offset                            |
+|   - Hardware Serialization:                                                                           |
+|       * visorc_hw_mutex: serializes ioctls to physical /dev/cavalry                                   |
+|       * gdma_hw_mutex: serializes ioctls to physical /dev/gdma                                       |
++-------------------------------------------------------------------------------------------------------+
+                                                 |
+                                                 v
++-------------------------------------------------------------------------------------------------------+
+| Ambarella N1-655 Silicon Engines (VisORC NPU Core & GDMA Engine)                                      |
+|   - Executes Registered Job from Host AMA -> Hardware IRQ -> Unlocks visorc_hw_mutex              |
++-------------------------------------------------------------------------------------------------------+
+```
+
+### 7.2 Physical Memory Layout & Carveout Breakdown
 
 The 12 GB physical CVMEM pool (`[0x100000000 - 0x3ffffffff]`) must be sized based on the active execution path:
 
@@ -296,7 +362,7 @@ The 12 GB physical CVMEM pool (`[0x100000000 - 0x3ffffffff]`) must be sized base
 
 ## 8. Wire Protocol & Session Management
 
-Control messages travel over framed virtio-vsock (Port 5555 for Tenant 0, Port 5556 for Tenant 1).
+Control messages travel over framed virtio-vsock connecting to Host CID 2 on standard service Port 5555 (with host demuxing tenants via authenticated `peer_addr.svm_cid`).
 
 ### RPC Framing (`amba_virt_cavalry_rpc`)
 Compact 40-byte control structure:

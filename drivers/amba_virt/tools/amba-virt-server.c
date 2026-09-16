@@ -9,6 +9,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +25,23 @@
 #include "amba_virt.h"
 #include "amba_virt_test.h"
 #include "cavalry_proxy.h"
+
+static pthread_mutex_t g_gdma_hw_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define MAX_CLI_TENANTS 8
+struct cli_tenant {
+	uint32_t cid;
+	uint32_t tenant_idx;
+};
+
+static void usage(const char *prog)
+{
+	fprintf(stderr, "Usage: %s [options]\n", prog);
+	fprintf(stderr, "Options:\n");
+	fprintf(stderr, "  -b, --enforce-path-b        Reject legacy Path A (VCAV_OP_RUN_DAGS) with -EPERM\n");
+	fprintf(stderr, "  -t, --tenant <cid>:<idx>    Pre-register tenant slice for vsock CID to index\n");
+	fprintf(stderr, "  -h, --help                  Show this help message\n");
+}
 
 static int ensure_dev_node(const char *path)
 {
@@ -106,15 +125,57 @@ static int xioctl(int fd, unsigned long req, void *arg, const char *what)
 	return ret;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	struct amba_virt_info info;
 	unsigned char *map = MAP_FAILED;
 	uint64_t msg_count = 0;
 	int fd;
+	int enforce_path_b = 0;
+	struct cli_tenant cli_tenants[MAX_CLI_TENANTS];
+	int num_cli_tenants = 0;
+	int opt;
+
+	static struct option long_options[] = {
+		{"enforce-path-b", no_argument,       0, 'b'},
+		{"tenant",         required_argument, 0, 't'},
+		{"help",           no_argument,       0, 'h'},
+		{0, 0, 0, 0}
+	};
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
+
+	while ((opt = getopt_long(argc, argv, "bt:h", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 'b':
+			enforce_path_b = 1;
+			break;
+		case 't': {
+			uint32_t cid = 0, idx = 0;
+			if (sscanf(optarg, "%u:%u", &cid, &idx) == 2 ||
+			    sscanf(optarg, "%u=%u", &idx, &cid) == 2) {
+				if (num_cli_tenants < MAX_CLI_TENANTS) {
+					cli_tenants[num_cli_tenants].cid = cid;
+					cli_tenants[num_cli_tenants].tenant_idx = idx;
+					num_cli_tenants++;
+				} else {
+					fprintf(stderr, "Too many static tenants (max %d)\n", MAX_CLI_TENANTS);
+				}
+			} else {
+				fprintf(stderr, "Invalid tenant format '%s' (expected <cid>:<tenant_idx>)\n", optarg);
+				return 1;
+			}
+			break;
+		}
+		case 'h':
+			usage(argv[0]);
+			return 0;
+		default:
+			usage(argv[0]);
+			return 1;
+		}
+	}
 
 	if (ensure_dev_node(AMBA_VIRT_DEV_PATH) < 0)
 		return 1;
@@ -126,8 +187,8 @@ int main(void)
 	}
 	if (xioctl(fd, AMBA_VIRT_IOC_GET_INFO, &info, "GET_INFO") < 0)
 		return 1;
-	printf("amba-virt-server proto=%u role=%u shm=%u port=%u (listening)\n",
-	       info.proto, info.role, info.shm_size, info.vsock_port);
+	printf("amba-virt-server proto=%u role=%u shm=%u phys=0x%lx port=%u (listening)\n",
+	       info.proto, info.role, info.shm_size, (unsigned long)info.shm_phys, info.vsock_port);
 
 	if (info.shm_size) {
 		map = mmap(NULL, info.shm_size, PROT_READ | PROT_WRITE,
@@ -136,7 +197,26 @@ int main(void)
 			perror("mmap (continuing without shm)");
 	}
 
-	cavalry_proxy_init(fd, map, info.shm_size);
+	if (cavalry_proxy_init(fd, map, info.shm_size, info.shm_phys) < 0) {
+		fprintf(stderr, "Failed to initialize cavalry proxy\n");
+		return 1;
+	}
+
+	if (enforce_path_b) {
+		cavalry_proxy_set_enforce_path_b(1);
+		printf("amba-virt-server: Enforcing Path-B-only policy (legacy Path A disabled)\n");
+	}
+
+	for (int i = 0; i < num_cli_tenants; i++) {
+		uint32_t cid = cli_tenants[i].cid;
+		uint32_t idx = cli_tenants[i].tenant_idx;
+		uint32_t slice_sz = 0x40000000U; /* 1 GiB */
+		uint32_t slice_off = idx * slice_sz;
+		unsigned char *submap = (map != MAP_FAILED && slice_off < info.shm_size) ?
+					(map + slice_off) : MAP_FAILED;
+		cavalry_proxy_register_tenant(cid, idx, -1, submap, slice_sz,
+					      info.shm_phys + slice_off, slice_off);
+	}
 
 	for (;;) {
 		struct amba_virt_xfer rx, tx;
@@ -161,6 +241,7 @@ int main(void)
 
 		in = (struct amba_virt_msg *)rx.data;
 		memset(&tx, 0, sizeof(tx));
+		tx.client_cid = rx.client_cid;
 		msg_count++;
 
 		if (in->type == AMBA_VIRT_MSG_PING) {
@@ -171,7 +252,7 @@ int main(void)
 			out->shm_len = in->shm_len;
 			tx.len = sizeof(*out);
 			if (msg_count <= 5 || (msg_count % 1000 == 0))
-				printf("PING seq=%u -> PONG\n", in->seq);
+				printf("PING seq=%u (from cid=%u) -> PONG\n", in->seq, rx.client_cid);
 		} else if (in->type == AMBA_VIRT_MSG_SHM_NOTIFY) {
 			out = (struct amba_virt_msg *)tx.data;
 			out->type = AMBA_VIRT_MSG_SHM_ACK;
@@ -186,8 +267,8 @@ int main(void)
 				volatile uint8_t *p = map + in->shm_off;
 				uint8_t first_byte = p[0];
 				if (msg_count <= 5 || (msg_count % 1000 == 0)) {
-					printf("SHM_NOTIFY seq=%u off=%u len=%u first=%u\n",
-					       in->seq, in->shm_off, in->shm_len, first_byte);
+					printf("SHM_NOTIFY seq=%u cid=%u off=%u len=%u first=%u\n",
+					       in->seq, rx.client_cid, in->shm_off, in->shm_len, first_byte);
 				}
 			}
 		} else if (in->type == AMBA_VIRT_MSG_ECHO_REQ) {
@@ -205,6 +286,7 @@ int main(void)
 		} else if (in->type == AMBA_VIRT_MSG_GDMA_COPY_REQ ||
 			   in->type == AMBA_VIRT_MSG_GDMA_PITCH_REQ) {
 			struct amba_virt_gdma_copy copy;
+			struct cavalry_tenant_ctx *tenant;
 			uint32_t response_type =
 				in->type == AMBA_VIRT_MSG_GDMA_PITCH_REQ ?
 				AMBA_VIRT_MSG_GDMA_PITCH_RESP :
@@ -216,9 +298,44 @@ int main(void)
 				copy.status = -EPROTO;
 			} else {
 				memcpy(&copy, rx.data + sizeof(*in), sizeof(copy));
-				if (ioctl(fd, AMBA_VIRT_IOC_HOST_GDMA_COPY,
-					  &copy) < 0)
-					copy.status = -errno;
+				tenant = cavalry_proxy_get_tenant(rx.client_cid);
+				if (!tenant) {
+					fprintf(stderr, "GDMA: unknown tenant for cid=%u\n", rx.client_cid);
+					copy.status = -EACCES;
+				} else {
+					uint32_t slice_off = tenant->slice_offset;
+					int range_err = 0;
+
+					if (copy.flags & AMBA_VIRT_GDMA_F_PITCH) {
+						uint64_t src_end = (uint64_t)copy.src_off +
+							(uint64_t)(copy.height ? copy.height - 1 : 0) * copy.src_pitch + copy.width;
+						uint64_t dst_end = (uint64_t)copy.dst_off +
+							(uint64_t)(copy.height ? copy.height - 1 : 0) * copy.dst_pitch + copy.width;
+						if (src_end > tenant->shm_size || dst_end > tenant->shm_size)
+							range_err = 1;
+					} else {
+						if ((uint64_t)copy.src_off + copy.len > tenant->shm_size ||
+						    (uint64_t)copy.dst_off + copy.len > tenant->shm_size)
+							range_err = 1;
+					}
+
+					if (range_err) {
+						fprintf(stderr, "GDMA bounds violation: cid=%u src=0x%x dst=0x%x len=0x%x > 0x%zx\n",
+							rx.client_cid, copy.src_off, copy.dst_off, copy.len, tenant->shm_size);
+						copy.status = -ERANGE;
+					} else {
+						copy.src_off += slice_off;
+						copy.dst_off += slice_off;
+
+						pthread_mutex_lock(&g_gdma_hw_mutex);
+						if (ioctl(fd, AMBA_VIRT_IOC_HOST_GDMA_COPY, &copy) < 0)
+							copy.status = -errno;
+						pthread_mutex_unlock(&g_gdma_hw_mutex);
+
+						copy.src_off -= slice_off;
+						copy.dst_off -= slice_off;
+					}
+				}
 			}
 
 			out = (struct amba_virt_msg *)tx.data;
@@ -252,7 +369,7 @@ int main(void)
 			out->type = AMBA_VIRT_MSG_CAVALRY_RESP;
 			out->seq = in->seq;
 			cav_resp = (struct amba_virt_cavalry_rpc *)(tx.data + sizeof(*out));
-			cavalry_proxy_handle_rpc(cav_req, cav_resp, 1 /* default client_cid */);
+			cavalry_proxy_handle_rpc(cav_req, cav_resp, rx.client_cid);
 			tx.len = sizeof(*out) + sizeof(*cav_resp);
 		} else {
 			fprintf(stderr, "unknown type %u\n", in->type);
@@ -265,4 +382,5 @@ int main(void)
 			}
 		}
 	}
+	return 0;
 }

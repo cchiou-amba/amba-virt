@@ -16,8 +16,31 @@
 #define CAVALRY_RPC_ARENA_OFFSET 0x01F00000U    /* 31 MiB (1 MiB control arena) */
 #define CAVALRY_RPC_ARENA_SIZE   0x00100000U    /* 1 MiB */
 
-int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size);
+#define MAX_TENANTS              8
+
+struct cavalry_tenant_ctx {
+	uint32_t cid;
+	uint32_t tenant_idx;
+	int window_fd;
+	unsigned char *shm_map;
+	size_t shm_size;
+	uint64_t phys_base;
+	uint32_t slice_offset;
+	int in_use;
+};
+
+int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size, uint64_t phys_base);
 void cavalry_proxy_cleanup(void);
+
+int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
+				  int window_fd, unsigned char *shm_map,
+				  size_t shm_size, uint64_t phys_base,
+				  uint32_t slice_offset);
+int cavalry_proxy_unregister_tenant(uint32_t cid);
+struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid);
+
+void cavalry_proxy_set_enforce_path_b(int enforce);
+int cavalry_proxy_get_enforce_path_b(void);
 
 int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 			     struct amba_virt_cavalry_rpc *resp,

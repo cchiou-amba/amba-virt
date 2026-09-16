@@ -59,13 +59,22 @@ struct amba_virt_info {
 	__u32 connected;
 	__u32 vsock_cid;
 	__u32 vsock_port;
-	__u32 reserved[2];
+	__u64 shm_phys;		/* Host physical base address of CVMEM window */
 };
 
 struct amba_virt_xfer {
 	__u32 len;
 	__s32 timeout_ms;	/* RECV only; 0 = 5000 ms; <0 = wait forever */
+	__u32 client_cid;	/* Host RECV: caller CID; Host SEND: target CID */
+	__u32 flags;
 	__u8  data[AMBA_VIRT_MAX_MSG];
+};
+
+struct amba_virt_dmabuf_slice {
+	__u32 slice_idx;
+	__u32 offset;
+	__u32 size;
+	__s32 fd;
 };
 
 /* Userspace payload (inside xfer.data), not interpreted by the kmod. */
@@ -174,5 +183,7 @@ struct amba_virt_gdma_copy {
 	_IOWR(AMBA_VIRT_IOC_MAGIC, 5, struct amba_virt_gdma_copy)
 #define AMBA_VIRT_IOC_RPC	_IOWR(AMBA_VIRT_IOC_MAGIC, 6, struct amba_virt_xfer)
 #define AMBA_VIRT_IOC_EXPORT_DMABUF _IOR(AMBA_VIRT_IOC_MAGIC, 7, __s32)
+#define AMBA_VIRT_IOC_EXPORT_DMABUF_SLICE \
+	_IOWR(AMBA_VIRT_IOC_MAGIC, 8, struct amba_virt_dmabuf_slice)
 
 #endif /* _UAPI_AMBA_VIRT_H */

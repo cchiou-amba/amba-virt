@@ -83,7 +83,7 @@ Rather than provisioning separate PCI apertures for each virtualized peripheral,
 ### 2.2 Channel Separation & Transport Roles
 - **Control Plane (`virtio-vsock`)**:
   - Delivers framed, synchronous and asynchronous control RPCs (initialization, memory allocation, job dispatch, completion interrupts).
-  - The guest connects to host **CID 2** on dedicated ports (Port `5555` for Tenant 0, Port `5556` for Tenant 1). Port `2000` is reserved for EVE VComLink management and is explicitly rejected.
+  - The guest connects to host **CID 2** on standard service Port `5555`. The host daemon dynamically demultiplexes incoming tenant sessions via the kernel-authenticated caller Context ID (`peer_addr.svm_cid`). Port `2000` is reserved for EVE VComLink management and is explicitly rejected.
 - **Data Plane (`ivshmem`)**:
   - Provides zero-copy shared DRAM mapping between guest user space and host physical memory.
   - Payloads (image frames, neural network weight tensors, activation maps) reside directly in shared memory; only 32-bit offsets and size descriptors traverse the vsock control channel.
@@ -198,11 +198,69 @@ GDMA (General DMA) operations are mediated through the server to prevent untrust
 
 ---
 
-## 6. Comprehensive Test Specification (CppUTest)
+## 6. Threat Model & Security Boundaries
+
+To guarantee robust isolation and zero cross-tenant leakage in a multi-tenant edge deployment where one guest VM might be untrusted, compromised, or running unverified customer workloads, `amba-virt-server` and the underlying virtualization stack enforce a defense-in-depth security model across seven layers.
+
+### 6.1 Hardware vs. Software Security Responsibility Matrix
+
+| # | Security Boundary & Threat Vector | Threat / Attack Surface | Enforcement Mechanism | Primary Domain | Hardware Silicon Role | Software Implementation Role |
+|---|---|---|---|---|---|---|
+| **1** | **DRAM Spatial Isolation** | Guest A crafts pointers to read private weights or overwrite memory belonging to Guest B or Host Dom0. | Disjoint Stage-2 Page Tables (`GPA -> HPA`); non-overlapping physical CVMEM partitions. | **Hardware-Enforced (HW)**<br>*(SW Configured)* | **ARM64 Stage-2 MMU (`VTTBR_EL2`)**: Translates all GPA memory accesses; hardware MMU silicon immediately traps out-of-range bus accesses as Stage-2 Data Aborts at wire speed. | **Hypervisor / EVE OS (EL2)**: Configures disjoint translation tables during VM creation; provisions non-overlapping 1 GiB ivshmem physical windows. |
+| **2** | **DMA Boundary (No Data-Path SMMU)** | Malicious guest attempts to trick VisORC DMA into reading/writing arbitrary host DRAM. | Host address translation & Path B AMA isolation. | **Software-Enforced (SW)**<br>*(HW-Backed)* | **VisORC DMA Engine**: Executes DMA transfers using physical addresses programmed into descriptors. *(No guest-accessible IOMMU on the data path).* | **Host Kernel (`cavalry.ko`) & Server**: Guest has zero direct DMA MMIO access. Host software translates guest BAR offsets to validated host physical addresses. |
+| **3** | **Microcode Integrity & TOCTOU** | Guest A modifies DVI microcode or DAG descriptor pointers in shared memory while VisORC executes. | **Path B (Hardened Class D)**: Deep-copy of DVI binaries into Host-Private AMA pool. | **Software-Enforced (SW)**<br>*(HW-Backed)* | **ARM64 Stage-2 MMU**: The Host AMA pool is completely unmapped from all guest Stage-2 page tables, making physical access impossible. | **`amba-virt-server`**: Ingests loaded graph, deep-copies microcode into host AMA before execution. Eliminates runtime TOCTOU tampering. |
+| **4** | **Transport Identity Authentication** | Compromised Guest B sends RPC messages claiming to be Guest A (Tenant 0) to manipulate its sessions. | Virtio-vsock kernel peer authentication (`peer_addr.svm_cid`) on single listener port 5555. | **Software-Enforced (SW)**<br>*(Kernel / Hypervisor)* | **CPU Exception Traps (`HVC`/`SMC`)**: Hypervisor intercepts VM virtio notifications to route packets between guest and host virtio queues. | **Host Kernel (`vhost_vsock`) & Server**: Hypervisor binds immutable CID to VM. Host kernel authenticates peer CID; daemon extracts CID via `getpeername()` and maps to tenant context dynamically. |
+| **5** | **Tensor Handle Authorization** | Guest B guesses or forges a `handle_id` to read or overwrite another guest's active tensors. | Opaque handle table with strict tenant ownership validation and boundary checks. | **Software-Enforced (SW)** | *None* (pure logical abstraction in host software). | **`amba-virt-server`**: Associates every handle with the authenticated `tenant_id`. Rejects access to unowned handles with `-EACCES` (13). Enforces `[offset, offset + size) <= 1 GiB`. |
+| **6** | **VisORC Silicon Execution Arbitration** | Concurrent guest submissions interleave on the single VisORC NPU core, corrupting execution pipeline. | Host-level mutual exclusion (`visorc_hw_mutex`) protecting the physical hardware device. | **Hybrid (HW + SW)** | **VisORC NPU Core & Hardware IRQ**: Single physical execution engine processes one job queue; asserts `IRQ_CAVALRY` upon hardware completion. | **`amba-virt-server`**: Acquires POSIX `pthread_mutex_t visorc_hw_mutex` prior to issuing `CAVALRY_RUN_DAGS` to `/dev/cavalry`; blocks other tenants until the hardware IRQ fires and lock releases. |
+| **7** | **GDMA Hardware Arbitration** | Concurrent guest DMA copies corrupt GDMA hardware channels or step on peripheral state. | Host-side `gdma_hw_mutex` and 31 MiB aperture clamp. | **Hybrid (HW + SW)** | **Ambarella GDMA Engine**: Executes 2D pitch copies between physical addresses. | **`amba-virt-server`**: Clamps offsets to `[0, 31 MiB)` and serializes physical GDMA dispatches via `gdma_hw_mutex`. |
+
+> [!NOTE]
+> **Residual State Sanitization**: Cache/SPM sanitization across tenants between job runs is an unverified future backlog item and is explicitly excluded from the active security guarantees of this milestone.
+
+### 6.2 Deep Dive: Detailed Threat Vectors and Mitigations
+
+#### 1. Direct Physical Memory Snooping / Clobbering (Hardware Stage-2 MMU)
+- **Threat**: A compromised guest kernel (running at EL1) attempts to inspect or corrupt physical memory belonging to Dom0 or another HVM guest.
+- **Hardware Silicon Role**: The ARM64 processor enforces two-stage address translation. While the guest OS controls Stage-1 page tables (translating Guest Virtual Address $\to$ Guest Physical Address), the hardware Memory Management Unit (MMU) forces every bus transaction through Stage-2 translation (translating GPA $\to$ Host Physical Address) using the base pointer in `VTTBR_EL2`.
+- **Software Role**: EVE OS / Hypervisor sets up mutually exclusive Stage-2 page tables. Each tenant is granted GPA access exclusively to its own sliced ivshmem aperture (discovered dynamically at boot). Any attempt by Tenant 0 to access addresses in Tenant 1's range triggers an immediate hardware translation fault (`Data Abort` routed directly to EL2 hypervisor).
+
+#### 2. DMA Boundary & Device Memory (No Data-Path SMMU)
+- **Threat**: VisORC DMA engines possess bus master capability without an IOMMU/SMMU on the data path. If an untrusted guest could supply raw physical addresses to the DMA engine, it could read or overwrite any memory region in the entire SoC.
+- **Hardware Silicon Role**: VisORC DMA controllers perform memory transfers based on the addresses programmed into their hardware descriptor registers.
+- **Software Role**: The guest VM has **zero** MMIO access to physical DMA hardware registers. All DMA transactions are brokered by `amba-virt-server` and the host `cavalry.ko` driver. The host software validates that every source and destination buffer resides strictly within the caller's validated tenant slice before writing descriptors to the hardware engine.
+
+#### 3. Microcode Integrity & TOCTOU Immunity (Path B Host AMA Carveout)
+- **Threat**: Under legacy Path A, DVI microcode instructions and DAG descriptors remain in shared memory. A malicious guest could modify the microcode or swap buffer pointers *after* validation but *during* VisORC execution (Time-of-Check to Time-of-Use exploit).
+- **Hardware Silicon Role**: The ARM Stage-2 MMU completely unmaps the Host-Private AMA carveout from all guest VMs.
+- **Software Role**: `amba-virt-server` enforces Path B. When a guest invokes `CAVALRY_IOC_REGISTER_DAG`, the server deep-copies the loaded `cavalry_run_dags` graph and DVI microcode blob into host-private AMA memory. VisORC executes exclusively from host-private AMA. Because the guest has zero physical mapping to this memory, TOCTOU tampering is physically impossible.
+
+#### 4. Transport Identity Authentication (Kernel-Enforced VSOCK CID)
+- **Threat**: Guest B connects to the host daemon and issues commands pretending to be Tenant 0 (e.g., attempting to free Tenant 0's registered models or inspect outputs).
+- **Hardware Silicon Role**: Hardware CPU traps (`HVC`/`SMC`) trigger VM exits whenever virtio virtqueue registers are toggled, ensuring hypervisor mediation.
+- **Software Role**: The hypervisor assigns an immutable Context ID (CID) to each VM's virtio-vsock device. When a tenant connects to host port 5555, `amba-virt-server` calls `getpeername()` on the socket file descriptor. The returned `peer_addr.svm_cid` is provided directly by the host Linux kernel and cannot be forged by guest userspace. The daemon dynamically maps this CID to the tenant context.
+
+#### 5. Tensor Handle Authorization (Opaque Handle Table)
+- **Threat**: Tenant B attempts to access or execute a registered network belonging to Tenant 0 by guessing its handle or DAG ID.
+- **Hardware Silicon Role**: None.
+- **Software Role**: `amba-virt-server` maintains an internal lookup table mapping `handle_id -> {tenant_id, base_offset, size, flags}`. Whenever an operation (`RUN_REGISTERED_DAG`, `FREE_HANDLE`, `SYNC_CACHE`) is received, the server asserts that `handle->tenant_id == session->tenant_id`. Mismatched requests are rejected with `-EACCES` (13), preventing cross-tenant access.
+
+#### 6. Silicon Execution Core Arbitration (Hardware Mutex Serialization)
+- **Threat**: Multiple guests dispatch inference requests simultaneously, interleaving execution in the NPU pipeline and producing corrupt outputs or hardware hangs.
+- **Hardware Silicon Role**: The physical Ambarella VisORC NPU core executes one job stream at a time and raises `IRQ_CAVALRY` upon completion.
+- **Software Role**: `amba-virt-server` wraps physical device interaction in a serialized monitor (`pthread_mutex_t visorc_hw_mutex`). When a tenant dispatches an inference job, it holds `visorc_hw_mutex` until VisORC signals completion via IRQ. Requests from other tenants queue on the mutex, ensuring strictly serialized hardware execution without resource thrashing.
+
+#### 7. GDMA Hardware Arbitration (GDMA Mutex & Offset Clamp)
+- **Threat**: Multiple guests dispatch concurrent DMA operations, interleaving channel configurations or programming out-of-bounds addresses.
+- **Hardware Silicon Role**: Physical Ambarella GDMA engine executes 2D pitch copies between physical bus addresses.
+- **Software Role**: `amba-virt-server` clamps all guest GDMA coordinates strictly to `[0, 31 MiB)` and serializes physical device access with `pthread_mutex_t gdma_hw_mutex`.
+
+---
+
+## 7. Comprehensive Test Specification (CppUTest)
 
 The functional validation suite is implemented using **CppUTest** within `guest-os/client/amba-virt-client.cxx`.
 
-### 6.1 VFS System Call Compliance (`TEST_GROUP(VFS)`)
+### 7.1 VFS System Call Compliance (`TEST_GROUP(VFS)`)
 
 | System Call | Scenarios Tested | Expected Behavior |
 |---|---|---|
@@ -211,12 +269,12 @@ The functional validation suite is implemented using **CppUTest** within `guest-
 | `read()` / `write()` | Invoking standard POSIX `read()` and `write()` | Driver relies on `ioctl` framing; character device returns `-EINVAL` without kernel crash |
 | `lseek()` | `lseek(fd, 0, SEEK_SET)`, `SEEK_CUR`, `SEEK_END` | Character device returns `-ESPIPE` (illegal seek) |
 | `ioctl()` | `AMBA_VIRT_IOC_GET_INFO`, `AMBA_VIRT_IOC_CONNECT`, `AMBA_VIRT_IOC_SEND`, `AMBA_VIRT_IOC_RECV` | Valid inputs return 0; invalid pointer arguments return `-EFAULT`; unmapped commands return `-ENOTTY` |
-| `mmap()` | Map full `shm_size`, map 4KB/64KB pages, unaligned offsets, boundary mapping, over-allocation | Maps PCI BAR 2 pages into user space with `PROT_READ \| PROT_WRITE`; over-allocation returns `-EINVAL` |
+| `mmap()` | Map full `shm_size`, map 4KB/64KB pages, unaligned offsets, boundary mapping, over-allocation | Maps PCI BAR 2 pages into user space with `PROT_READ | PROT_WRITE`; over-allocation returns `-EINVAL` |
 | `munmap()` / `msync()` | Unmap active pages, invoke `msync(MS_SYNC)` / `msync(MS_ASYNC)` across mapped bounds | Unmaps pages without faulting; memory synchronizes cleanly |
 | `fcntl()` | Toggle `O_NONBLOCK`, verify `F_GETFL`/`F_SETFL`, descriptor duplication via `dup()`, `dup2()` | Properly duplicates descriptor; shares underlying kernel file object |
 | `poll()` / `select()` | Edge-triggered and level-triggered polling on `/dev/amba_virt` | Returns readability/writability mask based on vsock queue occupancy |
 
-### 6.2 virtio-vsock Protocol Edge Cases (`TEST_GROUP(Vsock)`)
+### 7.2 virtio-vsock Protocol Edge Cases (`TEST_GROUP(Vsock)`)
 - **Zero-Byte Payloads**: Sending `AMBA_VIRT_IOC_SEND` with `len = 0` rejected with `-EINVAL`.
 - **Maximum Payload Boundaries**: Payloads tested at 1B, 64B, 512B, 1024B, 4096B (`AMBA_VIRT_MAX_MSG`), and 4097B (rejected with `-EINVAL`).
 - **Timeout Semantics**:
@@ -225,7 +283,7 @@ The functional validation suite is implemented using **CppUTest** within `guest-
   - `timeout_ms < 0`: Blocking wait mode until peer sends acknowledgment.
 - **Connection Churn**: Rapid open/connect/close bursts (1,000 cycles) to verify socket descriptor reclamation in both guest and host kernels.
 
-### 6.3 ivshmem Shared Memory Integrity (`TEST_GROUP(SHM)`)
+### 7.3 ivshmem Shared Memory Integrity (`TEST_GROUP(SHM)`)
 - **Pattern Verification**: End-to-end writes across multi-megabyte buffers using pseudo-random bit sequences (PRBS31), incremental 64-bit integer counters, and walking-one bit patterns.
 - **Cacheline & Page Alignments**: Reads and writes across 64-byte cacheline boundaries, 4KB page boundaries, and unaligned offsets.
 - **Notification Handshake**:
@@ -234,14 +292,14 @@ The functional validation suite is implemented using **CppUTest** within `guest-
   3. Server verifies data integrity, performs an in-place transformation (e.g., bitwise inversion or CRC calculation), and replies with `FLAG_SHM_ACK`.
   4. Client verifies the modified pattern matches expected transformed state.
 
-### 6.4 Multi-FD Concurrency & Scaling (`TEST_GROUP(MultiFD)`)
+### 7.4 Multi-FD Concurrency & Scaling (`TEST_GROUP(MultiFD)`)
 - Multiple file descriptors opened concurrently by independent threads within a single process.
 - Scaled concurrency across $T \in \{1, 2, 4, 8, 16\}$ threads.
 - Measures serialization overhead and verifies that mutex locks protect the transport without deadlocking.
 
 ---
 
-## 7. Performance Benchmarking Methodology
+## 8. Performance Benchmarking Methodology
 
 The benchmarking suite measures transport overhead under production conditions:
 
@@ -263,22 +321,22 @@ The benchmarking suite measures transport overhead under production conditions:
 
 ---
 
-## 8. Compilation, Execution & Diagnostic Triage
+## 9. Compilation, Execution & Diagnostic Triage
 
-### 8.1 Building the Server
+### 9.1 Building the Server
 ```bash
 # Compile host daemon for AArch64 inside NOHYPER or cross-compiler:
 make -C drivers/amba_virt/tools
 ```
 Output: `build/bin/amba-virt-server`.
 
-### 8.2 Launching the Server Daemon
+### 9.2 Launching the Server Daemon
 ```bash
 # Run server in background inside NOHYPER container:
 ./amba-virt-server > /tmp/amba-virt-server.log 2>&1 &
 ```
 
-### 8.3 Diagnostic & Error Recovery Triage
+### 9.3 Diagnostic & Error Recovery Triage
 
 | Failure Mode / Symptom | Root Cause | Remediation Protocol |
 |---|---|---|

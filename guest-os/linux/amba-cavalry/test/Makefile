@@ -7,10 +7,9 @@ CROSS_COMPILE ?= aarch64-linux-gnu-
 CC = $(CROSS_COMPILE)gcc
 
 ROOT_DIR ?= $(CURDIR)/../../../..
-COOPER_DIR ?= $(ROOT_DIR)/../ambarella/cooper/ambarella
-
-MEM_DIR = $(COOPER_DIR)/boot/fastapp/cavalry/packages/cavalry_mem
-NNCTRL_DIR = $(COOPER_DIR)/boot/fastapp/cavalry/packages/nnctrl/cavalry_v3
+USERSPACE_DIR ?= $(ROOT_DIR)/guest-os/userspace
+MEM_DIR ?= $(USERSPACE_DIR)/cavalry_mem
+NNCTRL_DIR ?= $(USERSPACE_DIR)/nnctrl/cavalry_v3
 
 CFLAGS = -O2 -Wall \
 	-DAMBA_AMYOC_BUILD \
@@ -36,11 +35,15 @@ TARGETS = cavalry_hvm_inference \
 	cavalry_hvm_victim_loop \
 	cavalry_hvm_path_b_test \
 	cavalry_hvm_path_b_security \
-	cavalry_hvm_demo
+	cavalry_hvm_demo \
+	cavalry_multi_tenant_test
 
 .PHONY: all clean
 
 all: $(TARGETS)
+
+cavalry_multi_tenant_test: cavalry_multi_tenant_test.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -static -o $@ $^ $(LDFLAGS)
 
 cavalry_hvm_inference: cavalry_hvm_inference.c $(COMMON_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
