@@ -26,6 +26,10 @@ struct cavalry_tenant_ctx {
 	size_t shm_size;
 	uint64_t phys_base;
 	uint32_t slice_offset;
+	uint32_t cavalry_pool_base;
+	uint32_t cavalry_pool_size;
+	uint32_t rpc_arena_offset;
+	uint32_t rpc_arena_size;
 	int in_use;
 };
 
@@ -38,6 +42,9 @@ int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 				  uint32_t slice_offset);
 int cavalry_proxy_unregister_tenant(uint32_t cid);
 struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid);
+int cavalry_proxy_set_tenant_bounds(uint32_t cid, uint32_t pool_base,
+				    uint32_t pool_size, uint32_t rpc_arena_offset,
+				    uint32_t rpc_arena_size);
 
 void cavalry_proxy_set_enforce_path_b(int enforce);
 int cavalry_proxy_get_enforce_path_b(void);

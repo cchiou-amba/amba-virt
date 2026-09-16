@@ -41,7 +41,7 @@ typedef int32_t  __s32;
 #define AMBA_VIRT_SHM_DEV_NAME	"amba_virt_shm"
 #define AMBA_VIRT_SHM_DEV_PATH	"/dev/amba_virt_shm"
 
-#define AMBA_VIRT_PROTO		2u
+#define AMBA_VIRT_PROTO		3u
 
 /* Host CID on EVE/QEMU vhost-vsock. Do not use port 2000 (VComLink). */
 #define AMBA_VIRT_VSOCK_CID	2u
@@ -88,6 +88,16 @@ struct amba_virt_dmabuf_slice {
 #define AMBA_VIRT_MSG_GDMA_PITCH_RESP	14u
 #define AMBA_VIRT_MSG_CAVALRY_REQ	15u
 #define AMBA_VIRT_MSG_CAVALRY_RESP	16u
+
+#define AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ	22u
+#define AMBA_VIRT_MSG_DEV_SET_BOUNDS_RESP	23u
+#define AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_REQ	24u
+#define AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_RESP	25u
+#define AMBA_VIRT_MSG_QUERY_REQ			26u
+#define AMBA_VIRT_MSG_QUERY_RESP		27u
+#define AMBA_VIRT_MSG_MEM_ALLOC_REQ		28u
+#define AMBA_VIRT_MSG_MEM_ALLOC_RESP		29u
+#define AMBA_VIRT_MSG_ACL_GET_REQ		30u
 
 enum vcav_opcode {
 	VCAV_OP_GET_VERSION	= 1,
@@ -150,6 +160,164 @@ struct amba_virt_cavalry_run_reg_desc {
 	__u32 dag_id;
 	__u32 port_cnt;
 	struct amba_virt_cavalry_port_bind ports[CAVALRY_MAX_PORTS];
+};
+
+/* Virtual Device Types */
+#define AMBA_VIRT_DEV_TYPE_NONE        0u
+#define AMBA_VIRT_DEV_TYPE_CAVALRY     1u
+#define AMBA_VIRT_DEV_TYPE_GDMA        2u
+#define AMBA_VIRT_DEV_TYPE_IAV         3u
+#define AMBA_VIRT_DEV_TYPE_SCRATCH     4u
+#define AMBA_VIRT_MAX_DEV_TYPES        8u
+
+/* Automatic Offset Placement Sentinel */
+#define AMBA_VIRT_OFFSET_AUTO          0xFFFFFFFFU
+
+/* Request Flags */
+#define AMBA_VIRT_DEV_F_NONE           0x00000000U
+#define AMBA_VIRT_DEV_F_EXACT          0x00000001U
+#define AMBA_VIRT_DEV_F_BEST_EFFORT    0x00000002U
+#define AMBA_VIRT_DEV_F_REPLACE        0x00000004U
+#define AMBA_VIRT_DEV_F_ZERO_INIT      0x00000008U
+
+/* Granular Error / Reason Codes */
+enum amba_virt_err_code {
+	AMBA_VIRT_ERR_NONE             = 0,
+	AMBA_VIRT_ERR_PERM_DENIED      = 1,
+	AMBA_VIRT_ERR_QUOTA_EXCEEDED   = 2,
+	AMBA_VIRT_ERR_HOST_OOM         = 3,
+	AMBA_VIRT_ERR_OFFSET_COLLISION = 4,
+	AMBA_VIRT_ERR_DEV_ALREADY_REG  = 5,
+	AMBA_VIRT_ERR_INVALID_ALIGN    = 6,
+	AMBA_VIRT_ERR_UNKNOWN_DEVICE   = 7,
+	AMBA_VIRT_ERR_BAR_OVERFLOW     = 8,
+};
+
+/* In-Band Device Boundary Request */
+struct amba_virt_dev_bounds_req {
+	__u32 dev_type;
+	__u32 requested_size;
+	__u32 preferred_offset;
+	__u32 rpc_arena_size;
+	__u32 align;
+	__u32 flags;
+};
+
+/* In-Band Device Boundary Response */
+struct amba_virt_dev_bounds_resp {
+	__s32 status;
+	__u32 err_code;
+	__u32 granted_offset;
+	__u32 granted_size;
+	__u32 rpc_arena_offset;
+	__u32 max_avail_size;
+	__u32 suggested_offset;
+	__u32 colliding_dev;
+};
+
+/* Memory Request Types */
+enum amba_virt_mem_op {
+	AMBA_VIRT_MEM_OP_ALLOC   = 1,
+	AMBA_VIRT_MEM_OP_FREE    = 2,
+	AMBA_VIRT_MEM_OP_RESIZE  = 3,
+	AMBA_VIRT_MEM_OP_CARVE   = 4,
+};
+
+struct amba_virt_mem_req {
+	__u32 op;
+	__u32 size;
+	__u32 align;
+	__u32 dev_affinity;
+	__u32 bar_offset;
+	__u32 flags;
+};
+
+struct amba_virt_mem_resp {
+	__s32 status;
+	__u32 bar_offset;
+	__u32 allocated_size;
+	__u64 phys_addr;
+	__u32 total_allocated;
+	__u32 total_free;
+};
+
+enum amba_virt_query_op {
+	AMBA_VIRT_QUERY_SELF         = 1,
+	AMBA_VIRT_QUERY_PEERS        = 2,
+	AMBA_VIRT_QUERY_DEV_TOPOLOGY = 3,
+	AMBA_VIRT_QUERY_DEV_MEM      = 4,
+};
+
+struct amba_virt_query_req {
+	__u32 query_op;
+	__u32 target_cid;
+	__u32 dev_id;
+	__u32 flags;
+};
+
+struct amba_virt_peer_desc {
+	__u32 cid;
+	__u32 tenant_idx;
+	__u32 status;
+	__u32 mem_allocated_mb;
+	__u32 active_sessions;
+	__u32 active_dags;
+	__u32 active_handles;
+	__u32 caps;
+};
+
+struct amba_virt_dev_mem_desc {
+	__u32 dev_type;
+	__u32 base_offset;
+	__u32 size;
+	__u32 rpc_arena_offset;
+	__u32 rpc_arena_size;
+	__u32 flags;
+};
+
+struct amba_virt_topo_desc {
+	__u32 chip_id;
+	__u32 npu_core_cnt;
+	__u32 npu_freq_mhz;
+	__u32 gdma_channels;
+	__u32 total_cvmem_mb;
+	__u64 host_phys_addr;
+};
+
+struct amba_virt_query_resp {
+	__u32 query_op;
+	__s32 status;
+	__u32 count;
+	__u8  payload[3900];
+};
+
+#define AMBA_VIRT_CAP_NONE              0x00000000U
+#define AMBA_VIRT_CAP_PING              0x00000001U
+#define AMBA_VIRT_CAP_QUERY_SELF        0x00000002U
+#define AMBA_VIRT_CAP_QUERY_PEERS       0x00000004U
+#define AMBA_VIRT_CAP_QUERY_TOPO        0x00000008U
+#define AMBA_VIRT_CAP_MEM_ALLOC         0x00000010U
+#define AMBA_VIRT_CAP_MEM_RESIZE        0x00000020U
+#define AMBA_VIRT_CAP_DEV_CONFIG        0x00000040U
+#define AMBA_VIRT_CAP_GDMA_COPY         0x00000080U
+#define AMBA_VIRT_CAP_GDMA_PITCH        0x00000100U
+#define AMBA_VIRT_CAP_CAVALRY_PATH_B    0x00000200U
+#define AMBA_VIRT_CAP_CAVALRY_PATH_A    0x00000400U
+#define AMBA_VIRT_CAP_CAVALRY_REGISTER  0x00000800U
+#define AMBA_VIRT_CAP_IAV_STREAM        0x00001000U
+
+#define AMBA_VIRT_ROLE_UNTRUSTED \
+	(AMBA_VIRT_CAP_PING | AMBA_VIRT_CAP_QUERY_SELF | AMBA_VIRT_CAP_CAVALRY_PATH_B | AMBA_VIRT_CAP_CAVALRY_REGISTER)
+
+#define AMBA_VIRT_ROLE_STANDARD \
+	(AMBA_VIRT_ROLE_UNTRUSTED | AMBA_VIRT_CAP_MEM_ALLOC | AMBA_VIRT_CAP_DEV_CONFIG | \
+	 AMBA_VIRT_CAP_GDMA_COPY | AMBA_VIRT_CAP_GDMA_PITCH)
+
+struct amba_virt_acl_rule {
+	__u32 cid;
+	__u32 caps;
+	__u32 quota_mb;
+	__u32 priority;
 };
 
 struct amba_virt_msg {

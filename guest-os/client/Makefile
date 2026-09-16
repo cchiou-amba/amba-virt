@@ -43,21 +43,26 @@ endif
 
 
 
+TARGETS := amba-virt-client amba-virt-cli
+
 .PHONY: all help clean test bench
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SRCS) amba_virt_dev.hxx
+amba-virt-client: $(SRCS) amba_virt_dev.hxx
 	$(CXX) $(CXXFLAGS) -o $@ $(SRCS) $(LDFLAGS)
 
-test: $(TARGET)
-	./$(TARGET) -v
+amba-virt-cli: amba-virt-cli.cxx amba_virt_dev.hxx
+	$(CXX) $(CXXFLAGS) -o $@ amba-virt-cli.cxx -lpthread
 
-bench: $(TARGET)
-	./$(TARGET) -bench
+test: amba-virt-client
+	./amba-virt-client -v
+
+bench: amba-virt-client
+	./amba-virt-client -bench
 
 clean:
-	rm -f $(TARGET) *.o
+	rm -f $(TARGETS) *.o
 
 help:
 	@echo "amba-virt-client Multi-OS Build Targets:"

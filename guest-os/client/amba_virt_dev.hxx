@@ -307,6 +307,233 @@ create_node:
 
     void *getShmPtr() const { return _shmMap; }
 
+    int rpcTransaction(uint32_t msgType, uint32_t seq,
+                       const void *reqData, uint32_t reqLen,
+                       uint32_t expectedRespType,
+                       void *respData, uint32_t maxRespLen,
+                       uint32_t *outRespLen = nullptr,
+                       int32_t timeoutMs = 5000) {
+        if (_fd < 0)
+            return -EBADF;
+
+        std::vector<uint8_t> txBuf(sizeof(struct amba_virt_msg) + reqLen);
+        struct amba_virt_msg *msg = reinterpret_cast<struct amba_virt_msg *>(txBuf.data());
+        msg->type = msgType;
+        msg->seq = seq;
+        msg->shm_off = 0;
+        msg->shm_len = reqLen;
+        if (reqData && reqLen > 0)
+            memcpy(txBuf.data() + sizeof(struct amba_virt_msg), reqData, reqLen);
+
+        int ret = send(txBuf.data(), static_cast<uint32_t>(txBuf.size()));
+        if (ret < 0)
+            return ret;
+
+        std::vector<uint8_t> rxBuf(sizeof(struct amba_virt_msg) + maxRespLen);
+        uint32_t rxLen = 0;
+        ret = recv(rxBuf.data(), static_cast<uint32_t>(rxBuf.size()), rxLen, timeoutMs);
+        if (ret < 0)
+            return ret;
+
+        if (rxLen < sizeof(struct amba_virt_msg))
+            return -EBADMSG;
+
+        const struct amba_virt_msg *respMsg = reinterpret_cast<const struct amba_virt_msg *>(rxBuf.data());
+        if (respMsg->type != expectedRespType)
+            return -EPROTO;
+
+        uint32_t payloadLen = (rxLen > sizeof(struct amba_virt_msg)) ? (rxLen - sizeof(struct amba_virt_msg)) : 0;
+        uint32_t copyLen = (payloadLen < maxRespLen) ? payloadLen : maxRespLen;
+        if (respData && copyLen > 0)
+            memcpy(respData, rxBuf.data() + sizeof(struct amba_virt_msg), copyLen);
+        if (outRespLen)
+            *outRespLen = payloadLen;
+
+        return 0;
+    }
+
+    int setDeviceBounds(const struct amba_virt_dev_bounds_req &req,
+                        struct amba_virt_dev_bounds_resp &resp,
+                        uint32_t seq = 1) {
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_DEV_SET_BOUNDS_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        return resp.status;
+    }
+
+    int releaseDeviceBounds(uint32_t devType,
+                            struct amba_virt_dev_bounds_resp *outResp = nullptr,
+                            uint32_t seq = 1) {
+        struct amba_virt_dev_bounds_req req;
+        memset(&req, 0, sizeof(req));
+        req.dev_type = devType;
+        struct amba_virt_dev_bounds_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        return resp.status;
+    }
+
+    int allocMemory(uint32_t size, uint32_t align, uint32_t devAffinity,
+                    struct amba_virt_mem_resp &resp, uint32_t flags = 0,
+                    uint32_t seq = 1) {
+        struct amba_virt_mem_req req;
+        memset(&req, 0, sizeof(req));
+        req.op = AMBA_VIRT_MEM_OP_ALLOC;
+        req.size = size;
+        req.align = align;
+        req.dev_affinity = devAffinity;
+        req.flags = flags;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_MEM_ALLOC_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_MEM_ALLOC_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        return resp.status;
+    }
+
+    int freeMemory(uint32_t barOffset,
+                   struct amba_virt_mem_resp *outResp = nullptr,
+                   uint32_t seq = 1) {
+        struct amba_virt_mem_req req;
+        memset(&req, 0, sizeof(req));
+        req.op = AMBA_VIRT_MEM_OP_FREE;
+        req.bar_offset = barOffset;
+        struct amba_virt_mem_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_MEM_ALLOC_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_MEM_ALLOC_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        return resp.status;
+    }
+
+    int querySelf(struct amba_virt_peer_desc &selfDesc,
+                  struct amba_virt_query_resp *outResp = nullptr,
+                  uint32_t seq = 1) {
+        struct amba_virt_query_req req;
+        memset(&req, 0, sizeof(req));
+        req.query_op = AMBA_VIRT_QUERY_SELF;
+        struct amba_virt_query_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_QUERY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_QUERY_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        if (resp.status < 0)
+            return resp.status;
+        if (resp.count > 0)
+            memcpy(&selfDesc, resp.payload, sizeof(selfDesc));
+        return 0;
+    }
+
+    int queryPeers(std::vector<struct amba_virt_peer_desc> &peers,
+                   uint32_t targetCid = 0,
+                   struct amba_virt_query_resp *outResp = nullptr,
+                   uint32_t seq = 1) {
+        struct amba_virt_query_req req;
+        memset(&req, 0, sizeof(req));
+        req.query_op = AMBA_VIRT_QUERY_PEERS;
+        req.target_cid = targetCid;
+        struct amba_virt_query_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_QUERY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_QUERY_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        if (resp.status < 0)
+            return resp.status;
+        peers.clear();
+        peers.resize(resp.count);
+        if (resp.count > 0) {
+            uint32_t maxBytes = sizeof(resp.payload);
+            uint32_t copyBytes = resp.count * sizeof(struct amba_virt_peer_desc);
+            if (copyBytes > maxBytes)
+                copyBytes = maxBytes;
+            memcpy(peers.data(), resp.payload, copyBytes);
+        }
+        return 0;
+    }
+
+    int queryTopology(struct amba_virt_topo_desc &topo,
+                      struct amba_virt_query_resp *outResp = nullptr,
+                      uint32_t seq = 1) {
+        struct amba_virt_query_req req;
+        memset(&req, 0, sizeof(req));
+        req.query_op = AMBA_VIRT_QUERY_DEV_TOPOLOGY;
+        struct amba_virt_query_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_QUERY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_QUERY_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        if (resp.status < 0)
+            return resp.status;
+        if (resp.count > 0)
+            memcpy(&topo, resp.payload, sizeof(topo));
+        return 0;
+    }
+
+    int queryDevMem(std::vector<struct amba_virt_dev_mem_desc> &devs,
+                    uint32_t devId = 0,
+                    struct amba_virt_query_resp *outResp = nullptr,
+                    uint32_t seq = 1) {
+        struct amba_virt_query_req req;
+        memset(&req, 0, sizeof(req));
+        req.query_op = AMBA_VIRT_QUERY_DEV_MEM;
+        req.dev_id = devId;
+        struct amba_virt_query_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_QUERY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_QUERY_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        if (resp.status < 0)
+            return resp.status;
+        devs.clear();
+        devs.resize(resp.count);
+        if (resp.count > 0) {
+            uint32_t maxBytes = sizeof(resp.payload);
+            uint32_t copyBytes = resp.count * sizeof(struct amba_virt_dev_mem_desc);
+            if (copyBytes > maxBytes)
+                copyBytes = maxBytes;
+            memcpy(devs.data(), resp.payload, copyBytes);
+        }
+        return 0;
+    }
+
 private:
     std::string _path;
     int _fd;

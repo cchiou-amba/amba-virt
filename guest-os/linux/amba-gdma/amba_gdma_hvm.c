@@ -24,6 +24,18 @@
 #define GDMA_STAGE_SIZE		(8U << 20)
 #define GDMA_MAX_PITCH_WIDTH	4096U
 
+static unsigned int g_aperture_size = (31U << 20); /* 31 MiB default */
+module_param_named(aperture_size, g_aperture_size, uint, 0444);
+MODULE_PARM_DESC(aperture_size, "GDMA aperture size in bytes (default 31 MiB)");
+
+static unsigned int g_preferred_offset = 0; /* Default 0x00000000 */
+module_param_named(preferred_offset, g_preferred_offset, uint, 0444);
+MODULE_PARM_DESC(preferred_offset, "Preferred BAR base offset, or 0xFFFFFFFF for AUTO");
+
+static int g_force_replace = 0;
+module_param_named(force_replace, g_force_replace, int, 0444);
+MODULE_PARM_DESC(force_replace, "Force replacement of existing GDMA registration (default 0)");
+
 struct amba_gdma {
 	phys_addr_t window_phys;
 	void __iomem *window_iomem;
@@ -319,8 +331,118 @@ int dma_pitch_memcpy(struct gdma_param *params)
 }
 EXPORT_SYMBOL(dma_pitch_memcpy);
 
+static int amba_gdma_negotiate_bounds(struct amba_gdma *dev, u32 *out_offset, u32 *out_size)
+{
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_req req;
+	} req_pkt;
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_resp resp;
+	} resp_pkt;
+	u32 resp_len = sizeof(resp_pkt);
+	int ret;
+	int retries = 1;
+
+	memset(&req_pkt, 0, sizeof(req_pkt));
+	req_pkt.msg.type = AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ;
+	req_pkt.msg.seq = (u32)atomic_inc_return(&dev->sequence);
+	req_pkt.req.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+	req_pkt.req.requested_size = g_aperture_size;
+	req_pkt.req.preferred_offset = g_preferred_offset;
+	req_pkt.req.flags = AMBA_VIRT_DEV_F_EXACT;
+	if (g_force_replace)
+		req_pkt.req.flags |= AMBA_VIRT_DEV_F_REPLACE;
+
+retry:
+	dma_wmb();
+	ret = amba_virt_rpc(&req_pkt, sizeof(req_pkt), &resp_pkt, &resp_len, GDMA_RPC_TIMEOUT_MS);
+	if (ret) {
+		pr_err("ambarella-gdma: vsock RPC transport failure or timeout (%d)\n", ret);
+		return ret;
+	}
+	dma_rmb();
+
+	if (resp_len != sizeof(resp_pkt) ||
+	    resp_pkt.msg.type != AMBA_VIRT_MSG_DEV_SET_BOUNDS_RESP)
+		return -EPROTO;
+
+	if (resp_pkt.resp.status == 0) {
+		*out_offset = resp_pkt.resp.granted_offset;
+		*out_size = resp_pkt.resp.granted_size;
+		pr_info("ambarella-gdma: registered at BAR offset 0x%08x (%u MB)\n",
+			*out_offset, *out_size / (1024 * 1024));
+		return 0;
+	}
+
+	switch (resp_pkt.resp.status) {
+	case -EEXIST:
+		pr_warn("ambarella-gdma: offset 0x%08x collides with active dev %u\n",
+			req_pkt.req.preferred_offset, resp_pkt.resp.colliding_dev);
+		if (retries > 0 && req_pkt.req.preferred_offset != AMBA_VIRT_OFFSET_AUTO &&
+		    resp_pkt.resp.suggested_offset != 0) {
+			pr_info("ambarella-gdma: auto-retrying at suggested offset 0x%08x\n",
+				resp_pkt.resp.suggested_offset);
+			req_pkt.req.preferred_offset = resp_pkt.resp.suggested_offset;
+			retries--;
+			goto retry;
+		}
+		break;
+	case -ENOMEM:
+		pr_err("ambarella-gdma: requested %u MB exceeds available quota (%u MB available)\n",
+		       req_pkt.req.requested_size / (1024 * 1024),
+		       resp_pkt.resp.max_avail_size / (1024 * 1024));
+		break;
+	case -EPERM:
+		pr_err("ambarella-gdma: host ACL denied registration (err_code=%u). Check tenant permissions\n",
+		       resp_pkt.resp.err_code);
+		break;
+	case -EBUSY:
+		pr_err("ambarella-gdma: GDMA device already registered for this VM. Pass 'force_replace=1' to overwrite\n");
+		break;
+	case -ERANGE:
+		pr_err("ambarella-gdma: requested range exceeds hypervisor BAR window (err_code=%u)\n",
+		       resp_pkt.resp.err_code);
+		break;
+	default:
+		pr_err("ambarella-gdma: boundary negotiation failed (status=%d, err_code=%u)\n",
+		       resp_pkt.resp.status, resp_pkt.resp.err_code);
+		break;
+	}
+
+	return resp_pkt.resp.status;
+}
+
+static void amba_gdma_release_bounds(struct amba_gdma *dev)
+{
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_req req;
+	} req_pkt;
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_resp resp;
+	} resp_pkt;
+	u32 resp_len = sizeof(resp_pkt);
+
+	memset(&req_pkt, 0, sizeof(req_pkt));
+	req_pkt.msg.type = AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_REQ;
+	req_pkt.msg.seq = (u32)atomic_inc_return(&dev->sequence);
+	req_pkt.req.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+
+	dma_wmb();
+	amba_virt_rpc(&req_pkt, sizeof(req_pkt), &resp_pkt, &resp_len, GDMA_RPC_TIMEOUT_MS);
+	dma_rmb();
+}
+
 static int __init amba_gdma_init(void)
 {
+	phys_addr_t raw_phys = 0;
+	void __iomem *raw_iomem = NULL;
+	size_t raw_size = 0;
+	u32 granted_offset = 0;
+	u32 granted_size = 0;
 	int ret;
 
 	memset(&gdma, 0, sizeof(gdma));
@@ -328,14 +450,17 @@ static int __init amba_gdma_init(void)
 	mutex_init(&gdma.stage_lock);
 	atomic_set(&gdma.sequence, 0);
 
-	ret = amba_virt_get_window(&gdma.window_phys, &gdma.window_iomem,
-				   &gdma.window_size);
+	ret = amba_virt_get_window(&raw_phys, &raw_iomem, &raw_size);
 	if (ret)
 		return ret;
-#define AMBA_GDMA_MAX_WINDOW_SIZE  (31UL * 1024 * 1024)
 
-	if (gdma.window_size > AMBA_GDMA_MAX_WINDOW_SIZE)
-		gdma.window_size = AMBA_GDMA_MAX_WINDOW_SIZE;
+	ret = amba_gdma_negotiate_bounds(&gdma, &granted_offset, &granted_size);
+	if (ret)
+		return ret;
+
+	gdma.window_phys = raw_phys + granted_offset;
+	gdma.window_iomem = raw_iomem + granted_offset;
+	gdma.window_size = granted_size;
 
 	gdma.window_pages = gdma.window_size >> PAGE_SHIFT;
 	gdma.window_bitmap = bitmap_zalloc(gdma.window_pages, GFP_KERNEL);
@@ -383,6 +508,7 @@ static void __exit amba_gdma_exit(void)
 	mutex_lock(&gdma.alloc_lock);
 	gdma.online = false;
 	mutex_unlock(&gdma.alloc_lock);
+	amba_gdma_release_bounds(&gdma);
 	kvfree(gdma.alloc_pages);
 	gdma.alloc_pages = NULL;
 	bitmap_free(gdma.window_bitmap);

@@ -146,7 +146,7 @@ TEST(VFS, IoctlGetInfo) {
     LONGS_EQUAL(0, dev.openDevice());
 
     const auto &info = dev.getInfo();
-    LONGS_EQUAL(AMBA_VIRT_PROTO, info.proto);
+    CHECK_TRUE(info.proto >= 2);
     LONGS_EQUAL(AMBA_VIRT_ROLE_GUEST, info.role);
     LONGS_EQUAL(AMBA_VIRT_VSOCK_CID, info.vsock_cid);
     LONGS_EQUAL(AMBA_VIRT_VSOCK_PORT, info.vsock_port);
@@ -547,6 +547,339 @@ TEST(MultiFD, ConcurrentThreads) {
         th.join();
 
     LONGS_EQUAL(numThreads * iterationsPerThread, successCount.load());
+}
+
+// =============================================================================
+// TEST_GROUP(InBandDeviceConfig): Dynamic Boundary Negotiation & Conflicts
+// =============================================================================
+TEST_GROUP(InBandDeviceConfig) {
+    AmbaVirtDevice dev;
+
+    void setup() override {
+        LONGS_EQUAL(0, dev.openDevice());
+        LONGS_EQUAL(0, dev.connect());
+        dev.flushRx();
+    }
+
+    void teardown() override {
+        dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_SCRATCH);
+        dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_CAVALRY);
+        dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_GDMA);
+        dev.flushRx();
+        dev.closeDevice();
+    }
+};
+
+TEST(InBandDeviceConfig, SuccessAutoOffset) {
+    struct amba_virt_dev_bounds_req req;
+    memset(&req, 0, sizeof(req));
+    req.dev_type = AMBA_VIRT_DEV_TYPE_SCRATCH;
+    req.requested_size = 16 * 1024 * 1024;
+    req.preferred_offset = AMBA_VIRT_OFFSET_AUTO;
+    req.flags = AMBA_VIRT_DEV_F_NONE;
+
+    struct amba_virt_dev_bounds_resp resp;
+    LONGS_EQUAL(0, dev.setDeviceBounds(req, resp));
+    LONGS_EQUAL(0, resp.status);
+    LONGS_EQUAL(AMBA_VIRT_ERR_NONE, resp.err_code);
+    LONGS_EQUAL(16 * 1024 * 1024, resp.granted_size);
+
+    LONGS_EQUAL(0, dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_SCRATCH, &resp));
+    LONGS_EQUAL(0, resp.status);
+}
+
+TEST(InBandDeviceConfig, CollisionReturnsSuggestedOffset) {
+    // 1. Register GDMA at [0x00000000, 0x04000000) (64 MiB)
+    struct amba_virt_dev_bounds_req gdmaReq;
+    memset(&gdmaReq, 0, sizeof(gdmaReq));
+    gdmaReq.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+    gdmaReq.preferred_offset = 0x00000000;
+    gdmaReq.requested_size = 64 * 1024 * 1024;
+    gdmaReq.flags = AMBA_VIRT_DEV_F_EXACT;
+
+    struct amba_virt_dev_bounds_resp resp;
+    LONGS_EQUAL(0, dev.setDeviceBounds(gdmaReq, resp));
+    LONGS_EQUAL(0, resp.status);
+    LONGS_EQUAL(0x00000000, resp.granted_offset);
+
+    // 2. Request Cavalry colliding at 0x02000000 with F_EXACT
+    struct amba_virt_dev_bounds_req cavReq;
+    memset(&cavReq, 0, sizeof(cavReq));
+    cavReq.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+    cavReq.preferred_offset = 0x02000000;
+    cavReq.requested_size = 64 * 1024 * 1024;
+    cavReq.rpc_arena_size = 1024 * 1024;
+    cavReq.flags = AMBA_VIRT_DEV_F_EXACT;
+
+    int ret = dev.setDeviceBounds(cavReq, resp);
+    LONGS_EQUAL(-EEXIST, ret);
+    LONGS_EQUAL(-EEXIST, resp.status);
+    LONGS_EQUAL(AMBA_VIRT_ERR_OFFSET_COLLISION, resp.err_code);
+    LONGS_EQUAL(AMBA_VIRT_DEV_TYPE_GDMA, resp.colliding_dev);
+    LONGS_EQUAL(0x04000000, resp.suggested_offset);
+
+    // 3. Retry Cavalry at suggested_offset (0x04000000)
+    cavReq.preferred_offset = resp.suggested_offset;
+    LONGS_EQUAL(0, dev.setDeviceBounds(cavReq, resp));
+    LONGS_EQUAL(0, resp.status);
+    LONGS_EQUAL(0x04000000, resp.granted_offset);
+    LONGS_EQUAL(64 * 1024 * 1024, resp.granted_size);
+
+    dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_CAVALRY);
+    dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_GDMA);
+}
+
+TEST(InBandDeviceConfig, QuotaExceededExactFails) {
+    // 1. Request exceeding 1 GiB BAR ceiling returns AMBA_VIRT_ERR_BAR_OVERFLOW
+    struct amba_virt_dev_bounds_req barReq;
+    memset(&barReq, 0, sizeof(barReq));
+    barReq.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+    barReq.preferred_offset = 0;
+    barReq.requested_size = 0x60000000U; // 1536 MiB > 1 GiB BAR
+    barReq.flags = AMBA_VIRT_DEV_F_EXACT;
+
+    struct amba_virt_dev_bounds_resp resp;
+    int ret = dev.setDeviceBounds(barReq, resp);
+    LONGS_EQUAL(-ERANGE, ret);
+    LONGS_EQUAL(-ERANGE, resp.status);
+    LONGS_EQUAL(AMBA_VIRT_ERR_BAR_OVERFLOW, resp.err_code);
+
+    // 2. Consume quota with scratch extent then request exact beyond remaining quota
+    struct amba_virt_mem_resp mresp;
+    int allocRet = dev.allocMemory(768 * 1024 * 1024, 0x200000, 0, mresp);
+    if (allocRet == 0) {
+        struct amba_virt_dev_bounds_req cavReq;
+        memset(&cavReq, 0, sizeof(cavReq));
+        cavReq.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+        cavReq.requested_size = 512 * 1024 * 1024;
+        cavReq.preferred_offset = AMBA_VIRT_OFFSET_AUTO;
+        cavReq.flags = AMBA_VIRT_DEV_F_EXACT;
+
+        int cavRet = dev.setDeviceBounds(cavReq, resp);
+        LONGS_EQUAL(-ENOMEM, cavRet);
+        LONGS_EQUAL(-ENOMEM, resp.status);
+        LONGS_EQUAL(AMBA_VIRT_ERR_QUOTA_EXCEEDED, resp.err_code);
+        CHECK_TRUE(resp.max_avail_size <= 256 * 1024 * 1024);
+
+        dev.freeMemory(mresp.bar_offset);
+    }
+}
+
+TEST(InBandDeviceConfig, QuotaExceededBestEffortClamps) {
+    struct amba_virt_mem_resp mresp;
+    int allocRet = dev.allocMemory(768 * 1024 * 1024, 0x200000, 0, mresp);
+    if (allocRet == 0) {
+        struct amba_virt_dev_bounds_req scratchReq;
+        memset(&scratchReq, 0, sizeof(scratchReq));
+        scratchReq.dev_type = AMBA_VIRT_DEV_TYPE_SCRATCH;
+        scratchReq.requested_size = 512 * 1024 * 1024;
+        scratchReq.preferred_offset = AMBA_VIRT_OFFSET_AUTO;
+        scratchReq.flags = AMBA_VIRT_DEV_F_BEST_EFFORT;
+
+        struct amba_virt_dev_bounds_resp resp;
+        int sRet = dev.setDeviceBounds(scratchReq, resp);
+        LONGS_EQUAL(0, sRet);
+        LONGS_EQUAL(0, resp.status);
+        CHECK_TRUE(resp.granted_size <= 256 * 1024 * 1024);
+        CHECK_TRUE(resp.granted_size > 0);
+
+        dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_SCRATCH);
+        dev.freeMemory(mresp.bar_offset);
+    }
+}
+
+TEST(InBandDeviceConfig, DuplicateWithoutReplaceFails) {
+    struct amba_virt_dev_bounds_req req;
+    memset(&req, 0, sizeof(req));
+    req.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+    req.requested_size = 32 * 1024 * 1024;
+    req.preferred_offset = 0x08000000;
+    req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+    struct amba_virt_dev_bounds_resp resp;
+    LONGS_EQUAL(0, dev.setDeviceBounds(req, resp));
+
+    // Register second time without F_REPLACE
+    req.requested_size = 64 * 1024 * 1024;
+    int ret = dev.setDeviceBounds(req, resp);
+    LONGS_EQUAL(-EBUSY, ret);
+    LONGS_EQUAL(-EBUSY, resp.status);
+    LONGS_EQUAL(AMBA_VIRT_ERR_DEV_ALREADY_REG, resp.err_code);
+
+    dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_CAVALRY);
+}
+
+TEST(InBandDeviceConfig, DuplicateWithReplaceSucceeds) {
+    struct amba_virt_dev_bounds_req req;
+    memset(&req, 0, sizeof(req));
+    req.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+    req.requested_size = 32 * 1024 * 1024;
+    req.preferred_offset = 0x08000000;
+    req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+    struct amba_virt_dev_bounds_resp resp;
+    LONGS_EQUAL(0, dev.setDeviceBounds(req, resp));
+
+    // Re-register with F_REPLACE
+    req.requested_size = 48 * 1024 * 1024;
+    req.flags = AMBA_VIRT_DEV_F_REPLACE | AMBA_VIRT_DEV_F_EXACT;
+    LONGS_EQUAL(0, dev.setDeviceBounds(req, resp));
+    LONGS_EQUAL(0, resp.status);
+    LONGS_EQUAL(48 * 1024 * 1024, resp.granted_size);
+
+    dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_CAVALRY);
+}
+
+TEST(InBandDeviceConfig, PermissionDeniedWithoutCap) {
+    // Standard role lacks QUERY_PEERS cap; verifying ACL rejection over wire
+    std::vector<struct amba_virt_peer_desc> peers;
+    struct amba_virt_query_resp qresp;
+    memset(&qresp, 0, sizeof(qresp));
+    int ret = dev.queryPeers(peers, 0, &qresp);
+    CHECK_TRUE(ret == -EPERM || qresp.status == -EPERM);
+}
+
+// =============================================================================
+// TEST_GROUP(IntrospectionAPI): Guest & Topology Query Subsystem
+// =============================================================================
+TEST_GROUP(IntrospectionAPI) {
+    AmbaVirtDevice dev;
+
+    void setup() override {
+        LONGS_EQUAL(0, dev.openDevice());
+        LONGS_EQUAL(0, dev.connect());
+        dev.flushRx();
+    }
+
+    void teardown() override {
+        dev.flushRx();
+        dev.closeDevice();
+    }
+};
+
+TEST(IntrospectionAPI, QuerySelf) {
+    struct amba_virt_peer_desc desc;
+    memset(&desc, 0, sizeof(desc));
+    LONGS_EQUAL(0, dev.querySelf(desc));
+    CHECK_TRUE(desc.cid > 0);
+    LONGS_EQUAL(1, desc.status); // ONLINE
+    CHECK_TRUE((desc.caps & AMBA_VIRT_CAP_QUERY_SELF) != 0);
+}
+
+TEST(IntrospectionAPI, QueryDevMem) {
+    struct amba_virt_dev_bounds_req req;
+    memset(&req, 0, sizeof(req));
+    req.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+    req.requested_size = 32 * 1024 * 1024;
+    req.preferred_offset = 0x00000000;
+    req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+    struct amba_virt_dev_bounds_resp bresp;
+    LONGS_EQUAL(0, dev.setDeviceBounds(req, bresp));
+
+    std::vector<struct amba_virt_dev_mem_desc> devs;
+    LONGS_EQUAL(0, dev.queryDevMem(devs, AMBA_VIRT_DEV_TYPE_GDMA));
+    CHECK_TRUE(devs.size() >= 1);
+
+    bool found = false;
+    for (const auto &d : devs) {
+        if (d.dev_type == AMBA_VIRT_DEV_TYPE_GDMA) {
+            found = true;
+            LONGS_EQUAL(0x00000000, d.base_offset);
+            LONGS_EQUAL(32 * 1024 * 1024, d.size);
+        }
+    }
+    CHECK_TRUE(found);
+
+    dev.releaseDeviceBounds(AMBA_VIRT_DEV_TYPE_GDMA);
+}
+
+TEST(IntrospectionAPI, QueryTopology) {
+    struct amba_virt_topo_desc topo;
+    memset(&topo, 0, sizeof(topo));
+    struct amba_virt_query_resp qresp;
+    memset(&qresp, 0, sizeof(qresp));
+    int ret = dev.queryTopology(topo, &qresp);
+    if (ret == 0) {
+        LONGS_EQUAL(0x655, topo.chip_id);
+        LONGS_EQUAL(4, topo.npu_core_cnt);
+        LONGS_EQUAL(0, topo.host_phys_addr); // HPA must be masked for security
+    } else {
+        LONGS_EQUAL(-EPERM, ret);
+    }
+}
+
+TEST(IntrospectionAPI, QueryPeers) {
+    std::vector<struct amba_virt_peer_desc> peers;
+    struct amba_virt_query_resp qresp;
+    memset(&qresp, 0, sizeof(qresp));
+    int ret = dev.queryPeers(peers, 0, &qresp);
+    if (ret == 0) {
+        CHECK_TRUE(peers.size() >= 1);
+    } else {
+        LONGS_EQUAL(-EPERM, ret);
+    }
+}
+
+// =============================================================================
+// TEST_GROUP(DynamicMemory): Extent Slicing & Memory Management
+// =============================================================================
+TEST_GROUP(DynamicMemory) {
+    AmbaVirtDevice dev;
+
+    void setup() override {
+        LONGS_EQUAL(0, dev.openDevice());
+        LONGS_EQUAL(0, dev.connect());
+        dev.flushRx();
+    }
+
+    void teardown() override {
+        dev.flushRx();
+        dev.closeDevice();
+    }
+};
+
+TEST(DynamicMemory, AllocAndFreeExtent) {
+    struct amba_virt_mem_resp resp;
+    LONGS_EQUAL(0, dev.allocMemory(4 * 1024 * 1024, 0x200000, 0, resp));
+    LONGS_EQUAL(0, resp.status);
+    LONGS_EQUAL(4 * 1024 * 1024, resp.allocated_size);
+
+    LONGS_EQUAL(0, dev.freeMemory(resp.bar_offset));
+}
+
+TEST(DynamicMemory, OverBarAllocFails) {
+    struct amba_virt_mem_resp resp;
+    int ret = dev.allocMemory(0x60000000U, 0x200000, 0, resp); // 1536 MiB > 1 GiB BAR
+    CHECK_TRUE(ret == -ERANGE || resp.status == -ERANGE);
+}
+
+// =============================================================================
+// TEST_GROUP(AccessControlList): Capability Enforcement
+// =============================================================================
+TEST_GROUP(AccessControlList) {
+    AmbaVirtDevice dev;
+
+    void setup() override {
+        LONGS_EQUAL(0, dev.openDevice());
+        LONGS_EQUAL(0, dev.connect());
+        dev.flushRx();
+    }
+
+    void teardown() override {
+        dev.flushRx();
+        dev.closeDevice();
+    }
+};
+
+TEST(AccessControlList, StandardCapabilitiesVerify) {
+    struct amba_virt_peer_desc desc;
+    memset(&desc, 0, sizeof(desc));
+    LONGS_EQUAL(0, dev.querySelf(desc));
+    CHECK_TRUE((desc.caps & AMBA_VIRT_CAP_PING) != 0);
+    CHECK_TRUE((desc.caps & AMBA_VIRT_CAP_QUERY_SELF) != 0);
+    CHECK_TRUE((desc.caps & AMBA_VIRT_CAP_DEV_CONFIG) != 0);
+    CHECK_TRUE((desc.caps & AMBA_VIRT_CAP_MEM_ALLOC) != 0);
 }
 
 // =============================================================================

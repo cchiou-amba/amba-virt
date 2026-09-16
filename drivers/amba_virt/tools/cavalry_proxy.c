@@ -122,6 +122,10 @@ int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 	g_tenants[tenant_idx].shm_size = shm_size;
 	g_tenants[tenant_idx].phys_base = phys_base;
 	g_tenants[tenant_idx].slice_offset = slice_offset;
+	g_tenants[tenant_idx].cavalry_pool_base = CAVALRY_POOL_BASE;
+	g_tenants[tenant_idx].cavalry_pool_size = CAVALRY_POOL_SIZE;
+	g_tenants[tenant_idx].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
+	g_tenants[tenant_idx].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
 	g_tenants[tenant_idx].in_use = 1;
 	pthread_mutex_unlock(&g_tenant_mutex);
 
@@ -170,6 +174,10 @@ struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid)
 			g_tenants[i].shm_size = slice_sz;
 			g_tenants[i].phys_base = g_phys_base + slice_off;
 			g_tenants[i].slice_offset = slice_off;
+			g_tenants[i].cavalry_pool_base = CAVALRY_POOL_BASE;
+			g_tenants[i].cavalry_pool_size = CAVALRY_POOL_SIZE;
+			g_tenants[i].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
+			g_tenants[i].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
 			g_tenants[i].in_use = 1;
 			printf("cavalry_proxy: auto-registered tenant slot %d for cid=%u (slice_off=0x%08x, phys=0x%lx)\n",
 			       i, cid, slice_off, (unsigned long)g_tenants[i].phys_base);
@@ -182,19 +190,39 @@ struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid)
 	return NULL;
 }
 
+int cavalry_proxy_set_tenant_bounds(uint32_t cid, uint32_t pool_base,
+				    uint32_t pool_size, uint32_t rpc_arena_offset,
+				    uint32_t rpc_arena_size)
+{
+	struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(cid);
+	if (!tenant)
+		return -ENOENT;
+
+	pthread_mutex_lock(&g_tenant_mutex);
+	tenant->cavalry_pool_base = pool_base;
+	tenant->cavalry_pool_size = pool_size;
+	tenant->rpc_arena_offset = rpc_arena_offset;
+	tenant->rpc_arena_size = rpc_arena_size;
+	pthread_mutex_unlock(&g_tenant_mutex);
+	return 0;
+}
+
 static int cavalry_proxy_alloc(uint32_t size, uint32_t client_cid, uint32_t session_id, uint32_t *out_offset)
 {
 	uint32_t aligned_size;
 	uint32_t cand;
 	int slot = -1;
 	int i;
+	struct cavalry_tenant_ctx *tenant = client_cid ? cavalry_proxy_get_tenant(client_cid) : NULL;
+	uint32_t pool_base = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_base : CAVALRY_POOL_BASE;
+	uint32_t pool_size = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_size : CAVALRY_POOL_SIZE;
 
 	if (!size || !out_offset)
 		return -EINVAL;
 
 	/* Page-align size (4096 bytes) */
 	aligned_size = (size + 4095U) & ~4095U;
-	if (aligned_size > CAVALRY_POOL_SIZE)
+	if (aligned_size > pool_size)
 		return -ENOMEM;
 
 	pthread_mutex_lock(&g_slice_mutex);
@@ -211,12 +239,12 @@ static int cavalry_proxy_alloc(uint32_t size, uint32_t client_cid, uint32_t sess
 		return -ENOMEM;
 	}
 
-	/* Simple first-fit bump allocation inside [CAVALRY_POOL_BASE, CAVALRY_POOL_BASE + CAVALRY_POOL_SIZE) */
-	cand = CAVALRY_POOL_BASE;
-	while (cand + aligned_size <= CAVALRY_POOL_BASE + CAVALRY_POOL_SIZE) {
+	/* First-fit bump allocation inside [pool_base, pool_base + pool_size) */
+	cand = pool_base;
+	while (cand + aligned_size <= pool_base + pool_size) {
 		int collision = 0;
 		for (i = 0; i < MAX_SLICES; i++) {
-			if (g_slices[i].in_use) {
+			if (g_slices[i].in_use && (!client_cid || g_slices[i].client_cid == client_cid)) {
 				uint32_t s_start = g_slices[i].bar_offset;
 				uint32_t s_end = s_start + g_slices[i].size;
 				if (cand < s_end && (cand + aligned_size) > s_start) {
@@ -481,13 +509,16 @@ static int cavalry_proxy_validate_range(uint32_t bar_offset, uint32_t size, uint
 {
 	int i;
 	uint64_t req_end;
+	struct cavalry_tenant_ctx *tenant = client_cid ? cavalry_proxy_get_tenant(client_cid) : NULL;
+	uint32_t pool_base = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_base : CAVALRY_POOL_BASE;
+	uint32_t pool_size = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_size : CAVALRY_POOL_SIZE;
 
-	/* Must be inside Cavalry pool: [32 MiB, 1 GiB) */
-	if (bar_offset < CAVALRY_POOL_BASE)
+	/* Must be inside Cavalry pool */
+	if (bar_offset < pool_base)
 		return -EFAULT;
 
 	req_end = (uint64_t)bar_offset + size;
-	if (req_end > (uint64_t)CAVALRY_POOL_BASE + CAVALRY_POOL_SIZE)
+	if (req_end > (uint64_t)pool_base + pool_size)
 		return -EFAULT;
 
 	/* Must be strictly contained within an allocated slice of this client */
@@ -595,15 +626,19 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
+	uint32_t arena_off = tenant->rpc_arena_offset ? tenant->rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
+
 	/* Cap arena_len against bounds */
-	if (req->arena_len == 0 || req->arena_len > CAVALRY_RPC_ARENA_SIZE) {
+	if (req->arena_len == 0 || req->arena_len > arena_sz) {
 		fprintf(stderr, "cavalry_proxy: invalid arena_len %u\n", req->arena_len);
 		resp->status = -EMSGSIZE;
 		return 0;
 	}
 
-	if (req->bar_offset != CAVALRY_RPC_ARENA_OFFSET) {
-		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x\n", req->bar_offset);
+	if (req->bar_offset != arena_off) {
+		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x (expected 0x%08x)\n",
+			req->bar_offset, arena_off);
 		resp->status = -EINVAL;
 		return 0;
 	}
@@ -614,7 +649,7 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 		resp->status = -ENOMEM;
 		return 0;
 	}
-	memcpy(host_arena_copy, tenant->shm_map + CAVALRY_RPC_ARENA_OFFSET, req->arena_len);
+	memcpy(host_arena_copy, tenant->shm_map + arena_off, req->arena_len);
 
 	run_req = (const struct cavalry_run_dags *)host_arena_copy;
 	if (run_req->dag_cnt == 0 || run_req->dag_cnt > MAX_DAG_CNT_CAP) {
@@ -754,15 +789,19 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
+	uint32_t arena_off = tenant->rpc_arena_offset ? tenant->rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
+
 	if (req->arena_len < sizeof(struct amba_virt_cavalry_reg_dag_desc) + sizeof(struct cavalry_run_dags) ||
-	    req->arena_len > CAVALRY_RPC_ARENA_SIZE) {
+	    req->arena_len > arena_sz) {
 		fprintf(stderr, "cavalry_proxy: invalid register arena_len %u\n", req->arena_len);
 		resp->status = -EMSGSIZE;
 		return 0;
 	}
 
-	if (req->bar_offset != CAVALRY_RPC_ARENA_OFFSET) {
-		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x\n", req->bar_offset);
+	if (req->bar_offset != arena_off) {
+		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x (expected 0x%08x)\n",
+			req->bar_offset, arena_off);
 		resp->status = -EINVAL;
 		return 0;
 	}
@@ -772,7 +811,7 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		resp->status = -ENOMEM;
 		return 0;
 	}
-	memcpy(host_arena_copy, tenant->shm_map + CAVALRY_RPC_ARENA_OFFSET, req->arena_len);
+	memcpy(host_arena_copy, tenant->shm_map + arena_off, req->arena_len);
 
 	reg_desc = (const struct amba_virt_cavalry_reg_dag_desc *)host_arena_copy;
 	run_req = (const struct cavalry_run_dags *)(host_arena_copy + sizeof(struct amba_virt_cavalry_reg_dag_desc));
@@ -1026,15 +1065,19 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
+	uint32_t arena_off = tenant->rpc_arena_offset ? tenant->rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
+
 	if (req->arena_len < sizeof(struct amba_virt_cavalry_run_reg_desc) ||
-	    req->arena_len > CAVALRY_RPC_ARENA_SIZE) {
+	    req->arena_len > arena_sz) {
 		fprintf(stderr, "cavalry_proxy: invalid run_reg arena_len %u\n", req->arena_len);
 		resp->status = -EMSGSIZE;
 		return 0;
 	}
 
-	if (req->bar_offset != CAVALRY_RPC_ARENA_OFFSET) {
-		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x\n", req->bar_offset);
+	if (req->bar_offset != arena_off) {
+		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x (expected 0x%08x)\n",
+			req->bar_offset, arena_off);
 		resp->status = -EINVAL;
 		return 0;
 	}
@@ -1066,7 +1109,7 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 		resp->status = -ENOMEM;
 		return 0;
 	}
-	memcpy(host_arena_copy, tenant->shm_map + CAVALRY_RPC_ARENA_OFFSET, req->arena_len);
+	memcpy(host_arena_copy, tenant->shm_map + arena_off, req->arena_len);
 
 	run_reg = (const struct amba_virt_cavalry_run_reg_desc *)host_arena_copy;
 
@@ -1227,12 +1270,13 @@ int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 		break;
 	}
 
-	case VCAV_OP_QUERY_BUF:
-		/* Return exact Cavalry window geometry: [32 MiB, 1 GiB) */
-		resp->bar_offset = CAVALRY_POOL_BASE;
-		resp->size = CAVALRY_POOL_SIZE;
+	case VCAV_OP_QUERY_BUF: {
+		struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(client_cid);
+		resp->bar_offset = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_base : CAVALRY_POOL_BASE;
+		resp->size = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_size : CAVALRY_POOL_SIZE;
 		resp->status = 0;
 		break;
+	}
 
 	case VCAV_OP_QUERY_UCODE_CMD_SIZE: {
 		struct cavalry_ucode_cmd_size ucmd = { 0 };

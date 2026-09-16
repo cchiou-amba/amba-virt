@@ -25,6 +25,10 @@
 #include "amba_virt.h"
 #include "amba_virt_test.h"
 #include "cavalry_proxy.h"
+#include "virt_acl.h"
+#include "virt_admin_ipc.h"
+#include "virt_mem_pool.h"
+#include "virt_query.h"
 
 static pthread_mutex_t g_gdma_hw_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -202,6 +206,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	virt_mem_pool_init(0x40000000U); /* 1 GiB default BAR */
+	virt_acl_init();
+	virt_admin_ipc_start(NULL);
+
 	if (enforce_path_b) {
 		cavalry_proxy_set_enforce_path_b(1);
 		printf("amba-virt-server: Enforcing Path-B-only policy (legacy Path A disabled)\n");
@@ -216,6 +224,7 @@ int main(int argc, char **argv)
 					(map + slice_off) : MAP_FAILED;
 		cavalry_proxy_register_tenant(cid, idx, -1, submap, slice_sz,
 					      info.shm_phys + slice_off, slice_off);
+		virt_mem_pool_register_tenant(cid, idx, slice_sz, slice_sz);
 	}
 
 	for (;;) {
@@ -303,8 +312,13 @@ int main(int argc, char **argv)
 					fprintf(stderr, "GDMA: unknown tenant for cid=%u\n", rx.client_cid);
 					copy.status = -EACCES;
 				} else {
-					uint32_t slice_off = tenant->slice_offset;
-					int range_err = 0;
+					uint32_t cap = (in->type == AMBA_VIRT_MSG_GDMA_PITCH_REQ) ?
+							AMBA_VIRT_CAP_GDMA_PITCH : AMBA_VIRT_CAP_GDMA_COPY;
+					if (!virt_acl_has_cap(rx.client_cid, cap)) {
+						copy.status = -EPERM;
+					} else {
+						uint32_t slice_off = tenant->slice_offset;
+						int range_err = 0;
 
 					if (copy.flags & AMBA_VIRT_GDMA_F_PITCH) {
 						uint64_t src_end = (uint64_t)copy.src_off +
@@ -337,6 +351,7 @@ int main(int argc, char **argv)
 					}
 				}
 			}
+		}
 
 			out = (struct amba_virt_msg *)tx.data;
 			memset(out, 0, sizeof(*out));
@@ -369,8 +384,137 @@ int main(int argc, char **argv)
 			out->type = AMBA_VIRT_MSG_CAVALRY_RESP;
 			out->seq = in->seq;
 			cav_resp = (struct amba_virt_cavalry_rpc *)(tx.data + sizeof(*out));
-			cavalry_proxy_handle_rpc(cav_req, cav_resp, rx.client_cid);
+
+			if (cav_req->opcode == VCAV_OP_RUN_DAGS &&
+			    !virt_acl_has_cap(rx.client_cid, AMBA_VIRT_CAP_CAVALRY_PATH_A)) {
+				cav_resp->status = -EPERM;
+			} else if (cav_req->opcode == VCAV_OP_REGISTER_DAG &&
+				   !virt_acl_has_cap(rx.client_cid, AMBA_VIRT_CAP_CAVALRY_REGISTER)) {
+				cav_resp->status = -EPERM;
+			} else {
+				cavalry_proxy_handle_rpc(cav_req, cav_resp, rx.client_cid);
+			}
 			tx.len = sizeof(*out) + sizeof(*cav_resp);
+		} else if (in->type == AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ) {
+			struct amba_virt_dev_bounds_req *b_req;
+			struct amba_virt_dev_bounds_resp *b_resp;
+			struct cavalry_tenant_ctx *tenant;
+			unsigned char *submap = MAP_FAILED;
+
+			if (rx.len < sizeof(*in) + sizeof(*b_req)) {
+				fprintf(stderr, "short dev bounds req %u (expected >= %zu)\n",
+					rx.len, sizeof(*in) + sizeof(*b_req));
+				continue;
+			}
+			b_req = (struct amba_virt_dev_bounds_req *)(rx.data + sizeof(*in));
+			out = (struct amba_virt_msg *)tx.data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_DEV_SET_BOUNDS_RESP;
+			out->seq = in->seq;
+			b_resp = (struct amba_virt_dev_bounds_resp *)(tx.data + sizeof(*out));
+
+			if (!virt_acl_has_cap(rx.client_cid, AMBA_VIRT_CAP_DEV_CONFIG)) {
+				b_resp->status = -EPERM;
+				b_resp->err_code = AMBA_VIRT_ERR_PERM_DENIED;
+				tx.len = sizeof(*out) + sizeof(*b_resp);
+			} else {
+				tenant = cavalry_proxy_get_tenant(rx.client_cid);
+				if (tenant)
+					submap = tenant->shm_map;
+
+				virt_mem_pool_set_device_bounds(rx.client_cid, b_req, b_resp, submap);
+
+				if (b_resp->status == 0 && b_req->dev_type == AMBA_VIRT_DEV_TYPE_CAVALRY) {
+					cavalry_proxy_set_tenant_bounds(rx.client_cid,
+									b_resp->granted_offset,
+									b_resp->granted_size,
+									b_resp->rpc_arena_offset,
+									b_req->rpc_arena_size);
+				}
+
+				tx.len = sizeof(*out) + sizeof(*b_resp);
+			}
+		} else if (in->type == AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_REQ) {
+			struct amba_virt_dev_bounds_req *b_req;
+			struct amba_virt_dev_bounds_resp *b_resp;
+
+			if (rx.len < sizeof(*in) + sizeof(*b_req)) {
+				fprintf(stderr, "short dev release req %u\n", rx.len);
+				continue;
+			}
+			b_req = (struct amba_virt_dev_bounds_req *)(rx.data + sizeof(*in));
+			out = (struct amba_virt_msg *)tx.data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_RESP;
+			out->seq = in->seq;
+			b_resp = (struct amba_virt_dev_bounds_resp *)(tx.data + sizeof(*out));
+
+			b_resp->status = virt_mem_pool_release_device_bounds(rx.client_cid, b_req->dev_type);
+			if (b_req->dev_type == AMBA_VIRT_DEV_TYPE_CAVALRY) {
+				cavalry_proxy_set_tenant_bounds(rx.client_cid,
+								CAVALRY_POOL_BASE,
+								CAVALRY_POOL_SIZE,
+								CAVALRY_RPC_ARENA_OFFSET,
+								CAVALRY_RPC_ARENA_SIZE);
+			}
+
+			tx.len = sizeof(*out) + sizeof(*b_resp);
+		} else if (in->type == AMBA_VIRT_MSG_MEM_ALLOC_REQ) {
+			struct amba_virt_mem_req *m_req;
+			struct amba_virt_mem_resp *m_resp;
+			struct cavalry_tenant_ctx *tenant;
+			unsigned char *submap = MAP_FAILED;
+			uint64_t phys_base = 0;
+
+			if (rx.len < sizeof(*in) + sizeof(*m_req)) {
+				fprintf(stderr, "short mem alloc req %u\n", rx.len);
+				continue;
+			}
+			m_req = (struct amba_virt_mem_req *)(rx.data + sizeof(*in));
+			out = (struct amba_virt_msg *)tx.data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_MEM_ALLOC_RESP;
+			out->seq = in->seq;
+			m_resp = (struct amba_virt_mem_resp *)(tx.data + sizeof(*out));
+
+			if (!virt_acl_has_cap(rx.client_cid, AMBA_VIRT_CAP_MEM_ALLOC)) {
+				m_resp->status = -EPERM;
+				tx.len = sizeof(*out) + sizeof(*m_resp);
+			} else {
+				tenant = cavalry_proxy_get_tenant(rx.client_cid);
+				if (tenant) {
+					submap = tenant->shm_map;
+					phys_base = tenant->phys_base;
+				}
+
+				if (m_req->op == AMBA_VIRT_MEM_OP_ALLOC) {
+					virt_mem_pool_alloc_extent(rx.client_cid, m_req, m_resp, submap, phys_base);
+				} else if (m_req->op == AMBA_VIRT_MEM_OP_FREE) {
+					virt_mem_pool_free_extent(rx.client_cid, m_req->bar_offset, m_resp);
+				} else {
+					m_resp->status = -EOPNOTSUPP;
+				}
+
+				tx.len = sizeof(*out) + sizeof(*m_resp);
+			}
+		} else if (in->type == AMBA_VIRT_MSG_QUERY_REQ) {
+			struct amba_virt_query_req *q_req;
+			struct amba_virt_query_resp *q_resp;
+
+			if (rx.len < sizeof(*in) + sizeof(*q_req)) {
+				fprintf(stderr, "short query req %u (expected >= %zu)\n",
+					rx.len, sizeof(*in) + sizeof(*q_req));
+				continue;
+			}
+			q_req = (struct amba_virt_query_req *)(rx.data + sizeof(*in));
+			out = (struct amba_virt_msg *)tx.data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_QUERY_RESP;
+			out->seq = in->seq;
+			q_resp = (struct amba_virt_query_resp *)(tx.data + sizeof(*out));
+
+			virt_query_handle_req(rx.client_cid, q_req, q_resp);
+			tx.len = sizeof(*out) + sizeof(*q_resp);
 		} else {
 			fprintf(stderr, "unknown type %u\n", in->type);
 			continue;

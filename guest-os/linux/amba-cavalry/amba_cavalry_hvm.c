@@ -32,6 +32,22 @@
 
 static unsigned int cavalry_rpc_timeout_ms = 5000;
 
+static unsigned int g_pool_size = CAVALRY_POOL_SIZE;
+module_param_named(pool_size, g_pool_size, uint, 0444);
+MODULE_PARM_DESC(pool_size, "Cavalry memory pool size in bytes (default 992 MiB)");
+
+static unsigned int g_rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
+module_param_named(rpc_arena_size, g_rpc_arena_size, uint, 0444);
+MODULE_PARM_DESC(rpc_arena_size, "Cavalry RPC arena size in bytes (default 1 MiB)");
+
+static unsigned int g_preferred_offset = AMBA_VIRT_OFFSET_AUTO;
+module_param_named(preferred_offset, g_preferred_offset, uint, 0444);
+MODULE_PARM_DESC(preferred_offset, "Preferred BAR base offset, or 0xFFFFFFFF for AUTO");
+
+static int g_force_replace = 0;
+module_param_named(force_replace, g_force_replace, int, 0444);
+MODULE_PARM_DESC(force_replace, "Force replacement of existing Cavalry registration (default 0)");
+
 struct amba_cavalry_dev {
 	struct miscdevice misc;
 	struct mutex arena_mutex;
@@ -39,10 +55,122 @@ struct amba_cavalry_dev {
 	void __iomem *bar_iomem;
 	size_t bar_size;
 	atomic_t sequence;
+	u32 pool_base;
+	u32 pool_size;
+	u32 rpc_arena_offset;
+	u32 rpc_arena_size;
 	bool online;
 };
 
 static struct amba_cavalry_dev g_cav;
+
+static int amba_cavalry_negotiate_bounds(struct amba_cavalry_dev *cav)
+{
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_req req;
+	} req_pkt;
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_resp resp;
+	} resp_pkt;
+	u32 resp_len = sizeof(resp_pkt);
+	int ret;
+	int retries = 1;
+
+	memset(&req_pkt, 0, sizeof(req_pkt));
+	req_pkt.msg.type = AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ;
+	req_pkt.msg.seq = (u32)atomic_inc_return(&cav->sequence);
+	req_pkt.req.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+	req_pkt.req.requested_size = g_pool_size;
+	req_pkt.req.preferred_offset = g_preferred_offset;
+	req_pkt.req.rpc_arena_size = g_rpc_arena_size;
+	req_pkt.req.flags = AMBA_VIRT_DEV_F_EXACT;
+	if (g_force_replace)
+		req_pkt.req.flags |= AMBA_VIRT_DEV_F_REPLACE;
+
+retry:
+	dma_wmb();
+	ret = amba_virt_rpc(&req_pkt, sizeof(req_pkt), &resp_pkt, &resp_len, cavalry_rpc_timeout_ms);
+	if (ret) {
+		pr_err("amba_cavalry: vsock RPC transport failure or timeout (%d)\n", ret);
+		return ret;
+	}
+	dma_rmb();
+
+	if (resp_len != sizeof(resp_pkt) ||
+	    resp_pkt.msg.type != AMBA_VIRT_MSG_DEV_SET_BOUNDS_RESP)
+		return -EPROTO;
+
+	if (resp_pkt.resp.status == 0) {
+		cav->pool_base = resp_pkt.resp.granted_offset;
+		cav->pool_size = resp_pkt.resp.granted_size;
+		cav->rpc_arena_offset = resp_pkt.resp.rpc_arena_offset;
+		cav->rpc_arena_size = g_rpc_arena_size;
+		pr_info("amba_cavalry: registered at BAR offset 0x%08x (%u MB), arena at 0x%08x\n",
+			cav->pool_base, cav->pool_size / (1024 * 1024), cav->rpc_arena_offset);
+		return 0;
+	}
+
+	switch (resp_pkt.resp.status) {
+	case -EEXIST:
+		pr_warn("amba_cavalry: offset 0x%08x collides with active dev %u\n",
+			req_pkt.req.preferred_offset, resp_pkt.resp.colliding_dev);
+		if (retries > 0 && req_pkt.req.preferred_offset != AMBA_VIRT_OFFSET_AUTO &&
+		    resp_pkt.resp.suggested_offset != 0) {
+			pr_info("amba_cavalry: auto-retrying at suggested offset 0x%08x\n",
+				resp_pkt.resp.suggested_offset);
+			req_pkt.req.preferred_offset = resp_pkt.resp.suggested_offset;
+			retries--;
+			goto retry;
+		}
+		break;
+	case -ENOMEM:
+		pr_err("amba_cavalry: requested %u MB exceeds available quota (%u MB available)\n",
+		       req_pkt.req.requested_size / (1024 * 1024),
+		       resp_pkt.resp.max_avail_size / (1024 * 1024));
+		break;
+	case -EPERM:
+		pr_err("amba_cavalry: host ACL denied registration (err_code=%u). Check tenant permissions\n",
+		       resp_pkt.resp.err_code);
+		break;
+	case -EBUSY:
+		pr_err("amba_cavalry: Cavalry device already registered for this VM. Pass 'force_replace=1' to overwrite\n");
+		break;
+	case -ERANGE:
+		pr_err("amba_cavalry: requested range exceeds hypervisor BAR window (err_code=%u)\n",
+		       resp_pkt.resp.err_code);
+		break;
+	default:
+		pr_err("amba_cavalry: boundary negotiation failed (status=%d, err_code=%u)\n",
+		       resp_pkt.resp.status, resp_pkt.resp.err_code);
+		break;
+	}
+
+	return resp_pkt.resp.status;
+}
+
+static void amba_cavalry_release_bounds(struct amba_cavalry_dev *cav)
+{
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_req req;
+	} req_pkt;
+	struct {
+		struct amba_virt_msg msg;
+		struct amba_virt_dev_bounds_resp resp;
+	} resp_pkt;
+	u32 resp_len = sizeof(resp_pkt);
+
+	memset(&req_pkt, 0, sizeof(req_pkt));
+	req_pkt.msg.type = AMBA_VIRT_MSG_DEV_RELEASE_BOUNDS_REQ;
+	req_pkt.msg.seq = (u32)atomic_inc_return(&cav->sequence);
+	req_pkt.req.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+
+	dma_wmb();
+	amba_virt_rpc(&req_pkt, sizeof(req_pkt), &resp_pkt, &resp_len, cavalry_rpc_timeout_ms);
+	dma_rmb();
+}
 
 static int amba_cavalry_send_rpc(struct amba_virt_cavalry_rpc *rpc)
 {
@@ -152,16 +280,19 @@ static int amba_cavalry_mmap(struct file *filp, struct vm_area_struct *vma)
 	if (!g_cav.online || !g_cav.bar_phys || !g_cav.bar_size)
 		return -ENODEV;
 
+	u32 pool_base = g_cav.pool_base ? g_cav.pool_base : CAVALRY_POOL_BASE;
+	u32 pool_size = g_cav.pool_size ? g_cav.pool_size : CAVALRY_POOL_SIZE;
+
 	offset = vma->vm_pgoff << PAGE_SHIFT;
 	len = vma->vm_end - vma->vm_start;
 
-	/* Strictly reject any offset below 32 MiB (GDMA staging and RPC arena) */
-	if (offset < CAVALRY_POOL_BASE) {
+	/* Strictly reject any offset below pool base */
+	if (offset < pool_base) {
 		pr_warn_ratelimited("amba_cavalry: rejected mmap at offset 0x%lx (protected low window)\n", offset);
 		return -EINVAL;
 	}
 
-	if (offset + len > g_cav.bar_size)
+	if (offset + len > (unsigned long)pool_base + pool_size)
 		return -EINVAL;
 
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
@@ -234,9 +365,8 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		if (copy_from_user(&q, (void __user *)arg, sizeof(q)))
 			return -EFAULT;
 		if (q.buf == CAVALRY_MEM_USER) {
-			/* Exact geometry of the Cavalry allocation window: [32 MiB, 1 GiB) */
-			q.offset = CAVALRY_POOL_BASE;
-			q.length = CAVALRY_POOL_SIZE;
+			q.offset = g_cav.pool_base ? g_cav.pool_base : CAVALRY_POOL_BASE;
+			q.length = g_cav.pool_size ? g_cav.pool_size : CAVALRY_POOL_SIZE;
 		} else {
 			q.offset = 0;
 			q.length = 0;
@@ -341,12 +471,15 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		if (copy_from_user(&run_hdr, (void __user *)arg, sizeof(run_hdr)))
 			return -EFAULT;
 
+		u32 arena_off = g_cav.rpc_arena_offset ? g_cav.rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+		u32 arena_sz = g_cav.rpc_arena_size ? g_cav.rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
+
 		if (run_hdr.dag_cnt == 0 || run_hdr.dag_cnt > 128)
 			return -EINVAL;
 
 		req_size = sizeof(struct cavalry_run_dags) +
 			run_hdr.dag_cnt * sizeof(struct cavalry_dag_desc);
-		if (req_size > CAVALRY_RPC_ARENA_SIZE)
+		if (req_size > arena_sz)
 			return -EMSGSIZE;
 
 		kbuf = vmalloc(req_size);
@@ -361,7 +494,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		/* Lock arena mutex across write -> RPC -> read results */
 		mutex_lock(&g_cav.arena_mutex);
 
-		memcpy_toio(g_cav.bar_iomem + CAVALRY_RPC_ARENA_OFFSET, kbuf, req_size);
+		memcpy_toio(g_cav.bar_iomem + arena_off, kbuf, req_size);
 #ifdef CONFIG_ARM64
 		asm volatile("dsb st" ::: "memory");
 #endif
@@ -369,7 +502,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		memset(&rpc, 0, sizeof(rpc));
 		rpc.opcode = VCAV_OP_RUN_DAGS;
 		rpc.session_id = session_id;
-		rpc.bar_offset = CAVALRY_RPC_ARENA_OFFSET;
+		rpc.bar_offset = arena_off;
 		rpc.arena_len = req_size;
 
 		ret = amba_cavalry_send_rpc(&rpc);
@@ -401,8 +534,11 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		if (copy_from_user(&reg_u, (void __user *)arg, sizeof(reg_u)))
 			return -EFAULT;
 
+		u32 arena_off = g_cav.rpc_arena_offset ? g_cav.rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+		u32 arena_sz = g_cav.rpc_arena_size ? g_cav.rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
+
 		if (reg_u.run_dags_bytes == 0 ||
-		    reg_u.run_dags_bytes > (CAVALRY_RPC_ARENA_SIZE - sizeof(rdesc)))
+		    reg_u.run_dags_bytes > (arena_sz - sizeof(rdesc)))
 			return -EINVAL;
 
 		kbuf = vmalloc(reg_u.run_dags_bytes);
@@ -429,8 +565,8 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		/* Lock arena mutex across write -> RPC -> read results */
 		mutex_lock(&g_cav.arena_mutex);
 
-		memcpy_toio(g_cav.bar_iomem + CAVALRY_RPC_ARENA_OFFSET, &rdesc, sizeof(rdesc));
-		memcpy_toio(g_cav.bar_iomem + CAVALRY_RPC_ARENA_OFFSET + sizeof(rdesc), kbuf, reg_u.run_dags_bytes);
+		memcpy_toio(g_cav.bar_iomem + arena_off, &rdesc, sizeof(rdesc));
+		memcpy_toio(g_cav.bar_iomem + arena_off + sizeof(rdesc), kbuf, reg_u.run_dags_bytes);
 #ifdef CONFIG_ARM64
 		asm volatile("dsb st" ::: "memory");
 #endif
@@ -438,7 +574,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		memset(&rpc, 0, sizeof(rpc));
 		rpc.opcode = VCAV_OP_REGISTER_DAG;
 		rpc.session_id = session_id;
-		rpc.bar_offset = CAVALRY_RPC_ARENA_OFFSET;
+		rpc.bar_offset = arena_off;
 		rpc.arena_len = total_payload;
 
 		ret = amba_cavalry_send_rpc(&rpc);
@@ -521,10 +657,12 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		rrun.port_cnt = run_u.port_cnt;
 		memcpy(rrun.ports, run_u.ports, sizeof(run_u.ports));
 
+		u32 arena_off = g_cav.rpc_arena_offset ? g_cav.rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+
 		/* Lock arena mutex across write -> RPC -> read results */
 		mutex_lock(&g_cav.arena_mutex);
 
-		memcpy_toio(g_cav.bar_iomem + CAVALRY_RPC_ARENA_OFFSET, &rrun, sizeof(rrun));
+		memcpy_toio(g_cav.bar_iomem + arena_off, &rrun, sizeof(rrun));
 #ifdef CONFIG_ARM64
 		asm volatile("dsb st" ::: "memory");
 #endif
@@ -533,7 +671,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		rpc.opcode = VCAV_OP_RUN_REGISTERED_DAG;
 		rpc.session_id = session_id;
 		rpc.dag_id = run_u.dag_id;
-		rpc.bar_offset = CAVALRY_RPC_ARENA_OFFSET;
+		rpc.bar_offset = arena_off;
 		rpc.arena_len = sizeof(rrun);
 
 		ret = amba_cavalry_send_rpc(&rpc);
@@ -577,6 +715,12 @@ static int __init amba_cavalry_init(void)
 		return ret;
 	}
 
+	ret = amba_cavalry_negotiate_bounds(&g_cav);
+	if (ret) {
+		pr_err("amba_cavalry: boundary negotiation failed (%d)\n", ret);
+		return ret;
+	}
+
 	g_cav.misc.minor = MISC_DYNAMIC_MINOR;
 	g_cav.misc.name = "cavalry";
 	g_cav.misc.fops = &amba_cavalry_fops;
@@ -584,6 +728,7 @@ static int __init amba_cavalry_init(void)
 
 	ret = misc_register(&g_cav.misc);
 	if (ret) {
+		amba_cavalry_release_bounds(&g_cav);
 		pr_err("amba_cavalry: failed to register misc device /dev/cavalry (%d)\n", ret);
 		return ret;
 	}
@@ -598,6 +743,7 @@ static void __exit amba_cavalry_exit(void)
 {
 	g_cav.online = false;
 	misc_deregister(&g_cav.misc);
+	amba_cavalry_release_bounds(&g_cav);
 	pr_info("amba_cavalry: unregistered\n");
 }
 
