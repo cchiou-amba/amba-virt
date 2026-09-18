@@ -38,8 +38,7 @@ else
     MODE_DESC := PRODUCTION (Hermetic In-Tree / Zero-Trust Appliance)
 endif
 
-# Dynamically discover all out-of-tree driver suites in drivers/
-OOT_DRIVERS := $(notdir $(patsubst %/,%,$(wildcard $(DRIVERS_DIR)/*/)))
+OOT_DRIVERS := $(filter-out private platform,$(notdir $(patsubst %/,%,$(wildcard $(DRIVERS_DIR)/*/))))
 ifeq ($(wildcard $(DRIVERS_DIR)/ambvideo),)
     OOT_DRIVERS := $(filter-out dsplog,$(OOT_DRIVERS))
 endif
@@ -215,32 +214,38 @@ drivers: $(call my-depend,eve-kernel-headers)
 	key=$(BUILD_DIR)/certs/signing_key.pem; \
 	cert=$(BUILD_DIR)/certs/signing_key.x509; \
 	for drv in $(OOT_DRIVERS); do \
-		if [ -f "$(DRIVERS_DIR)/$$drv/Makefile" ]; then \
-			echo "Building out-of-tree driver: $$drv..."; \
-			if [ "$$drv" = "pwr_gpu" ]; then \
-				$(MAKE) -C $(DRIVERS_DIR)/$$drv KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
-			else \
-				$(MAKE) -C $(DRIVERS_DIR)/$$drv KDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		echo "Building out-of-tree driver: $$drv..."; \
+		if [ "$$drv" = "pwr_gpu" ]; then \
+			$(MAKE) -C $(DRIVERS_DIR)/$$drv KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
+		elif [ "$$drv" = "amba_otp" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/amba_otp/sec_v2) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-I$$(realpath $(DRIVERS_DIR)/amba_otp/include) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules || exit 1; \
+		elif [ "$$drv" = "ambvideo" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		elif [ "$$drv" = "dsplog" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+		elif [ "$$drv" = "pci_platform" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		elif [ -f "$(DRIVERS_DIR)/$$drv/Makefile" ]; then \
+			$(MAKE) -C $(DRIVERS_DIR)/$$drv KDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		fi; \
+		for ko in $$(find $(DRIVERS_DIR)/$$drv/ -name "*.ko"); do \
+			if [ -x "$$sign_bin" ] && [ -f "$$key" ]; then \
+				echo "Signing $$ko with $$(basename $$key)..."; \
+				"$$sign_bin" sha256 "$$key" "$$cert" "$$ko"; \
 			fi; \
-			for ko in $$(find $(DRIVERS_DIR)/$$drv -name "*.ko"); do \
-				if [ -x "$$sign_bin" ] && [ -f "$$key" ]; then \
-					echo "Signing $$ko with $$(basename $$key)..."; \
-					"$$sign_bin" sha256 "$$key" "$$cert" "$$ko"; \
-				fi; \
-				cp -f "$$ko" $(BUILD_DIR)/modules/; \
-			done; \
-			for bin in $$(find $(DRIVERS_DIR)/$$drv -name "*.bin"); do \
-				cp -f "$$bin" $(BUILD_DIR)/firmware/; \
-			done; \
-			if [ -d "$(DRIVERS_DIR)/$$drv/tools" ]; then \
-				if [ -f "$(DRIVERS_DIR)/$$drv/tools/Makefile" ]; then \
-					$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
-				fi; \
-				for exe in $$(find $(DRIVERS_DIR)/$$drv/tools -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
-					mkdir -p $(BUILD_DIR)/bin; \
-					cp -f "$$exe" $(BUILD_DIR)/bin/; \
-				done; \
+			cp -f "$$ko" $(BUILD_DIR)/modules/; \
+		done; \
+		for bin in $$(find $(DRIVERS_DIR)/$$drv/ -name "*.bin"); do \
+			cp -f "$$bin" $(BUILD_DIR)/firmware/; \
+		done; \
+		if [ -d "$(DRIVERS_DIR)/$$drv/tools" ]; then \
+			if [ -f "$(DRIVERS_DIR)/$$drv/tools/Makefile" ]; then \
+				$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
 			fi; \
+			for exe in $$(find $(DRIVERS_DIR)/$$drv/tools/ -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
+				mkdir -p $(BUILD_DIR)/bin; \
+				cp -f "$$exe" $(BUILD_DIR)/bin/; \
+			done; \
 		fi; \
 	done
 	@$(EVE_MAKE_DONE)
@@ -253,34 +258,40 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	sign_bin=$(BUILD_DIR)/bin/sign-file; \
 	key=$(BUILD_DIR)/certs/signing_key.pem; \
 	cert=$(BUILD_DIR)/certs/signing_key.x509; \
-	if [ -f "$(DRIVERS_DIR)/$@/Makefile" ]; then \
-		echo "Building out-of-tree driver: $@..."; \
-		if [ "$@" = "pwr_gpu" ]; then \
-			$(MAKE) -C $(DRIVERS_DIR)/$@ KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
-		else \
-			$(MAKE) -C $(DRIVERS_DIR)/$@ KDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
-		fi; \
-		for ko in $$(find $(DRIVERS_DIR)/$@ -name "*.ko"); do \
-			if [ -x "$$sign_bin" ] && [ -f "$$key" ]; then \
-				echo "Signing $$ko with $$(basename $$key)..."; \
-				"$$sign_bin" sha256 "$$key" "$$cert" "$$ko"; \
-			fi; \
-			cp -f "$$ko" $(BUILD_DIR)/modules/; \
-		done; \
-		for bin in $$(find $(DRIVERS_DIR)/$@ -name "*.bin"); do \
-			cp -f "$$bin" $(BUILD_DIR)/firmware/; \
-		done; \
-		if [ -d "$(DRIVERS_DIR)/$@/tools" ]; then \
-			if [ -f "$(DRIVERS_DIR)/$@/tools/Makefile" ]; then \
-				$(MAKE) -C $(DRIVERS_DIR)/$@/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
-			fi; \
-			for exe in $$(find $(DRIVERS_DIR)/$@/tools -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
-				mkdir -p $(BUILD_DIR)/bin; \
-				cp -f "$$exe" $(BUILD_DIR)/bin/; \
-			done; \
-		fi; \
+	echo "Building out-of-tree driver: $@..."; \
+	if [ "$@" = "pwr_gpu" ]; then \
+		$(MAKE) -C $(DRIVERS_DIR)/$@ KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
+	elif [ "$@" = "amba_otp" ]; then \
+		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/amba_otp/sec_v2) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-I$$(realpath $(DRIVERS_DIR)/amba_otp/include) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules || exit 1; \
+	elif [ "$@" = "ambvideo" ]; then \
+		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+	elif [ "$@" = "dsplog" ]; then \
+		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+	elif [ "$@" = "pci_platform" ]; then \
+		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+	elif [ -f "$(DRIVERS_DIR)/$@/Makefile" ]; then \
+		$(MAKE) -C $(DRIVERS_DIR)/$@ KDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
 	else \
 		echo "[skip] $@: driver source not present in tree"; \
+	fi; \
+	for ko in $$(find $(DRIVERS_DIR)/$@/ -name "*.ko"); do \
+		if [ -x "$$sign_bin" ] && [ -f "$$key" ]; then \
+			echo "Signing $$ko with $$(basename $$key)..."; \
+			"$$sign_bin" sha256 "$$key" "$$cert" "$$ko"; \
+		fi; \
+		cp -f "$$ko" $(BUILD_DIR)/modules/; \
+	done; \
+	for bin in $$(find $(DRIVERS_DIR)/$@/ -name "*.bin"); do \
+		cp -f "$$bin" $(BUILD_DIR)/firmware/; \
+	done; \
+	if [ -d "$(DRIVERS_DIR)/$@/tools" ]; then \
+		if [ -f "$(DRIVERS_DIR)/$@/tools/Makefile" ]; then \
+			$(MAKE) -C $(DRIVERS_DIR)/$@/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
+		fi; \
+		for exe in $$(find $(DRIVERS_DIR)/$@/tools/ -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
+			mkdir -p $(BUILD_DIR)/bin; \
+			cp -f "$$exe" $(BUILD_DIR)/bin/; \
+		done; \
 	fi
 
 test-gdma: diag

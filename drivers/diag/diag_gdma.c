@@ -10,7 +10,7 @@
 #include <linux/slab.h>
 
 #include <soc/ambarella/gdma.h>
-#include <cavalry_window.h>
+extern int cavalry_user_window_get(phys_addr_t *phys, size_t *size);
 
 #define TEST_REGION_SIZE	(2U << 20)
 #define TEST_SRC_OFFSET		0

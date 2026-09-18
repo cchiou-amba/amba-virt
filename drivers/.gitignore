@@ -2,3 +2,7 @@ amba_otp
 pwr_gpu
 cavalry
 ambvideo
+private
+platform
+dsplog
+pci_platform
