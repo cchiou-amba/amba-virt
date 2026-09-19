@@ -222,7 +222,7 @@ drivers: $(call my-depend,eve-kernel-headers)
 		elif [ "$$drv" = "ambvideo" ]; then \
 			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
 		elif [ "$$drv" = "dsplog" ]; then \
-			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655" KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
 		elif [ "$$drv" = "pci_platform" ]; then \
 			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
 		elif [ -f "$(DRIVERS_DIR)/$$drv/Makefile" ]; then \
@@ -266,7 +266,7 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	elif [ "$@" = "ambvideo" ]; then \
 		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
 	elif [ "$@" = "dsplog" ]; then \
-		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655" KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
 	elif [ "$@" = "pci_platform" ]; then \
 		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
 	elif [ -f "$(DRIVERS_DIR)/$@/Makefile" ]; then \
