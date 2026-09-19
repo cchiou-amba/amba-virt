@@ -58,7 +58,8 @@ EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
 	guest guest-all guest-ubuntu guest-alpine guest-qnx guest-qnx-image \
-	guest-windows clean-guest distclean-guest
+	guest-windows clean-guest distclean-guest \
+	u-boot host-mkimage host_mkimage u-boot-pkg u-boot-package clean-uboot
 
 .DEFAULT_GOAL := all
 
@@ -80,6 +81,10 @@ help:
 	@echo
 	@echo "  <empty> / all       Build EVE BaseOS + all NOHYPER drivers and apps (default)"
 	@echo "  everything          Build all NOHYPER drivers/apps + all HVM guests"
+	@echo "  u-boot              Build U-Boot bootloader (u-boot.bin)"
+	@echo "  host-mkimage        Build host firmware packaging tool (host_mkimage)"
+	@echo "  u-boot-pkg          Package u-boot.bin into bld.img firmware container"
+	@echo "  clean-uboot         Clean U-Boot and host_mkimage build outputs"
 	@echo "  guest               Build all HVM guest side artifacts"
 	@echo "  guest-ubuntu        Build Ubuntu 24.04 HVM driver & client"
 	@echo "  guest-alpine        Build Alpine 3.20 HVM driver & client"
@@ -322,7 +327,56 @@ clean-guest:
 distclean-guest:
 	@$(ROOT_DIR)/scripts/build_guest.sh --distclean
 
-clean: clean-guest
+# ==============================================================================
+# U-Boot Bootloader & Host Firmware Packaging Targets
+# ==============================================================================
+
+UBOOT_DIR        ?= $(BOOT_DIR)/u-boot
+UBOOT_DEFCONFIG  ?= ambarella_n1_655_cooper_pro_clusters_defconfig
+UBOOT_DTB        ?= $(or $(wildcard $(ROOT_DIR)/plan/extracted.dtb),$(wildcard $(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella/n1_655.dtb))
+UBOOT_BIN        := $(UBOOT_DIR)/u-boot.bin
+HOST_MKIMAGE_DIR := $(ROOT_DIR)/tools/host_mkimage
+HOST_MKIMAGE_BIN := $(BUILD_DIR)/bin/host_mkimage
+
+host-mkimage: host_mkimage
+host_mkimage:
+	@mkdir -p $(BUILD_DIR)/bin
+	@if [ -d "$(HOST_MKIMAGE_DIR)" ]; then \
+		$(MAKE) -C $(HOST_MKIMAGE_DIR) CC=gcc CFLAGS="-Wall -O2" || exit 1; \
+		cp -f $(HOST_MKIMAGE_DIR)/host_mkimage $(HOST_MKIMAGE_BIN); \
+		echo "Built host_mkimage -> $(HOST_MKIMAGE_BIN)"; \
+	else \
+		echo "Error: $(HOST_MKIMAGE_DIR) does not exist" >&2; exit 1; \
+	fi
+
+u-boot:
+	@mkdir -p $(BUILD_DIR)/bin
+	@if [ -z "$(UBOOT_DTB)" ] || [ ! -f "$(UBOOT_DTB)" ]; then \
+		echo "Building device tree blob in eve-kernel..."; \
+		$(MAKE) -C $(EVE_KERNEL_DIR) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dtbs || exit 1; \
+	fi
+	@echo "Configuring U-Boot with $(UBOOT_DEFCONFIG)..."
+	+$(MAKE) -C $(UBOOT_DIR) ARCH=arm CROSS_COMPILE=aarch64-linux-gnu- $(UBOOT_DEFCONFIG)
+	@echo "Building U-Boot with EXT_DTB=$(if $(wildcard $(UBOOT_DTB)),$(UBOOT_DTB),$(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella/n1_655.dtb)..."
+	+$(MAKE) -C $(UBOOT_DIR) ARCH=arm CROSS_COMPILE=aarch64-linux-gnu- EXT_DTB=$(if $(wildcard $(UBOOT_DTB)),$(UBOOT_DTB),$(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella/n1_655.dtb) -j$(NCORES)
+	@cp -f $(UBOOT_BIN) $(BUILD_DIR)/bin/u-boot.bin
+	@echo "U-Boot build complete: $(BUILD_DIR)/bin/u-boot.bin"
+
+u-boot-pkg: u-boot-package
+u-boot-package: u-boot host_mkimage
+	@mkdir -p $(BUILD_DIR)/firmware
+	@$(HOST_MKIMAGE_BIN) -n bld -f "force raw" -l -1 -j -1 -i $(UBOOT_BIN) $(BUILD_DIR)/firmware/bld.img
+	@echo "Packaged U-Boot -> $(BUILD_DIR)/firmware/bld.img"
+
+clean-uboot:
+	+$(MAKE) -C $(UBOOT_DIR) clean 2>/dev/null || true
+	@if [ -d "$(HOST_MKIMAGE_DIR)" ]; then \
+		$(MAKE) -C $(HOST_MKIMAGE_DIR) clean 2>/dev/null || true; \
+	fi
+	@rm -f $(BUILD_DIR)/bin/u-boot.bin $(BUILD_DIR)/bin/host_mkimage $(BUILD_DIR)/firmware/bld.img
+	@echo "Cleaned U-Boot and host_mkimage artifacts."
+
+clean: clean-guest clean-uboot
 	@rm -rf $(BUILD_DIR)/kmod $(BUILD_DIR)/modules $(BUILD_DIR)/firmware \
 		$(BUILD_DIR)/certs $(BUILD_DIR)/usr $(BUILD_DIR)/bin \
 		$(BUILD_DIR)/guest/ubuntu $(BUILD_DIR)/guest/alpine $(BUILD_DIR)/guest/qnx $(BUILD_DIR)/.*.done

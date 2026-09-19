@@ -102,8 +102,13 @@ static int run_tests(void)
 	unsigned int i;
 	unsigned int passed = 0;
 	int ret;
+	int (*window_get)(phys_addr_t *phys, size_t *size);
 
-	ret = cavalry_user_window_get(&phys, &size);
+	window_get = symbol_get(cavalry_user_window_get);
+	if (!window_get)
+		return -ENODEV;
+	ret = window_get(&phys, &size);
+	symbol_put(cavalry_user_window_get);
 	if (ret)
 		return ret;
 	if (size < TEST_REGION_SIZE)
