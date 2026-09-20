@@ -267,6 +267,7 @@ write_files:
             match:
               name: en*
             dhcp4: true
+            dhcp-identifier: mac
 runcmd:
   - rm -f /etc/netplan/50-cloud-init.yaml
   - netplan generate
