@@ -6,3 +6,19 @@ build/
 auto*/
 .mode
 plan/
+
+# C/C++ and Kernel module build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+Module.symvers
+modules.order
+
+# Built binaries
+drivers/amba_virt/tools/amba-virt-ctl
+
+# Generated certificates
+apps/*.cert.pem

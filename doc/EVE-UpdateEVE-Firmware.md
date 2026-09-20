@@ -280,12 +280,10 @@ If you wish to proceed with the pending update:
      - `n1-655-devkit`: `ttyCH9344USB8` (screen session `ttyCH9344USB08`)
    - If the node has the fixed U-Boot firmware, `BootFrom:PAHTA` will appear within 10 seconds.
    - If `BootFrom:PAHTA` does not appear within 10 seconds, the board is stuck and requires an MCU power cycle:
-     - `n1-655-pro`: `ttyCH9344USB3` (screen session `ttyCH9344USB03`)
-     - `n1-655-devkit`: `ttyCH9344USB11` (screen session `ttyCH9344USB11`)
-     ```text
-     pwr off -y
-     pwr on
-     ```
+      ```bash
+      # Via MCP tool:
+      embdevenv_mcu_power(target="<target>", action="reboot")
+      ```
      Wait **90 seconds** for early boot to console and EVE pillar startup (boot-time issues improved).
 
 ### Avoiding `domainmgr` Fatal Panic During Model Updates

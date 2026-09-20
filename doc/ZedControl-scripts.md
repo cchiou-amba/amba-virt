@@ -251,7 +251,7 @@ skips U-Boot's broken UEFI `ResetSystem` and reaches `ambarella-reboot`.
 scp scripts/config-grub-noruntime.cfg n1-655-devkit:/config/grub.cfg
 ```
 
-Takes effect after one MCU cold cycle (`pwr off -y` / `pwr on`).
+Takes effect after one MCU power cycle via MCP `embdevenv_mcu_power(target, action="reboot")`.
 
 ## scripts/failed/
 

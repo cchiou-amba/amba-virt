@@ -55,9 +55,108 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 
 ---
 
-## 3. Technical Mechanics
+## 3. Platform Device Tree & Memory Carveout Requirements
 
-### 3.1 Dynamic Firmware Search Redirection
+### 3.1 Mandatory Reserved Memory Carveouts
+Both `ambcma.ko` and `cavalry.ko` enforce strict hardware memory carveout checks during module initialization. If the active device tree lacks these nodes, `ambcma.ko` immediately aborts with `-ENODEV` (`#iav_error# ambarella_get_cma_pool_info: /reserved-memory/cavalry@0 not found`), preventing `/dev/iav` and `/dev/cavalry` from being created.
+
+The verified EVE platform device tree must declare the following reserved memory nodes under `/reserved-memory`:
+
+| Node | Physical Address Range | Size | Allocation Policy | Purpose |
+|---|---|---|---|---|
+| `/reserved-memory/iav@0` | `0x00a3000000`–`0x00ffffffff` | 1488 MiB | `no-map;` | Primary IAV & DSP private buffer window (`dsp_buf_size=0x40000000` allocates 1024 MiB) |
+| `/reserved-memory/iav@1` | `0x0028000000`–`0x003fffffff` | 384 MiB | `no-map;` | IAV shared memory pool (pyramid layers, stats, overlays) |
+| `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | Cavalry User / CVMEM execution pool (`virt_user_window_mb=2048`) |
+| `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA pool |
+| `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry ucode staging buffer |
+
+In addition, the device tree must declare the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specify `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation.
+
+### 3.2 The 32-Bit DSP Microcode Boundary & Address Wraparound
+
+The Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bin`) execute within an internal **32-bit physical address space** (`< 0x100000000` / 4 GiB). All pointer arithmetic, partition tables, and bounds checks in microcode (e.g. `dsp_mempar.c`) utilize 32-bit unsigned registers.
+
+This establishes a critical architectural rule: **All memory managed by `ambcma.ko` for DSP buffers must reside strictly below the 4 GiB physical address boundary.**
+
+#### The 32-Bit Overflow Failure Mode
+If `/reserved-memory/iav@0` is placed too high (for example, starting at `0xbd000000` as in stock Cooper U-Boot):
+1. When `ambcma.ko` initializes with `dsp_buf_size=0x30000000` (768 MiB) or `0x40000000` (1024 MiB), the DSP DRAM buffer begins at `dram_base = 0xd1f59000`.
+2. Adding `dsp_buf_size` yields `0x101f59000` (4127 MiB). Because the microcode operates in 32-bit arithmetic, the upper bit is truncated, wrapping the end address to `end = 0x01f59000` (32.8 MiB).
+3. The microcode allocator performs the bounds check: `if (next_off > end) { assert("MM:: no more dram"); }`.
+4. On the very first sub-buffer allocation, `next_off` (`0xd1f82980`) is compared against `end` (`0x01f59000`). Because `0xd1f82980 > 0x01f59000`, the bounds check fails immediately, triggering a false out-of-memory kernel panic during `IAV_IOC_ENABLE_PREVIEW`:
+   ```text
+   #iav_error# dsp_check_assertion(770): DSP assertion happened!
+   [IDSP1:0] Assertion failure at line:1057 of .../dsp_mempar.c module 1
+   MM:: no more dram, size_aligned=512 next_off=0xd1f82980 dram_base=0xd1f59000, end=0x01f59000
+   ```
+
+#### The Phase 1 Resolution
+To guarantee the DSP buffer never crosses 4 GiB, `/reserved-memory/iav@0` is anchored at `0x00a3000000` with size `0x5d000000` (1488 MiB). Because `0x00a3000000 + 0x5d000000 = 0x100000000`, the pool spans exactly up to the 4 GiB boundary without overflowing. `cavalry@0` (12 GiB) starts at `0x0100000000`, completely non-overlapping in 64-bit space.
+
+### 3.3 U-Boot SMP Relocation Top (`/u-boot_cfg/reloc-top`)
+
+On 32 GiB Ambarella N1-655 platforms, U-Boot dynamically relocates itself near the top of usable physical RAM. In `arch/arm/mach-ambarella/common.c`, `board_get_usable_ram_top()` queries the control DTB for `/u-boot_cfg/reloc-top`.
+
+1. **Failure Mode (Missing `reloc-top`)**: If `/u-boot_cfg` is absent from the control DTB, U-Boot relocates to the top of 32 GiB (`0x7fff3db90`). The spin-table trampoline (`secondary_cortex_jump`) is placed at this 35-bit physical address. When Linux attempts to release secondary CPUs (`CPU1..3`), the PC-relative instructions (`adr`) fail to reach the high-memory spin table. The secondary cores never wake, Linux reports `CPU1..3: failed to come online` at 5-second intervals, and the board resets via hardware watchdog after 15 seconds.
+2. **Resolution**: Any control DTB compiled into or used by U-Boot must include:
+   ```dts
+   u-boot_cfg {
+       #address-cells = <0x01>;
+       #size-cells = <0x00>;
+       reloc-top = <0x80000000>;
+   };
+   ```
+   This restricts U-Boot relocation to the 2 GiB boundary (`0x7ff37b90`), ensuring secondary CPU spin tables remain accessible.
+
+### 3.4 Partition 4 (`CONFIG`) Device Tree Deployment & GRUB Override
+
+EVE provides a persistent mechanism to deliver custom device trees via the FAT configuration partition (`CONFIG`, partition 4 / `/dev/mmcblk0p4`).
+
+> [!WARNING]
+> When GRUB loads a device tree via `set_global devicetree "($config_part)/eve.dtb"`, it passes the file directly to the Linux kernel, **bypassing U-Boot's dynamic `spin_table_update_dt()` runtime patching**.
+> Therefore, the static DTB deployed to Partition 4 must explicitly include the pre-calculated per-CPU strided `cpu-release-addr` properties:
+> - `cpu@0`: `0x00 0x7ff38460`
+> - `cpu@1`: `0x00 0x7ff38468`
+> - `cpu@2`: `0x00 0x7ff38470`
+> - `cpu@3`: `0x00 0x7ff38478`
+> Without these strided addresses, the secondary CPUs will fail to come online under Linux.
+
+To deploy the verified device tree:
+
+```bash
+# 1. Mount the persistent CONFIG partition on the edge node
+mkdir -p /tmp/cfgmnt
+mount /dev/mmcblk0p4 /tmp/cfgmnt
+
+# 2. Stage the verified DevKit DTB as eve.dtb
+cp /path/to/build/eve_iav.dtb /tmp/cfgmnt/eve.dtb
+
+# 3. Configure grub.cfg override to load eve.dtb
+cat << 'EOF' > /tmp/cfgmnt/grub.cfg
+set_global devicetree "($config_part)/eve.dtb"
+EOF
+
+# 4. Unmount and warm reboot
+umount /tmp/cfgmnt
+reboot
+```
+
+Upon reboot, GRUB reads `($config_part)/grub.cfg` and loads `eve.dtb`. Verify active carveouts and SMP in Dom0:
+
+```bash
+nproc --all
+# Expected output: 4
+cat /proc/device-tree/model
+# Expected output: n1-655 cooper devkit
+ls -la /proc/device-tree/reserved-memory/
+# Confirms iav@0, iav@1, cavalry@0..2 are present
+```
+
+---
+
+## 4. Technical Mechanics
+
+### 4.1 Dynamic Firmware Search Redirection
 When `cavalry.ko` probes the device tree platform device (`sub_scheduler0`), it invokes `request_firmware(&fw, "cavalry.bin", dev)`. The kernel firmware subsystem searches standard paths (`/lib/firmware`) by default.
 
 Because `/lib/firmware` is read-only SquashFS, new or updated firmware binaries cannot be copied there directly. However, the Linux kernel `firmware_class` parameter `/sys/module/firmware_class/parameters/path` is writable (`-rw-r--r--`) at runtime.
@@ -68,7 +167,7 @@ By pointing this sysfs parameter to `/persist/firmware`, the kernel's firmware l
 echo -n "/persist/firmware" > /sys/module/firmware_class/parameters/path
 ```
 
-### 3.2 Out-of-Tree Module Insertion
+### 4.2 Out-of-Tree Module Insertion
 With the firmware search path redirected, the kernel drivers can be dynamically inserted using `insmod`:
 
 ```bash
@@ -79,7 +178,7 @@ insmod /persist/modules/cavalry.ko
 insmod /persist/modules/amba_virt.ko
 ```
 
-### 3.3 Hardware Initialization Sequence
+### 4.3 Hardware Initialization Sequence
 When `cavalry.ko` is inserted:
 1. It matches the `sub_scheduler0` platform device declared in `arch/arm64/boot/dts/ambarella/n1_655.dts`.
 2. It parses and claims the reserved memory carveouts established at boot:
@@ -94,7 +193,7 @@ When `amba_virt.ko` is inserted:
 
 ---
 
-## 4. Edge Application Lifecycle & Device Injection
+## 5. Edge Application Lifecycle & Device Injection
 
 In EVE-OS, containerized edge applications (such as `ubuntu_24_04_container`) access host devices via EVE's adapter assignment model:
 - `Ifname "/dev/cavalry"`
@@ -124,7 +223,7 @@ Upon restart, `domainmgr` detects the existing `/dev/cavalry` and `/dev/amba_vir
 
 ---
 
-## 5. Development & Deployment Workflow
+## 6. Development & Deployment Workflow
 
 ### Step 1: Build Modules Out-of-Tree on the Host
 Compile the out-of-tree drivers against the extracted kernel headers using the top-level build target:
@@ -195,7 +294,7 @@ ssh <target-node> "eve app enter ubuntu_24_04_container ls -la /dev/cavalry /dev
 
 ---
 
-## 6. BaseOS Upgrade & Lifecycle Considerations
+## 7. BaseOS Upgrade & Lifecycle Considerations
 
 ### Preservation Across Updates
 - When performing a BaseOS update via `eveimage-update`, the A/B rootfs partitions (`IMGA`/`IMGB`) are updated.
@@ -210,15 +309,15 @@ ssh <target-node> "eve app enter ubuntu_24_04_container ls -la /dev/cavalry /dev
 Software warm reboot has been fixed in updated U-Boot firmware. When performing an OTA update or issuing a reboot, monitor the SoC serial console:
 - If `BootFrom:PAHTA` appears within **10 seconds**, the warm reboot succeeded and U-Boot/GRUB will boot automatically.
 - If `BootFrom:PAHTA` does not appear within 10 seconds, the board is stuck and requires an MCU power cycle:
-```text
-pwr off -y
-pwr on
+```bash
+# Via MCP tool:
+embdevenv_mcu_power(target="<target>", action="reboot")
 ```
 Because `/persist` is non-volatile flash, staged files persist through reboots and cold power cycles. After the board boots up, running the insmod sequence reloads the drivers.
 
 ---
 
-## 7. Integrated EVE `storage-init` Boot Hook
+## 8. Integrated EVE `storage-init` Boot Hook
 In modern EVE BaseOS builds, driver loading at boot time is fully automated via an early hook in EVE's `storage-init` service.
 
 Upon mounting the `/persist` filesystem on system startup, `storage-init` automatically executes `/persist/bin/load-ambarella-drivers.sh` inside `/hostfs`:
@@ -253,11 +352,11 @@ Because `storage-init` executes before edge applications and hypervisor domains 
 
 ---
 
-## 8. Dual-Mode Build Workflow: Development vs. Production
+## 9. Dual-Mode Build Workflow: Development vs. Production
 
 EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y`). To balance developer productivity (sub-5-second edit-compile-reload loops) with production security (hermetic, zero-trust appliance images), two build and execution modes are supported:
 
-### 8.1 Mode Comparison
+### 9.1 Mode Comparison
 
 | Property | Development Mode | Production Mode |
 |---|---|---|
@@ -269,7 +368,7 @@ EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y
 | **Iteration Turnaround** | **~3 seconds** (edit -> build -> deploy -> reload) | **~30 minutes** (full BaseOS build + OTA + reboot) |
 | **Upstream Cleanliness** | Git status clean (`certs/` in `.gitignore`) | 100% clean upstream tree (sources mapped via `--build-context`) |
 
-### 8.2 Developer Guide: Querying & Switching Between Modes
+### 9.2 Developer Guide: Querying & Switching Between Modes
 
 The active compile mode is persisted in the repository root `.mode` file and managed directly via the top-level `Makefile`.
 
@@ -302,7 +401,7 @@ This displays whether the build is configured for `development` or `production`,
    pub_eve_datastore.sh /path/to/eve-images/
    zcli edge-node eveimage-update <target-node> --image=<new-image-name>
    ```
-   Monitor SoC console for `BootFrom:PAHTA` (reboots within 10 seconds; if stuck, cycle power rails via MCU serial console with `pwr off -y` / `pwr on`).
+   Monitor SoC console for `BootFrom:PAHTA` (reboots within 10 seconds; if stuck, power cycle via MCP `embdevenv_mcu_power(target="<target>", action="reboot")`).
 
 4. **Rapidly Iterate on Driver Code**:
    Modify driver code on the host, then recompile and reload live in ~3 seconds:
