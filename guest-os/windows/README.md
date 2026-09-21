@@ -1,12 +1,12 @@
-# Windows 11 ARM64 HVM Guest on Ambarella N1-655
+# Windows 11 IoT Enterprise LTSC ARM64 HVM Guest on Ambarella N1-655
 
-This directory contains the automated unattended build pipeline and runtime configuration for running **Windows 11 on ARM64** as a lean Hardware Virtual Machine (HVM) edge application under EVE-OS on Ambarella N1-655 platforms.
+This directory contains the automated unattended build pipeline and runtime configuration for running **Windows 11 IoT Enterprise LTSC on ARM64** as a lean, high-reliability Hardware Virtual Machine (HVM) edge application under EVE-OS on Ambarella N1-655 platforms.
 
 ---
 
 ## 1. Overview & Architecture
 
-Unlike Linux and QNX guests which boot kernel images directly or from minimal ramdisks, Windows 11 on ARM64 boots strictly via **UEFI firmware (AAVMF / EDK2)** presenting **ACPI tables**. Storage and networking operate over high-performance paravirtualized VirtIO devices.
+Unlike Linux and QNX guests which boot kernel images directly or from minimal ramdisks, Windows 11 IoT Enterprise on ARM64 boots strictly via **UEFI firmware (AAVMF / EDK2)** presenting **ACPI tables**. Storage and networking operate over high-performance paravirtualized VirtIO devices.
 
 ```text
 +-------------------------------------------------------------------------------+
@@ -26,7 +26,7 @@ Unlike Linux and QNX guests which boot kernel images directly or from minimal ra
       |         :              :                 :                :
       v         :              :                 :                :
 +---------------+--------------:-----------------:----------------:-------------+
-| Windows 11 ARM64 HVM Guest (EL1 / EL0)         :                :             |
+| Windows 11 IoT Enterprise LTSC ARM64 HVM Guest (EL1 / EL0)     :             |
 |               :              :                 :                :             |
 |   +---------------------------------------+    :                :             |
 |   | \EFI\Microsoft\Boot\bootmgfw.efi       |    :                :             |
@@ -51,21 +51,25 @@ Unlike Linux and QNX guests which boot kernel images directly or from minimal ra
 |   | TermService (Remote Desktop :3389)    |                                   |
 |   +---------------------------------------+                                   |
 |                                                                               |
+|   +-----------------------------------------------------------------------+   |
+|   | Edge Appliance Features: UWF (Flash Wear Protection) + Shell Launcher |   |
+|   +-----------------------------------------------------------------------+   |
 +-------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 2. Resource Specifications (Lean Demo Profile)
+## 2. Resource Specifications (Lean Edge Appliance Profile)
 
 | Resource | Value | Sizing Rationale |
 |---|---|---|
-| **vCPUs** | 2 | Responsive desktop UI rendering without starving host cores. |
-| **RAM** | 3072 MiB (3 GiB) | ~1.1 GB idle footprint; leaves ~1.9 GB for demo applications. |
-| **Virtual Disk** | 20 GiB | CompactOS + disabled hibernation drops clean install to ~8 GB. |
+| **vCPUs** | 2 | Responsive UI rendering and AI inference pipelines without starving host cores. |
+| **RAM** | 2048 – 3072 MiB (2–3 GiB) | ~750–850 MB idle footprint; leaves >2.2 GB for Edge AI models (ONNX/YOLO). |
+| **Virtual Disk** | 20 GiB | CompactOS + disabled hibernation drops clean install to ~5.5 GB. |
 | **vTPM 2.0** | Enabled (`disableVTPM: false`) | Satisfies Windows 11 hardware integrity checks via `swtpm`. |
 | **Display & Remote Access** | RDP (Port 3389) + VNC | High frame-rate Remote Desktop + emergency VNC console. |
 | **Default User** | `windows` / `windows` | AutoLogon enabled for instant console & VNC display. |
+| **Appliance Protection** | Unified Write Filter (UWF) | Redirects disk writes to RAM overlay; prevents NAND wear & sudden power-cut corruption. |
 
 ---
 
@@ -77,7 +81,7 @@ guest-os/windows/
 └── windows-build/                      # Cloud image pipeline
     ├── Autounattend.xml                # Unattended specialize/OOBE answer file
     ├── firstboot.cmd                   # First-logon RDP and firewall setup
-    ├── optimize.ps1                    # Lean optimization script
+    ├── optimize.ps1                    # Lean optimization & UWF/Shell script
     ├── Dockerfile.builder              # wimlib/hivex/ntfs-3g servicing image
     ├── build.sh                        # GPT disk assembly + WinPE DISM/bcdboot
     ├── service_with_dism.sh            # One-shot WinPE: Add-Driver and bcdboot
@@ -93,7 +97,7 @@ guest-os/windows/
 
 ### Prerequisites
 Place the following ISO media in the repository's `build/iso/` directory:
-1. `Win11_25H2_English_Arm64_v2.iso` (Official Microsoft Windows 11 ARM64 media)
+1. `Windows_11_IoT_Enterprise_LTSC_ARM64.iso` (or `Win11_25H2_English_Arm64_v2.iso`)
 2. `virtio-win.iso` (Fedora VirtIO Windows drivers)
 
 ### Executing the Build
@@ -107,22 +111,44 @@ make guest-windows
 ```
 
 The script will:
-1. Apply `install.wim` to an NTFS volume with `wimapply --strict-acls`.
-2. Inject `unattend.xml`, first-logon scripts, and VirtIO driver media.
-3. Boot a short WinPE pass under TCG to run Microsoft DISM (`/Add-Driver`)
-   and `bcdboot` against the real ESP.
-4. Compress the result to `windows-11-arm64-cloudimg.qcow2`.
+1. Detect and inspect `install.wim` to select the IoT Enterprise LTSC edition index.
+2. Apply the image to an NTFS volume with `wimapply --strict-acls`.
+3. Inject `unattend.xml`, first-logon scripts, optimization utilities, and VirtIO driver media.
+4. Boot a short WinPE pass under TCG to run Microsoft DISM (`/Add-Driver`) and `bcdboot` against the real ESP.
+5. Compress the result to `windows-11-arm64-cloudimg.qcow2`.
 
 ---
 
-## 5. Related documentation
+## 5. Edge Appliance Features (UWF & Shell Launcher)
+
+The guest image includes built-in PowerShell functions located in `C:\Windows\Setup\Scripts\optimize.ps1`:
+
+### A. Enable Unified Write Filter (UWF)
+Locks down the root partition `C:` into a read-only state using a volatile RAM overlay, making the system 100% resilient against abrupt power cuts and preventing NAND flash wear:
+```powershell
+# From an administrative PowerShell prompt:
+. C:\Windows\Setup\Scripts\optimize.ps1
+Enable-UnifiedWriteFilter -OverlaySizeMB 512
+Restart-Computer
+```
+
+### B. Custom Shell Launcher (Kiosk Mode)
+Replaces Windows Explorer with a direct full-screen launch of your Edge AI application:
+```powershell
+. C:\Windows\Setup\Scripts\optimize.ps1
+Enable-ShellLauncher -AppPath "C:\Program Files\EdgeAI\App.exe"
+```
+
+---
+
+## 6. Related documentation
 
 - [guest-os/README.md](../README.md) — HVM guest architecture and compilation guide
 - [doc/Guest-OS-Cross-Compilation.md](../../doc/Guest-OS-Cross-Compilation.md) — Guest cross-compilation pipeline
 
 ---
 
-## 6. Deployment with `zcli`
+## 7. Deployment with `zcli`
 
 Once the compressed image is staged in `output/dist/`:
 
@@ -138,3 +164,4 @@ Once the compressed image is staged in `output/dist/`:
 # 3. Create instance on target node
 ./scripts/create_instance.sh windows_11_arm64 n1-655-devkit
 ```
+

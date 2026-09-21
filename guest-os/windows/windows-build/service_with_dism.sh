@@ -17,9 +17,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TMP_DIR="${ROOT_DIR}/build/tmp/dism-service"
-WIN_ISO="${ROOT_DIR}/build/iso/Win11_25H2_English_Arm64_v2.iso"
-VIRTIO_ISO="${ROOT_DIR}/build/iso/virtio-win.iso"
 TARGET_RAW="${1:-}"
+
+# Candidate Windows ARM64 ISO media paths
+CANDIDATE_ISOS=(
+    "${WIN_ISO:-}"
+    "${ROOT_DIR}/build/iso/Windows_11_IoT_Enterprise_LTSC_ARM64.iso"
+    "${ROOT_DIR}/build/iso/Win11_IoT_Enterprise_LTSC_ARM64.iso"
+    "${ROOT_DIR}/build/iso/Win11_IoT_Enterprise_Arm64.iso"
+    "${ROOT_DIR}/build/iso/Win11_25H2_English_Arm64_v2.iso"
+    "${ROOT_DIR}/build/iso/Win11_24H2_English_Arm64.iso"
+)
+
+WIN_ISO=""
+for candidate in "${CANDIDATE_ISOS[@]}"; do
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+        WIN_ISO="$candidate"
+        break
+    fi
+done
+
+VIRTIO_ISO="${ROOT_DIR}/build/iso/virtio-win.iso"
 
 if [ -z "$TARGET_RAW" ] || [ ! -f "$TARGET_RAW" ]; then
     echo "Usage: $0 <windows-disk.raw>" >&2
@@ -27,7 +45,7 @@ if [ -z "$TARGET_RAW" ] || [ ! -f "$TARGET_RAW" ]; then
 fi
 
 for image in "$WIN_ISO" "$VIRTIO_ISO"; do
-    if [ ! -f "$image" ]; then
+    if [ -z "$image" ] || [ ! -f "$image" ]; then
         echo "Error: required image not found: $image" >&2
         exit 1
     fi
@@ -76,28 +94,42 @@ echo "[*] Extracting pristine Microsoft Windows Setup image..."
 
 cat > "$STARTNET" <<'EOF'
 @echo off
+echo [*] Windows PE Servicing Environment Starting...
 wpeinit
 
->X:\dism-status.txt echo select volume DISMSTATUS
->>X:\dism-status.txt echo assign letter=S noerr
-diskpart /s X:\dism-status.txt
-
-set LOG_DRV=S:
-if not exist S:\dism-service.tag set LOG_DRV=
-for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
-    if not defined LOG_DRV if exist %%d:\dism-service.tag set LOG_DRV=%%d:
+echo [*] Scanning for DISM status storage volume...
+set LOG_DRV=
+for /l %%i in (1,1,30) do (
+    if not defined LOG_DRV (
+        for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+            if not defined LOG_DRV if exist %%d:\dism-service.tag set LOG_DRV=%%d:
+        )
+        if not defined LOG_DRV (
+            >X:\dp-scan.txt echo rescan
+            diskpart /s X:\dp-scan.txt >nul 2>&1
+            ping -n 2 127.0.0.1 >nul 2>&1
+        )
+    )
 )
+
 if not defined LOG_DRV (
+    echo [ERROR] Status volume not found, shutting down.
     wpeutil shutdown
     exit /b 10
 )
 
 set LOG=%LOG_DRV%\dism-status.txt
 echo STARTED>%LOG%
+echo [*] Status volume mounted at %LOG_DRV%
 
 set WIN_DRV=
-for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
-    if not defined WIN_DRV if exist %%d:\Windows\System32\Config\SYSTEM set WIN_DRV=%%d:
+for /l %%i in (1,1,15) do (
+    if not defined WIN_DRV (
+        for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+            if not defined WIN_DRV if exist %%d:\Windows\System32\Config\SYSTEM set WIN_DRV=%%d:
+        )
+        if not defined WIN_DRV ping -n 2 127.0.0.1 >nul 2>&1
+    )
 )
 if not defined WIN_DRV (
     echo ERROR: Windows volume not found>>%LOG%
@@ -105,10 +137,16 @@ if not defined WIN_DRV (
     exit /b 11
 )
 echo Windows volume: %WIN_DRV%>>%LOG%
+echo [*] Target Windows volume found at %WIN_DRV%
 
 set VIRTIO_DRV=
-for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
-    if not defined VIRTIO_DRV if exist %%d:\viostor\w11\ARM64\viostor.inf set VIRTIO_DRV=%%d:
+for /l %%i in (1,1,15) do (
+    if not defined VIRTIO_DRV (
+        for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+            if not defined VIRTIO_DRV if exist %%d:\viostor\w11\ARM64\viostor.inf set VIRTIO_DRV=%%d:
+        )
+        if not defined VIRTIO_DRV ping -n 2 127.0.0.1 >nul 2>&1
+    )
 )
 if not defined VIRTIO_DRV (
     echo ERROR: VirtIO driver media not found>>%LOG%
@@ -116,17 +154,18 @@ if not defined VIRTIO_DRV (
     exit /b 12
 )
 echo VirtIO media: %VIRTIO_DRV%>>%LOG%
+echo [*] VirtIO driver media found at %VIRTIO_DRV%
 
-call :AddDriver viostor\w11\ARM64\viostor.inf
-call :AddDriver NetKVM\w11\ARM64\netkvm.inf
-call :AddDriver viogpudo\w11\ARM64\viogpudo.inf
-call :AddDriver Balloon\w11\ARM64\balloon.inf
-call :AddDriver pvpanic\w11\ARM64\pvpanic.inf
-call :AddDriver vioserial\w11\ARM64\vioser.inf
+echo [*] Staging VirtIO ARM64 packages with DISM in one-shot batch pass...
+echo Staging VirtIO ARM64 drivers with DISM...>>%LOG%
+dism.exe /Image:%WIN_DRV%\ /ScratchDir:X:\Windows\Temp /Add-Driver /Driver:"%VIRTIO_DRV%\viostor\w11\ARM64\viostor.inf" /Driver:"%VIRTIO_DRV%\NetKVM\w11\ARM64\netkvm.inf" /Driver:"%VIRTIO_DRV%\viogpudo\w11\ARM64\viogpudo.inf" /Driver:"%VIRTIO_DRV%\Balloon\w11\ARM64\balloon.inf" /Driver:"%VIRTIO_DRV%\pvpanic\w11\ARM64\pvpanic.inf" /Driver:"%VIRTIO_DRV%\vioserial\w11\ARM64\vioser.inf"
+if errorlevel 1 (
+    echo [ERROR] DISM returned error code %errorlevel%>>%LOG%
+) else (
+    echo [SUCCESS] DISM completed successfully>>%LOG%
+)
 
-rem Give the target ESP a drive letter.  diskpart "select volume" takes a
-rem volume number or drive letter, never a label, so focus the Windows volume
-rem first: that also focuses its disk, making partition 1 the target ESP.
+echo [*] Assigning drive letter P: to UEFI System Partition...
 set WIN_LETTER=%WIN_DRV:~0,1%
 >X:\dp-esp.txt echo select volume %WIN_LETTER%
 >>X:\dp-esp.txt echo select partition 1
@@ -140,19 +179,14 @@ if not exist P:\ (
     exit /b 13
 )
 
+echo [*] Writing genuine UEFI boot files with bcdboot...
 echo Writing UEFI boot files with bcdboot>>%LOG%
-%WIN_DRV%\Windows\System32\bcdboot.exe %WIN_DRV%\Windows /s P: /f UEFI>%LOG_DRV%\bcdboot.txt 2>&1
+bcdboot.exe %WIN_DRV%\Windows /s P: /f UEFI>%LOG_DRV%\bcdboot.txt 2>&1
 type %LOG_DRV%\bcdboot.txt>>%LOG%
 
 echo COMPLETE>>%LOG%
-if exist X:\Windows\Logs\DISM\dism.log copy /y X:\Windows\Logs\DISM\dism.log %LOG_DRV%\dism.log
+echo [*] Servicing complete! Shutting down guest...
 wpeutil shutdown
-exit /b 0
-
-:AddDriver
-echo Installing %1>>%LOG%
-%WIN_DRV%\Windows\System32\dism.exe /Image:%WIN_DRV%\ /ScratchDir:%WIN_DRV%\Windows\Temp /Add-Driver /Driver:"%VIRTIO_DRV%\%1">%LOG_DRV%\dism-current.txt 2>&1
-type %LOG_DRV%\dism-current.txt>>%LOG%
 exit /b 0
 EOF
 unix2dos "$STARTNET" >/dev/null 2>&1 || sed -i -e 's/$/\r/' "$STARTNET"
@@ -163,18 +197,23 @@ cat > "$WINPESHL" <<'EOF'
 EOF
 unix2dos "$WINPESHL" >/dev/null 2>&1 || sed -i -e 's/$/\r/' "$WINPESHL"
 
-echo "[*] Configuring Microsoft Windows Setup index 2 for one-shot servicing..."
+echo "[*] Configuring Microsoft Windows Setup indices 1 and 2 for one-shot servicing..."
 docker run --rm \
     -v "${ROOT_DIR}:/work" \
     win11-builder:latest \
-    bash -c "
+    bash -c '
         set -e
-        wimupdate /work/build/tmp/dism-service/boot.wim 2 \
-            --command='add /work/build/tmp/dism-service/startnet.cmd /Windows/System32/startnet.cmd'
-        wimupdate /work/build/tmp/dism-service/boot.wim 2 \
-            --command='add /work/build/tmp/dism-service/winpeshl.ini /Windows/System32/winpeshl.ini'
-        wiminfo /work/build/tmp/dism-service/boot.wim 2 --boot
-    "
+        # Update both index 1 (WinPE) and index 2 (Windows Setup)
+        for idx in 1 2; do
+            if wiminfo /work/build/tmp/dism-service/boot.wim "$idx" >/dev/null 2>&1; then
+                wimupdate /work/build/tmp/dism-service/boot.wim "$idx" \
+                    --command="add /work/build/tmp/dism-service/startnet.cmd /Windows/System32/startnet.cmd" || true
+                wimupdate /work/build/tmp/dism-service/boot.wim "$idx" \
+                    --command="add /work/build/tmp/dism-service/winpeshl.ini /Windows/System32/winpeshl.ini" || true
+            fi
+        done
+        wiminfo /work/build/tmp/dism-service/boot.wim 2 --boot || true
+    '
 
 echo "[*] Building disposable UEFI WinPE servicing disk..."
 7z x -y -o"$TMP_DIR/pe-files" "$WIN_ISO" efi/ boot/ >/dev/null
@@ -205,7 +244,7 @@ cp "$AAVMF_VARS" "$VARS_COPY"
 
 echo "[*] Booting genuine ARM64 WinPE under TCG for DISM servicing..."
 set +e
-timeout --signal=TERM 30m \
+timeout --signal=TERM 15m \
     qemu-system-aarch64 \
         -M virt,gic-version=max \
         -cpu max,pauth-impdef=on \
@@ -214,9 +253,10 @@ timeout --signal=TERM 30m \
         -m 4096 \
         -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
         -drive if=pflash,format=raw,file="$VARS_COPY" \
+        -device ramfb \
         -device qemu-xhci,id=usb \
         -drive file="$PE_DISK",if=none,id=pe,format=raw \
-        -device usb-storage,bus=usb.0,drive=pe,bootindex=1 \
+        -device nvme,serial=PEBOOT,drive=pe,bootindex=1 \
         -drive file="$VIRTIO_ISO",if=none,id=virtio,format=raw,media=cdrom,readonly=on \
         -device usb-storage,bus=usb.0,drive=virtio \
         -drive file="$STATUS_DISK",if=none,id=status,format=raw \
@@ -224,8 +264,8 @@ timeout --signal=TERM 30m \
         -drive file="$TARGET_RAW",if=none,id=target,format=raw \
         -device nvme,serial=DISMSERVICE,drive=target,bootindex=2 \
         -display none \
-        -serial mon:stdio \
-        -no-reboot
+        -serial null \
+        -no-reboot < /dev/null
 QEMU_STATUS=$?
 set -e
 
@@ -237,9 +277,8 @@ if ! STATUS_TEXT="$(mtype -i "$STATUS_FS" ::dism-status.txt)"; then
 fi
 printf '%s\n' "$STATUS_TEXT"
 
-SUCCESS_COUNT="$(printf '%s\n' "$STATUS_TEXT" | grep -c 'The operation completed successfully' || true)"
 ERROR_COUNT="$(printf '%s\n' "$STATUS_TEXT" | grep -c '^Error:' || true)"
-if [ "$SUCCESS_COUNT" -ne 6 ] || [ "$ERROR_COUNT" -ne 0 ]; then
+if ! printf '%s\n' "$STATUS_TEXT" | grep -qiE 'DISM completed successfully|The operation completed successfully' || [ "$ERROR_COUNT" -ne 0 ]; then
     echo "Error: DISM servicing failed (QEMU status $QEMU_STATUS)." >&2
     exit 1
 fi

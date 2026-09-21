@@ -16,7 +16,25 @@ OUTPUT_DIR="${SCRIPT_DIR}/output"
 DIST_DIR="${OUTPUT_DIR}/dist"
 TMP_DIR="${ROOT_DIR}/build/tmp"
 
-WIN_ISO="${ROOT_DIR}/build/iso/Win11_25H2_English_Arm64_v2.iso"
+# Candidate Windows ARM64 ISO media paths (in priority order)
+CANDIDATE_ISOS=(
+    "${WIN_ISO:-}"
+    "${ROOT_DIR}/build/iso/Windows_11_IoT_Enterprise_LTSC_ARM64.iso"
+    "${ROOT_DIR}/build/iso/Win11_IoT_Enterprise_LTSC_ARM64.iso"
+    "${ROOT_DIR}/build/iso/Win11_IoT_Enterprise_Arm64.iso"
+    "${ROOT_DIR}/build/iso/Win11_25H2_English_Arm64_v2.iso"
+    "${ROOT_DIR}/build/iso/Win11_24H2_English_Arm64.iso"
+)
+
+WIN_ISO=""
+for candidate in "${CANDIDATE_ISOS[@]}"; do
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+        WIN_ISO="$candidate"
+        break
+    fi
+done
+
+export WIN_ISO
 VIRTIO_ISO="${ROOT_DIR}/build/iso/virtio-win.iso"
 INSTALL_WIM="${TMP_DIR}/install.wim"
 AUTOUNATTEND_XML="${SCRIPT_DIR}/Autounattend.xml"
@@ -26,25 +44,33 @@ FINAL_QCOW2="${DIST_DIR}/windows-11-arm64-cloudimg.qcow2"
 
 echo "=========================================================="
 echo " Building Lean Windows 11 ARM64 HVM Cloud Image for EVE-OS"
-echo " (Direct Assembly + Microsoft WinPE DISM/bcdboot Servicing)"
+echo " (Windows 11 IoT Enterprise LTSC / Direct Assembly & DISM)"
 echo "=========================================================="
 
 # 1. Prerequisite verification
 mkdir -p "$OUTPUT_DIR" "$DIST_DIR" "$TMP_DIR"
 
-if [ ! -f "$WIN_ISO" ]; then
-    echo "Error: Windows 11 ARM64 ISO not found at $WIN_ISO"
+if [ -z "$WIN_ISO" ] || [ ! -f "$WIN_ISO" ]; then
+    echo "Error: Windows 11 ARM64 ISO not found."
+    echo "Please place Windows_11_IoT_Enterprise_LTSC_ARM64.iso or Win11_25H2_English_Arm64_v2.iso in build/iso/"
     exit 1
 fi
+echo "[*] Using Windows ISO: $(basename "$WIN_ISO")"
 
 if [ ! -f "$VIRTIO_ISO" ]; then
     echo "Error: VirtIO ISO not found at $VIRTIO_ISO"
     exit 1
 fi
 
-if [ ! -f "$INSTALL_WIM" ]; then
-    echo "[*] Extracting install.wim from ISO..."
-    7z e -y -o"$TMP_DIR" "$WIN_ISO" sources/install.wim
+ISO_STAMP="${TMP_DIR}/.iso_source"
+if [ ! -f "$INSTALL_WIM" ] || [ ! -f "$ISO_STAMP" ] || [ "$(cat "$ISO_STAMP" 2>/dev/null)" != "$WIN_ISO" ] || [ "$WIN_ISO" -nt "$INSTALL_WIM" ]; then
+    echo "[*] Extracting install.wim from $(basename "$WIN_ISO")..."
+    rm -f "$INSTALL_WIM" "$ISO_STAMP"
+    rm -rf "${TMP_DIR}/wim_extract_tmp"
+    7z e -y -o"${TMP_DIR}/wim_extract_tmp" "$WIN_ISO" sources/install.wim
+    mv "${TMP_DIR}/wim_extract_tmp/install.wim" "$INSTALL_WIM"
+    rm -rf "${TMP_DIR}/wim_extract_tmp"
+    echo "$WIN_ISO" > "$ISO_STAMP"
 fi
 
 # Ensure Docker builder image is available
@@ -88,27 +114,39 @@ NTFS_BYTES=$(( NTFS_SECTORS * 512 ))
 echo "[*] Formatting NTFS Partition (${NTFS_SECTORS} sectors, $(( NTFS_BYTES / 1024 / 1024 )) MiB)..."
 truncate -s "$NTFS_BYTES" "${TMP_DIR}/windows.ntfs"
 
-docker run --rm --privileged -v "${ROOT_DIR}:/work" win11-builder:latest bash -c "
+docker run --rm --privileged -v "${ROOT_DIR}:/work" win11-builder:latest bash -c '
 set -euo pipefail
-mkfs.ntfs -F -f -C -L 'Windows' -p 567296 -H 255 -S 63 -s 512 /work/build/tmp/windows.ntfs
+mkfs.ntfs -F -f -C -L "Windows" -p 567296 -H 255 -S 63 -s 512 /work/build/tmp/windows.ntfs
 
-echo '[*] Applying Windows 11 Pro directly to unmounted NTFS...'
-wimapply /work/build/tmp/install.wim 3 /work/build/tmp/windows.ntfs \
+WIM_PATH="/work/build/tmp/install.wim"
+TARGET_INDEX=1
+if wiminfo "$WIM_PATH" | grep -qi "IoT Enterprise"; then
+    TARGET_INDEX=$(wiminfo "$WIM_PATH" | grep -B1 -i "Name:.*IoT Enterprise" | grep "^Index:" | head -n1 | tr -s " " | cut -d" " -f2)
+    echo "[*] Detected Windows IoT Enterprise image at Index $TARGET_INDEX"
+elif wiminfo "$WIM_PATH" | grep -qi "Pro"; then
+    TARGET_INDEX=$(wiminfo "$WIM_PATH" | grep -B1 -i "Name:.*Pro" | grep "^Index:" | head -n1 | tr -s " " | cut -d" " -f2)
+    echo "[*] Detected Windows Pro image at Index $TARGET_INDEX"
+else
+    echo "[*] Using default image Index $TARGET_INDEX"
+fi
+
+echo "[*] Applying Windows image (Index $TARGET_INDEX) directly to unmounted NTFS..."
+wimapply "$WIM_PATH" "$TARGET_INDEX" /work/build/tmp/windows.ntfs \
     --include-invalid-names --strict-acls
 
 mkdir -p /mnt/ntfs
 ntfs-3g /work/build/tmp/windows.ntfs /mnt/ntfs
 
-echo '[*] Injecting unattend.xml, firstboot, and lean optimization scripts...'
+echo "[*] Injecting unattend.xml, firstboot, and lean optimization scripts..."
 mkdir -p /mnt/ntfs/Windows/Panther /mnt/ntfs/Windows/Setup/Scripts /mnt/ntfs/Windows/System32/sysprep
 cp /work/guest-os/windows/windows-build/Autounattend.xml /mnt/ntfs/Windows/Panther/unattend.xml
 cp /work/guest-os/windows/windows-build/Autounattend.xml /mnt/ntfs/Windows/System32/sysprep/unattend.xml
 cp /work/guest-os/windows/windows-build/optimize.ps1 /mnt/ntfs/Windows/Setup/Scripts/optimize.ps1
 cp /work/guest-os/windows/windows-build/firstboot.cmd /mnt/ntfs/Windows/Setup/Scripts/firstboot.cmd
-mkdir -p '/mnt/ntfs/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp'
-cp /work/guest-os/windows/windows-build/firstboot.cmd '/mnt/ntfs/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp/firstboot.cmd'
+mkdir -p "/mnt/ntfs/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp"
+cp /work/guest-os/windows/windows-build/firstboot.cmd "/mnt/ntfs/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp/firstboot.cmd"
 
-echo '[*] Extracting VirtIO ARM64 drivers and guest tools...'
+echo "[*] Extracting VirtIO ARM64 drivers and guest tools..."
 mkdir -p /mnt/ntfs/Drivers/VirtIO
 7z x -y -o/mnt/ntfs/Drivers/VirtIO /work/build/iso/virtio-win.iso \
     viostor/w11/ARM64/* \
@@ -122,7 +160,7 @@ cp /mnt/ntfs/Drivers/VirtIO/virtio-win-guest-tools.exe /mnt/ntfs/Windows/Setup/S
 
 sync
 umount /mnt/ntfs
-"
+'
 
 echo "[*] Assembling NTFS partition into 20 GiB raw disk image..."
 dd if="${TMP_DIR}/windows.ntfs" of="$FINAL_RAW" bs=1M seek=277 conv=notrunc status=progress
