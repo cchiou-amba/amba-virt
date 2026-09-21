@@ -66,9 +66,16 @@ def main():
 
     # 3. mkqnximage qemu script patch
     if qnx_host:
-        qemu_script = os.path.join(qnx_host, "..", "common", "mkqnximage", "qemu", "opt_scripts", "qemu")
-        qemu_script = os.path.abspath(qemu_script)
-        if os.path.exists(qemu_script):
+        candidates = [
+            os.path.join(qnx_host, "..", "..", "common", "mkqnximage", "qemu", "opt_scripts", "qemu"),
+            os.path.join(qnx_host, "..", "common", "mkqnximage", "qemu", "opt_scripts", "qemu"),
+        ]
+        qemu_script = None
+        for c in candidates:
+            if os.path.exists(c):
+                qemu_script = os.path.abspath(c)
+                break
+        if qemu_script and os.path.exists(qemu_script):
             print(f"[*] Patching mkqnximage qemu script: {qemu_script}")
             with open(qemu_script, "r") as f:
                 content = f.read()

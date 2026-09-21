@@ -34,14 +34,12 @@ INCLUDES += -Icompat
 endif
 
 CXXFLAGS ?= -O2 -Wall -Wextra -std=c++17 $(INCLUDES)
-LDFLAGS ?= -lpthread
+LDFLAGS += -lpthread
 
 ifeq ($(STATIC),1)
 LDFLAGS += -static
 endif
 endif
-
-
 
 TARGETS := amba-virt-client amba-virt-cli
 
@@ -53,7 +51,7 @@ amba-virt-client: $(SRCS) amba_virt_dev.hxx
 	$(CXX) $(CXXFLAGS) -o $@ $(SRCS) $(LDFLAGS)
 
 amba-virt-cli: amba-virt-cli.cxx amba_virt_dev.hxx
-	$(CXX) $(CXXFLAGS) -o $@ amba-virt-cli.cxx -lpthread
+	$(CXX) $(CXXFLAGS) -o $@ amba-virt-cli.cxx $(LDFLAGS)
 
 test: amba-virt-client
 	./amba-virt-client -v

@@ -38,13 +38,21 @@ if [ "$1" == "--clean" ]; then
 fi
 
 # 4. Locate mkqnximage
-MKQNXIMAGE="${QNX_HOST}/../common/bin/mkqnximage"
-if [ ! -x "$MKQNXIMAGE" ]; then
-    MKQNXIMAGE="$(which mkqnximage 2>/dev/null || true)"
-fi
+MKQNXIMAGE=""
+for cand in \
+    "${QNX_HOST}/../../common/bin/mkqnximage" \
+    "${QNX_HOST}/../common/bin/mkqnximage" \
+    "${QNX_HOST}/../../common/mkqnximage/mkqnximage" \
+    "${QNX_TARGET}/../host/common/bin/mkqnximage" \
+    "$(which mkqnximage 2>/dev/null || true)"; do
+    if [ -n "${cand}" ] && [ -x "${cand}" ]; then
+        MKQNXIMAGE="${cand}"
+        break
+    fi
+done
 
 if [ -z "$MKQNXIMAGE" ] || [ ! -x "$MKQNXIMAGE" ]; then
-    echo "Error: mkqnximage binary not found at ${MKQNXIMAGE}."
+    echo "Error: mkqnximage binary not found in QNX SDP installation."
     exit 1
 fi
 

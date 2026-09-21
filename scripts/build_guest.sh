@@ -270,6 +270,9 @@ build_ubuntu() {
             clean all \
             CROSS_COMPILE=aarch64-linux-gnu-
         cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${UBUNTU_OUT}/"
+        if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
+            cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${UBUNTU_OUT}/"
+        fi
     else
         log_step "[NOTE] Host aarch64 cross-compiler not found. Falling back to container build..."
         ensure_binfmt
@@ -300,6 +303,9 @@ build_ubuntu() {
                 echo "[*] Compiling amba-virt-client..."
                 make -C /workspace/guest-os/client clean all
                 cp -vf /workspace/guest-os/client/amba-virt-client /workspace/build/guest/ubuntu/
+                if [ -f /workspace/guest-os/client/amba-virt-cli ]; then
+                    cp -vf /workspace/guest-os/client/amba-virt-cli /workspace/build/guest/ubuntu/
+                fi
             '
     fi
 
@@ -352,6 +358,9 @@ build_alpine() {
             CROSS_COMPILE=aarch64-linux-gnu- \
             STATIC=1
         cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${ALPINE_OUT}/"
+        if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
+            cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${ALPINE_OUT}/"
+        fi
     else
         log_step "[NOTE] Host aarch64 cross-compiler not found. Falling back to container build..."
         ensure_binfmt
@@ -425,10 +434,16 @@ build_qnx() {
     log_step "Compiling amba-virt-client (QNX client)..."
     make -C "${ROOT_DIR}/guest-os/client" OS=qnx clean all
     cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${QNX_OUT}/"
+    if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
+        cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${QNX_OUT}/"
+    fi
 
     if [ "${BUILD_QNX_IMAGE}" -eq 1 ]; then
         log_step "Building QNX 8.0 HVM disk image..."
         "${ROOT_DIR}/guest-os/qnx/qnx-build/build.sh"
+        if [ -f "${ROOT_DIR}/guest-os/qnx/qnx-build/output/dist/qnx-8.0-arm64-cloudimg.qcow2" ]; then
+            cp -vf "${ROOT_DIR}/guest-os/qnx/qnx-build/output/dist/qnx-8.0-arm64-cloudimg.qcow2" "${QNX_OUT}/"
+        fi
     fi
 
     echo ""

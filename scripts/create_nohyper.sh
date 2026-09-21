@@ -19,7 +19,7 @@ EDGE_NODE=
 EDGE_APP="ubuntu_24_04-container"
 INSTANCE_NAME=
 NETWORK_INSTANCE=
-ADAPTERS="cavalry:cavalry gpio0:gpio0 iav:iav USB:USB"
+ADAPTERS="cavalry:cavalry gpio0:gpio0 iav:iav USB:USB amba_virt:amba_virt"
 
 usage() {
 	cat << 'EOF' >&2

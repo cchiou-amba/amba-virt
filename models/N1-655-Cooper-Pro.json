@@ -34,7 +34,23 @@
       "assigngrp": "amba_shm",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
-        "shmpath": "/dev/shm/amba-virt",
+        "shmpath": "/dev/amba_virt_shm",
+        "shmsize": "1G"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_shm1",
+      "phyaddrs": {},
+      "logicallabel": "amba_shm1",
+      "assigngrp": "amba_shm1",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_shm1",
         "shmsize": "1G"
       },
       "usagePolicy": {},
