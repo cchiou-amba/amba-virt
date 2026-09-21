@@ -626,7 +626,7 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
-	uint32_t arena_off = tenant->rpc_arena_offset ? tenant->rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+	uint32_t arena_off = tenant->rpc_arena_offset;
 	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
 
 	/* Cap arena_len against bounds */
@@ -789,7 +789,7 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
-	uint32_t arena_off = tenant->rpc_arena_offset ? tenant->rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+	uint32_t arena_off = tenant->rpc_arena_offset;
 	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
 
 	if (req->arena_len < sizeof(struct amba_virt_cavalry_reg_dag_desc) + sizeof(struct cavalry_run_dags) ||
@@ -1065,7 +1065,7 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
-	uint32_t arena_off = tenant->rpc_arena_offset ? tenant->rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+	uint32_t arena_off = tenant->rpc_arena_offset;
 	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
 
 	if (req->arena_len < sizeof(struct amba_virt_cavalry_run_reg_desc) ||

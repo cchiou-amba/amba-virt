@@ -155,9 +155,9 @@ The repository provides automated cross-compilation and image build pipelines fo
 sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
 # Build individual or all guest distributions:
-make guest-ubuntu     # Ubuntu 24.04: amba_virt.ko + amba-virt-client
-make guest-alpine     # Alpine Linux 3.20: amba_virt.ko + static client
-make guest-qnx        # BlackBerry QNX 8.0: amba-virt-resmgr + client
+make guest-ubuntu     # Ubuntu 24.04: amba_virt.ko + amba_cavalry.ko + client + AI apps
+make guest-alpine     # Alpine Linux 3.20: amba_virt.ko + amba_cavalry.ko + static client
+make guest-qnx        # BlackBerry QNX 8.0: resource managers + clients + AI apps
 make guest-all        # Build all three consecutively (~20s total)
 make guest-qnx-image  # Bootable QNX 8.0 QCOW2 cloud image
 make guest-windows    # Windows 11 ARM64 QCOW2 cloud image

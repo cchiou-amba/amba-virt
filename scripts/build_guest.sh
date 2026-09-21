@@ -427,16 +427,30 @@ build_qnx() {
         fi
     fi
 
-    log_step "Compiling amba-virt-resmgr (resource manager daemon)..."
+    log_step "Compiling amba-virt-resmgr and libamba_virt (resource manager daemon & library)..."
     make -C "${ROOT_DIR}/guest-os/qnx/amba-virt" clean all
     cp -vf "${ROOT_DIR}/guest-os/qnx/amba-virt/amba-virt-resmgr" "${QNX_OUT}/"
+    cp -vf "${ROOT_DIR}/guest-os/qnx/amba-virt/libamba_virt.so" "${QNX_OUT}/"
+    cp -vf "${ROOT_DIR}/guest-os/qnx/amba-virt/libamba_virt.a" "${QNX_OUT}/"
 
-    log_step "Compiling amba-virt-client (QNX client)..."
+    log_step "Compiling amba-cavalry-resmgr (/dev/cavalry resource manager)..."
+    make -C "${ROOT_DIR}/guest-os/qnx/amba-cavalry" clean all
+    cp -vf "${ROOT_DIR}/guest-os/qnx/amba-cavalry/amba-cavalry-resmgr" "${QNX_OUT}/"
+
+    log_step "Compiling amba-virt-client and amba-virt-cli (QNX client)..."
     make -C "${ROOT_DIR}/guest-os/client" OS=qnx clean all
     cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${QNX_OUT}/"
     if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
         cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${QNX_OUT}/"
     fi
+
+    log_step "Compiling cavalry_hvm_demo (QNX AI benchmark demo)..."
+    make -C "${ROOT_DIR}/guest-os/apps/cavalry-demo" OS=qnx clean all
+    cp -vf "${ROOT_DIR}/guest-os/apps/cavalry-demo/cavalry_hvm_demo" "${QNX_OUT}/"
+
+    log_step "Compiling cavalry_hvm_yolo (QNX YOLO inference engine)..."
+    make -C "${ROOT_DIR}/guest-os/apps/cavalry-yolo" OS=qnx clean all
+    cp -vf "${ROOT_DIR}/guest-os/apps/cavalry-yolo/cavalry_hvm_yolo" "${QNX_OUT}/"
 
     if [ "${BUILD_QNX_IMAGE}" -eq 1 ]; then
         log_step "Building QNX 8.0 HVM disk image..."

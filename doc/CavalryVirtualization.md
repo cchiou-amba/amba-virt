@@ -29,31 +29,32 @@ Host driver: **cavalry_v3** (`compatible = "ambarella,sub-scheduler"`).
 ## Architecture (Proxy, Not Passthrough)
 
 ```text
-+------------------------------+                               +-----------------------------------+
-| HVM EL1 (Ubuntu / Alpine)    |                               | NOHYPER EL2-side (Host Server)    |
-|                              |                               |                                   |
-|   +----------------------+   |                               |   +---------------------------+   |
-|   |   NN App (nnctrl)    |   |                               |   | amba-virt-server          |   |
-|   +----------------------+   |                               |   | (cavalry_proxy)           |   |
-|              |               |                               |   +---------------------------+   |
-|              v               |                               |      /                     \      |
-|   +----------------------+   |                               |     v                       v     |
-|   | /dev/cavalry frontend|   |                               | +---------------+   +-----------+ |
-|   | (amba_cavalry.ko)    |   |   vsock (CID 2 : Port 5555)   | | amba_virt.ko  |   |cavalry.ko | |
-|   +----------------------+   |------------------------------>| +---------------+   |/dev/cav.  | |
-|              |               |                               |         ^           +-----------+ |
-|              v               |                               |         |                 |       |
-|   +----------------------+   |   ivshmem-plain (shared DRAM) |         |                 v       |
-|   |     amba_virt.ko     |---+-------------------------------+---------+           +-----------+ |
-|   +----------------------+   |                               |                     |  VisORC   | |
-|                              |                               |                     +-----------+ |
-+------------------------------+                               +-----------------------------------+
++-------------------------------------------------------------+                               +-----------------------------------+
+| Linux HVM EL1 (Ubuntu / Alpine)   | QNX 8.0 HVM EL0 (RTOS)  |                               | NOHYPER EL2-side (Host Server)    |
+|                                   |                         |                               |                                   |
+|   +---------------------------+   |   +-------------------+ |                               |   +---------------------------+   |
+|   | NN App (nnctrl/YOLO)      |   |   | NN App (YOLO/Demo)| |                               |   | amba-virt-server          |   |
+|   +---------------------------+   |   +-------------------+ |                               |   | (cavalry_proxy)           |   |
+|                 | (ioctl)         |             | (devctl)  |                               |   +---------------------------+   |
+|                 v                 |             v           |                               |      /                     \      |
+|   +---------------------------+   |   +-------------------+ |                               |     v                       v     |
+|   | /dev/cavalry frontend     |   |   | amba-cavalry-     | |                               | +---------------+   +-----------+ |
+|   | (amba_cavalry.ko)         |   |   | resmgr (/dev/cav) | |   vsock (CID 2 : Port 5555)   | | amba_virt.ko  |   |cavalry.ko | |
+|   +---------------------------+   |   +-------------------+ |------------------------------>| +---------------+   |/dev/cav.  | |
+|                 | (kexport)       |             | (libamba) |                               |         ^           +-----------+ |
+|                 v                 |             v           |                               |         |                 |       |
+|   +---------------------------+   |   +-------------------+ |                               |         |                 v       |
+|   | amba_virt.ko              |   |   | amba-virt-resmgr  | |   ivshmem-plain (shared DRAM) |         |              +------+ |
+|   +---------------------------+   |   +-------------------+ |---+-------------------------------+---------+        |VisORC| |
+|                                   |                         |   |                               |                  +------+ |
++-------------------------------------------------------------+   |                               +-----------------------------------+
+                                                                  v
 ```
 
 | Metric | This Architecture | Guest MMIO Passthrough (Rejected) |
 |---|---|---|
 | **Who runs `cavalry.ko`** | NOHYPER only | Guest |
-| **Guest `/dev/cavalry`** | Frontend on `amba_virt` (`amba_cavalry.ko`) | Unmodified Ambarella module |
+| **Guest `/dev/cavalry`** | Frontend on `amba_virt` (`amba_cavalry.ko` on Linux, `amba-cavalry-resmgr` on QNX) | Unmodified Ambarella module |
 | **Tensors & Microcode** | ivshmem; host translates or isolates in AMA | Guest GPA must equal HPA |
 | **Multi-guest** | Proxy arbitrates & serializes | Exclusive VisORC lock |
 | **EVE isolation** | Preserved via Stage-2 MMU | Breaks device assign / shared SoC |
@@ -404,14 +405,34 @@ The host server (`amba-virt-server`) serializes access to the single physical Vi
 
 ---
 
-## 10. Source Map
+---
+
+## 10. QNX Neutrino RTOS 8.0 Architecture (EL0 Resource Manager)
+
+On BlackBerry QNX Neutrino RTOS 8.0, the Cavalry frontend runs as a userspace POSIX Resource Manager (`amba-cavalry-resmgr`) rather than a kernel module:
+
+1. **Pathname Space Registration**: Exposes `/dev/cavalry` via `resmgr_attach()`, allowing unmodified applications using `libnnctrl` and `libcavalry_mem` to run seamlessly.
+2. **Bounds Negotiation**: Sends `AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ` over `libamba_virt` during initialization to acquire the tenant BAR memory pool and 1 MB control arena.
+3. **Cross-Process User Pointer Marshaling**: In QNX microkernel architecture, client user pointers (`reg_u->run_dags_ptr`) cannot be dereferenced directly by the resource manager process. Memory is safely retrieved using `pread()` on `/proc/<pid>/as` with PID discovery via `MsgInfo(ctp->rcvid, &info)`.
+4. **Zero-Copy Projection**: Implements `io_mmap` returning physical BAR offsets (`g_cav.bar_phys + offset`) to client address spaces.
+
+---
+
+## 11. Source Map
 
 | Path | Role |
 |---|---|
 | `drivers/amba_virt/tools/amba-virt-server.c` | Multi-tenant host server daemon |
 | `drivers/amba_virt/tools/cavalry_proxy.c` | Host proxy, Path A/B handlers, AMA registration |
 | `drivers/amba_virt/include/uapi/amba_virt.h` | 40-byte wire RPC ABI and protocol definitions |
-| `guest-os/linux/amba-cavalry/amba_cavalry_hvm.c` | Guest kernel frontend driver (`/dev/cavalry`) |
+| `guest-os/linux/amba-cavalry/amba_cavalry_hvm.c` | Linux guest kernel frontend driver (`/dev/cavalry`) |
+| `guest-os/linux/amba-cavalry/include/cavalry_ioctl.h` | Multi-OS UAPI ioctl definitions (Linux + QNX) |
 | `guest-os/linux/amba-cavalry/include/cavalry_ioctl_path_b.h` | Guest Path B IOCTL numbers (`0xC0..0xC4`) |
+| `guest-os/qnx/amba-cavalry/amba_cavalry_resmgr.c` | QNX 8.0 `/dev/cavalry` POSIX resource manager |
+| `guest-os/qnx/amba-virt/amba_virt_resmgr.c` | QNX 8.0 `/dev/amba_virt` transport resource manager |
+| `guest-os/qnx/amba-virt/libamba_virt.c` | QNX 8.0 C client library (`libamba_virt.so` / `.a`) |
 | `guest-os/userspace/nnctrl/` | Dual-engine userspace runtime library |
+| `guest-os/apps/cavalry-demo/` | Multi-OS neural network test and validation harness |
+| `guest-os/apps/cavalry-yolo/` | Multi-OS YOLO object detection inference application |
 | `guest-os/linux/amba-gdma/amba_gdma_hvm.c` | Clamped GDMA virtual kernel driver |
+

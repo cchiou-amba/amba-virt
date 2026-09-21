@@ -1,2 +1,4 @@
 amba-virt-resmgr
 *.o
+*.a
+*.so

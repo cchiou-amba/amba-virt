@@ -7,8 +7,26 @@
 #ifndef _CAVALRY_IOCTL_PATH_B_H_
 #define _CAVALRY_IOCTL_PATH_B_H_
 
+#if defined(__QNXNTO__)
+#include <stdint.h>
+#include <sys/ioctl.h>
+#elif defined(__has_include)
+#if __has_include(<linux/types.h>)
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#else
+#include <stdint.h>
+#include <sys/ioctl.h>
+typedef uint8_t  __u8;
+typedef uint16_t __u16;
+typedef uint32_t __u32;
+typedef uint64_t __u64;
+typedef int32_t  __s32;
+#endif
+#else
+#include <linux/types.h>
+#include <linux/ioctl.h>
+#endif
 #include "amba_virt.h"
 #include "cavalry_ioctl.h"
 

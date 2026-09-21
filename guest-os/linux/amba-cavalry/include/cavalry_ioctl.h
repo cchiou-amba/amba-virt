@@ -12,10 +12,22 @@
  *  @brief This file defines cavalry driver ioctl api.
  */
 
+#if defined(__QNXNTO__)
+#include <stdint.h>
+#include <sys/ioctl.h>
+typedef uint8_t  __u8;
+typedef uint16_t __u16;
+typedef uint32_t __u32;
+typedef uint64_t __u64;
+typedef int32_t  __s32;
+#elif defined(__has_include)
+#if __has_include(<linux/ioctl.h>)
 #include <linux/ioctl.h>
-
-#if !defined (AMBA_AMYOC_BUILD)
-#include <config.h>
+#else
+#include <sys/ioctl.h>
+#endif
+#else
+#include <linux/ioctl.h>
 #endif
 
 /*! @addtogroup cavalry-ioctl-helper
@@ -1392,319 +1404,113 @@ struct cavalry_profile_entry {
  * The application should further map the physical addresses into
  * user space virtual addresses before operating the buffers.
  */
-#define CAVALRY_QUERY_BUF		_IOWR ('C', 0x0, struct cavalry_querybuf *)
-
-/*!
- *  This API can be invoked after loading the Ucode to UCODE memory partition, then start VP.
- */
+#if defined(__QNXNTO__)
+#define CAVALRY_QUERY_BUF		_IOWR ('C', 0x0, struct cavalry_querybuf)
 #define CAVALRY_START_VP		_IOWR ('C', 0x1, void *)
-
-/*!
- *  This API can be used to stop VP.
- */
 #define CAVALRY_STOP_VP			_IOWR ('C', 0x2, void *)
-
-/*!
- *  This API can be used to run VP DAGs.  It's blocking call, IOCTL returns after VP finishes the DAGs.
- */
-#define CAVALRY_RUN_DAGS		_IOWR ('C', 0x3, struct cavalry_run_dags *)
-
-/*!
- *  This API can be used to start the capture Ucode log.
- */
+#define CAVALRY_RUN_DAGS		_IOWR ('C', 0x3, struct cavalry_run_dags)
 #define CAVALRY_START_LOG		_IOWR ('C', 0x4, void *)
-
-/*!
- *  This API can be used to stop the capture Ucode log.
- */
 #define CAVALRY_STOP_LOG		_IOWR ('C', 0x5, void *)
-
-/*!
- *  This API is deprecated, has been replaced by set priority for each network.
- */
-#define CAVALRY_EARLY_QUIT	_IOWR ('C', 0x6, struct cavalry_early_quit *)
-
-/*!
- *  This API can be used to allocate physical continuous memory and return absolute physical address.
- */
-#define CAVALRY_ALLOC_MEM		_IOWR ('C', 0x7, struct cavalry_mem *)
-
-/*!
- *  This API can be used to free physical continuous memory by specify the absolute physical address.
- */
-#define CAVALRY_FREE_MEM		_IOWR ('C', 0x8, struct cavalry_mem *)
-
-/*!
- *  This API can be used to synchronize the cached memory between ARM cache and DRAM.
- *  If the memory is not cached, an error will appear.
- */
-#define CAVALRY_SYNC_CACHE_MEM	_IOWR ('C', 0x9, struct cavalry_cache_mem *)
-
-/*!
- *  This API can be used to determine the usage of the CV user memory.
- */
-#define CAVALRY_GET_USAGE_MEM	_IOWR ('C', 0xA, struct cavalry_usage_mem *)
-
-/*!
- *  This API can be used to run hotlink by specify slot id.
- */
-#define CAVALRY_RUN_HOTLINK_SLOT  _IOWR ('C', 0xB, struct cavalry_run_hotlink_slot *)
-
-/*!
- *  This API assign hotlink slot.
- */
-#define CAVALRY_ASSIGN_HOTLINK_SLOT	_IOWR ('C', 0xC, struct cavalry_hotlink_slot_desc *)
-
-/*!
- *  This API release hotlink slot.
- */
-#define CAVALRY_RELEASE_HOTLINK_SLOT	_IOWR ('C', 0xD, struct cavalry_hotlink_slot_desc *)
-
-/*!
- *  This API can be used to query the memory required for FEX which is only available on the CV2 platform.
- */
-#define CAVALRY_FEX_QUERY	_IOWR ('C', 0xE, struct cavalry_fex_query *)
-
-/*!
- *  This API can be used to run FEX, which is only available on the CV2 platform.
- *  FEX handles two functionalities, which are disparity map generation and feature point extraction.
- *  For more information on the stereo feature, refer to the Stereo Library API in Doxygen.
- *  For FEX examples, refer to CV - FEX Block Doxygen page.
- *
- *  During feature point extraction, FEX treats an input image as CAVALRY_HARRIS_H_BLOCKS *
- *  CAVALRY_HARRIS_V_BLOCKS blocks, and extracts CAVALRY_HARRIS_MAX_POINTS_PER_BLOCK
- *  Harris points for each block.  Each Harris feature point is represented by its coordinate and descriptor.
- *
- *  The data layout of each Harris feature point coordinate depends on whether or not dumping the Harris point score is enabled.
- *  If it is disabled, the memory layout of each feature point coordinate is described as shown in the struct {uint16_t x;  uint16_t y;} .
- *  If it is enabled, the layout is described as shown in the struct {uint16_t x;  uint16_t y;  uint16_t score;  uint16_t padding;} .
- *  The column index (X) and row index (Y) are stored in an uint16_t container where
- *  14 MSB bits are integer bits, and 2 LSB bits are fractional bits.
- *  The Harris score is stored in an uint16_t container where 4 MSB bits are exponent bits, and 12 LSB bits are mantissa bits.
- *  The nms_threshold in fex_user_cfg shares the same data format as Harris score.
- *  The feature point descriptor is 32 bytes for each feature point; the feature point count is type uint8_t,
- *  and it indicates the number of feature points for each block.
- */
-#define CAVALRY_FEX_RUN	_IOWR ('C', 0xF, struct cavalry_fex_run *)
-
-/*!
- *  This API can be used to query the memory required for FMA which is only available on the CV2 platform.
- */
-#define CAVALRY_FMA_QUERY	_IOWR ('C', 0x10, struct cavalry_fma_query *)
-
-/*!
- *  This API can be used to run FMA, which is only available on the CV2 platform.
- *  For FMA examples, refer to the CV - FMA Block Doxygen page.
- *  FMA matches a reference feature point list and a target feature point list.
- *  For each entry of the target list, the best match is found in the reference list.
- *  Then, the index of this match as well as the matching score are recorded.
- *
- *  For example, if the feature point number 10 in target list best matches the feature point
- *  number 20 in the reference list with a core 40, in the output Index array, the 10th element will be
- *  a value of 20, and in output Score array, the 10th element will be a value of 40.
- *
- *  The stereo matching mode is used to match the feature point pairs with the left and the right image pairs.
- *  It can also filter out the weaker feature points.  In addition to matching the index list and score list,
- *  the stereo matching mode can generate a feature point coordinate list (temporal_coord)
- *  where unmatched feature points in the target feature point list are marked as invalid.
- */
-#define CAVALRY_FMA_RUN	_IOWR ('C', 0x11, struct cavalry_fma_run *)
-
-/*!
- *  This API can be used to change the Ucode log while the Cavalry is running.
- */
-#define CAVALRY_SET_LOG_LEVEL	_IOWR ('C', 0x12, struct cavalry_set_log_level *)
-
-/*!
- *  This API can be used to check if VP is in the busy state.  Call this API periodically to get the VP statistics.
- */
-#define CAVALRY_GET_STATS	_IOWR ('C', 0x13, struct cavalry_stats_all *)
-
-/*!
- *  This API can be used to dump the Cavalry VP context when VP hangs.
- */
-#define CAVALRY_QUERY_VP_CORE_DUMP	_IOWR ('C', 0x14, struct cavalry_core_dump *)
-
-/*!
- *  This API can be used to query issued cmd size for Ucode.
- */
-#define CAVALRY_QUERY_UCODE_CMD_SIZE	_IOWR ('C', 0x15, struct cavalry_ucode_cmd_size *)
-
-/********* Cavalry authentication ioctl ***********/
-
-/*!
- *  This API can be used to create session for authentication.
- */
-#define CAVALRY_CREATE_SESSION	_IOWR ('C', 0x20, struct cavalry_create_session *)
-
-/*!
- *  This API can be used to free session.
- */
-#define CAVALRY_FREE_SESSION	_IOWR ('C', 0x21, struct cavalry_free_session *)
-
-/*!
- *  This API can be used to authenticate ORC.
- */
-#define CAVALRY_ULP_INIT	_IOWR ('C', 0x22, struct cavalry_ulp_init *)
-
-/*!
- *  This API can be used to authenticate ARM.
- */
-#define CAVALRY_ULP_QUERY_DIK	_IOWR ('C', 0x23, struct cavalry_ulp_query_dik *)
-
-/********* Cavalry encrypt ioctl ***********/
-
-/*!
- *  This API can be used to prepare encryption.
- */
-#define CAVALRY_NMP_KEY_EXCHANGE	_IOWR ('C', 0x24, struct cavalry_nmp_key_exchange *)
-
-/*!
- *  This API can be used to execute encryption.
- */
-#define CAVALRY_NMP_CONVERT_KEY	_IOWR ('C', 0x25, struct cavalry_nmp_convert_key *)
-
-/* Reserved IOCTL CMD ID: 0x26 */
-
-/********* Cavalry convert after encrypt ioctl ***********/
-
-/*!
- *  This API can be used to convert data after encryption.
- */
-#define CAVALRY_CONVERT_AFTER_ENCRYPT	_IOWR ('C', 0x27, struct cavalry_convert_after_encrypt *)
-
-/********* Cavalry DMA copy ***********/
-
-/*!
- *  This API can be used to copy memory by DMA.
- */
-#define CAVALRY_DMA_COPY	_IOWR ('C', 0x28, struct cavalry_dma_copy *)
-
-
-/*!
- *  This API can be used to verify ULP license.
- */
-#define CAVALRY_ULP_VERIFY_LICENSE	_IOWR ('C', 0x29, struct cavalry_ulp_verfiy_license *)
-
-/********** memory fd ioctl ***********/
-
-/*!
- *  This API can be used to allocate physical continuous memory and return file descripter (dma-buf:fd).
- *  Free this memory by call close(fd).
- */
-#define CAVALRY_ALLOC_MEMFD		_IOWR ('C', 0x40, struct cavalry_mfd_alloc *)
-
-/*!
- *  This API can be used to synchronize the cached memory between ARM cache and DRAM.
- *  If the memory is not cached, an error will appear.
- */
-#define CAVALRY_SYNC_CACHE_MEMFD	_IOWR ('C', 0x41, struct cavalry_mfd_sync *)
-
-/*!
- *  This API This API can be used to run VP DAGs with specify memory address in file descripter (dma-buf:fd).
- *  It's blocking call, IOCTL returns after VP finishes the DAGs.
- */
-#define CAVALRY_RUN_DAGS_MEMFD	_IOWR ('C', 0x42, struct cavalry_run_dags_mfd *)
-
-/* Reserved IOCTL CMD ID: 0x43, 0x44 */
-
-/*!
- *  This API can be used to convert data after encryption with specify memory address in file descripter (dma-buf:fd).
- */
-#define CAVALRY_CONVERT_AFTER_ENCRYPT_MEMFD	_IOWR ('C', 0x45, struct cavalry_convert_after_encrypt_mfd *)
-
-/*!
- *  This API This API can be used to run FEX with specify memory address in file descripter (dma-buf:fd).
- *  Only available on the CV2 platform.
- */
-#define CAVALRY_FEX_RUN_MEMFD	_IOWR ('C', 0x46, struct cavalry_fex_run_mfd *)
-
-/*!
- *  This API can be used to run FMA with specify memory address in file descripter (dma-buf:fd).
- * Only available on the CV2 platform.
- */
-#define CAVALRY_FMA_RUN_MEMFD	_IOWR ('C', 0x47, struct cavalry_fma_run_mfd *)
-
-/********** misc ioctl ***********/
-
-/*!
- *  This API get the current audio clock frequency.  The default value is 12.288 MHz.
- */
-#define CAVALRY_GET_AUDIO_CLK	_IOR ('C', 0x80, uint64_t *)
-
-/*!
- *  This API can be used to set the vision clock.
- *  The cavalry driver will use the default vision clock value set in <chip_spec>.ini after it loads.
- *  The value set in <chip_spec>.ini is the clock's max frequency.
- *  Users can decrease the vision clock for reducing the power it takes to save in running time.
- *  This API use percentage format by N/M (N is numerator, M is denominator).  N cannot be bigger than M.
- */
-#define CAVALRY_SET_CAVALRY_CLK	_IOW ('C', 0x81, struct cavalry_clock_cfg *)
-
-/*!
- *  This API can be used to get vision clock and format is percentage by N/M.
- */
-#define CAVALRY_GET_CAVALRY_CLK	_IOWR ('C', 0x82, struct cavalry_clock_cfg *)
-
-/*!
- *  This API can be used to get DRAM burst size for calculate network's bandwith size.
- */
-#define CAVALRY_GET_DRAM_CFG	_IOWR ('C', 0x83, struct cavalry_dram_cfg *)
-
-/*!
- *  This API can be used to start the capture cavalry profile data.
- */
+#define CAVALRY_EARLY_QUIT	_IOWR ('C', 0x6, struct cavalry_early_quit)
+#define CAVALRY_ALLOC_MEM		_IOWR ('C', 0x7, struct cavalry_mem)
+#define CAVALRY_FREE_MEM		_IOWR ('C', 0x8, struct cavalry_mem)
+#define CAVALRY_SYNC_CACHE_MEM	_IOWR ('C', 0x9, struct cavalry_cache_mem)
+#define CAVALRY_GET_USAGE_MEM	_IOWR ('C', 0xA, struct cavalry_usage_mem)
+#define CAVALRY_RUN_HOTLINK_SLOT  _IOWR ('C', 0xB, struct cavalry_run_hotlink_slot)
+#define CAVALRY_ASSIGN_HOTLINK_SLOT	_IOWR ('C', 0xC, struct cavalry_hotlink_slot_desc)
+#define CAVALRY_RELEASE_HOTLINK_SLOT	_IOWR ('C', 0xD, struct cavalry_hotlink_slot_desc)
+#define CAVALRY_FEX_QUERY	_IOWR ('C', 0xE, struct cavalry_fex_query)
+#define CAVALRY_FEX_RUN	_IOWR ('C', 0xF, struct cavalry_fex_run)
+#define CAVALRY_FMA_QUERY	_IOWR ('C', 0x10, struct cavalry_fma_query)
+#define CAVALRY_FMA_RUN	_IOWR ('C', 0x11, struct cavalry_fma_run)
+#define CAVALRY_SET_LOG_LEVEL	_IOWR ('C', 0x12, struct cavalry_set_log_level)
+#define CAVALRY_GET_STATS	_IOWR ('C', 0x13, struct cavalry_stats_all)
+#define CAVALRY_QUERY_VP_CORE_DUMP	_IOWR ('C', 0x14, struct cavalry_core_dump)
+#define CAVALRY_QUERY_UCODE_CMD_SIZE	_IOWR ('C', 0x15, struct cavalry_ucode_cmd_size)
+#define CAVALRY_CREATE_SESSION	_IOWR ('C', 0x20, struct cavalry_create_session)
+#define CAVALRY_FREE_SESSION	_IOWR ('C', 0x21, struct cavalry_free_session)
+#define CAVALRY_ULP_INIT	_IOWR ('C', 0x22, struct cavalry_ulp_init)
+#define CAVALRY_ULP_QUERY_DIK	_IOWR ('C', 0x23, struct cavalry_ulp_query_dik)
+#define CAVALRY_NMP_KEY_EXCHANGE	_IOWR ('C', 0x24, struct cavalry_nmp_key_exchange)
+#define CAVALRY_NMP_CONVERT_KEY	_IOWR ('C', 0x25, struct cavalry_nmp_convert_key)
+#define CAVALRY_CONVERT_AFTER_ENCRYPT	_IOWR ('C', 0x27, struct cavalry_convert_after_encrypt)
+#define CAVALRY_DMA_COPY	_IOWR ('C', 0x28, struct cavalry_dma_copy)
+#define CAVALRY_ULP_VERIFY_LICENSE	_IOWR ('C', 0x29, struct cavalry_ulp_verfiy_license)
+#define CAVALRY_ALLOC_MEMFD		_IOWR ('C', 0x40, struct cavalry_mfd_alloc)
+#define CAVALRY_SYNC_CACHE_MEMFD	_IOWR ('C', 0x41, struct cavalry_mfd_sync)
+#define CAVALRY_RUN_DAGS_MEMFD	_IOWR ('C', 0x42, struct cavalry_run_dags_mfd)
+#define CAVALRY_CONVERT_AFTER_ENCRYPT_MEMFD	_IOWR ('C', 0x45, struct cavalry_convert_after_encrypt_mfd)
+#define CAVALRY_FEX_RUN_MEMFD	_IOWR ('C', 0x46, struct cavalry_fex_run_mfd)
+#define CAVALRY_FMA_RUN_MEMFD	_IOWR ('C', 0x47, struct cavalry_fma_run_mfd)
+#define CAVALRY_GET_AUDIO_CLK	_IOR ('C', 0x80, uint64_t)
+#define CAVALRY_SET_CAVALRY_CLK	_IOW ('C', 0x81, struct cavalry_clock_cfg)
+#define CAVALRY_GET_CAVALRY_CLK	_IOWR ('C', 0x82, struct cavalry_clock_cfg)
+#define CAVALRY_GET_DRAM_CFG	_IOWR ('C', 0x83, struct cavalry_dram_cfg)
 #define CAVALRY_START_PROFILE		_IOWR ('C', 0x84, void *)
-
-/*!
- *  This API can be used to stop the capture cavalry profile data.
- */
 #define CAVALRY_STOP_PROFILE		_IOWR ('C', 0x85, void *)
-
-/*!
- *  This API can be used to query memory attributes.
- */
 #define CAVALRY_QUERY_MEM_ATTR	_IOWR ('C', 0x86, void *)
-
-/*!
- *  This API can be used to query cv chip id.
- */
+#define CAVALRY_GET_CV_CHIP_ID	_IOWR ('C', 0x87, uint32_t)
+#define CAVALRY_GET_CAVALRY_STATUS	_IOWR ('C', 0x88, struct cavalry_status)
+#define CAVALRY_QUERY_USAGE_MEM	_IOWR ('C', 0x89, struct cavalry_mem_usage_query)
+#define CAVALRY_QUERY_HOTLINK_SLOT_BUF_CFG	_IOWR ('C', 0x90, struct cavalry_hotlink_slot_cfg)
+#define CAVALRY_GET_ARM_CLUSTER_ID	_IOWR ('C', 0x91, uint32_t)
+#define CAVALRY_GET_DRIVER_VERSION	_IOWR ('C', 0x92, struct cavalry_driver_version)
+#define CAVALRY_APPEND_TO_MEMPOOL		_IOWR ('C', 0xA0, struct cavalry_buddy_mem)
+#define CAVALRY_REMOVE_FROM_MEMPOOL		_IOWR ('C', 0xA1, struct cavalry_buddy_mem)
+#else
+#define CAVALRY_QUERY_BUF		_IOWR ('C', 0x0, struct cavalry_querybuf *)
+#define CAVALRY_START_VP		_IOWR ('C', 0x1, void *)
+#define CAVALRY_STOP_VP			_IOWR ('C', 0x2, void *)
+#define CAVALRY_RUN_DAGS		_IOWR ('C', 0x3, struct cavalry_run_dags *)
+#define CAVALRY_START_LOG		_IOWR ('C', 0x4, void *)
+#define CAVALRY_STOP_LOG		_IOWR ('C', 0x5, void *)
+#define CAVALRY_EARLY_QUIT	_IOWR ('C', 0x6, struct cavalry_early_quit *)
+#define CAVALRY_ALLOC_MEM		_IOWR ('C', 0x7, struct cavalry_mem *)
+#define CAVALRY_FREE_MEM		_IOWR ('C', 0x8, struct cavalry_mem *)
+#define CAVALRY_SYNC_CACHE_MEM	_IOWR ('C', 0x9, struct cavalry_cache_mem *)
+#define CAVALRY_GET_USAGE_MEM	_IOWR ('C', 0xA, struct cavalry_usage_mem *)
+#define CAVALRY_RUN_HOTLINK_SLOT  _IOWR ('C', 0xB, struct cavalry_run_hotlink_slot *)
+#define CAVALRY_ASSIGN_HOTLINK_SLOT	_IOWR ('C', 0xC, struct cavalry_hotlink_slot_desc *)
+#define CAVALRY_RELEASE_HOTLINK_SLOT	_IOWR ('C', 0xD, struct cavalry_hotlink_slot_desc *)
+#define CAVALRY_FEX_QUERY	_IOWR ('C', 0xE, struct cavalry_fex_query *)
+#define CAVALRY_FEX_RUN	_IOWR ('C', 0xF, struct cavalry_fex_run *)
+#define CAVALRY_FMA_QUERY	_IOWR ('C', 0x10, struct cavalry_fma_query *)
+#define CAVALRY_FMA_RUN	_IOWR ('C', 0x11, struct cavalry_fma_run *)
+#define CAVALRY_SET_LOG_LEVEL	_IOWR ('C', 0x12, struct cavalry_set_log_level *)
+#define CAVALRY_GET_STATS	_IOWR ('C', 0x13, struct cavalry_stats_all *)
+#define CAVALRY_QUERY_VP_CORE_DUMP	_IOWR ('C', 0x14, struct cavalry_core_dump *)
+#define CAVALRY_QUERY_UCODE_CMD_SIZE	_IOWR ('C', 0x15, struct cavalry_ucode_cmd_size *)
+#define CAVALRY_CREATE_SESSION	_IOWR ('C', 0x20, struct cavalry_create_session *)
+#define CAVALRY_FREE_SESSION	_IOWR ('C', 0x21, struct cavalry_free_session *)
+#define CAVALRY_ULP_INIT	_IOWR ('C', 0x22, struct cavalry_ulp_init *)
+#define CAVALRY_ULP_QUERY_DIK	_IOWR ('C', 0x23, struct cavalry_ulp_query_dik *)
+#define CAVALRY_NMP_KEY_EXCHANGE	_IOWR ('C', 0x24, struct cavalry_nmp_key_exchange *)
+#define CAVALRY_NMP_CONVERT_KEY	_IOWR ('C', 0x25, struct cavalry_nmp_convert_key *)
+#define CAVALRY_CONVERT_AFTER_ENCRYPT	_IOWR ('C', 0x27, struct cavalry_convert_after_encrypt *)
+#define CAVALRY_DMA_COPY	_IOWR ('C', 0x28, struct cavalry_dma_copy *)
+#define CAVALRY_ULP_VERIFY_LICENSE	_IOWR ('C', 0x29, struct cavalry_ulp_verfiy_license *)
+#define CAVALRY_ALLOC_MEMFD		_IOWR ('C', 0x40, struct cavalry_mfd_alloc *)
+#define CAVALRY_SYNC_CACHE_MEMFD	_IOWR ('C', 0x41, struct cavalry_mfd_sync *)
+#define CAVALRY_RUN_DAGS_MEMFD	_IOWR ('C', 0x42, struct cavalry_run_dags_mfd *)
+#define CAVALRY_CONVERT_AFTER_ENCRYPT_MEMFD	_IOWR ('C', 0x45, struct cavalry_convert_after_encrypt_mfd *)
+#define CAVALRY_FEX_RUN_MEMFD	_IOWR ('C', 0x46, struct cavalry_fex_run_mfd *)
+#define CAVALRY_FMA_RUN_MEMFD	_IOWR ('C', 0x47, struct cavalry_fma_run_mfd *)
+#define CAVALRY_GET_AUDIO_CLK	_IOR ('C', 0x80, uint64_t *)
+#define CAVALRY_SET_CAVALRY_CLK	_IOW ('C', 0x81, struct cavalry_clock_cfg *)
+#define CAVALRY_GET_CAVALRY_CLK	_IOWR ('C', 0x82, struct cavalry_clock_cfg *)
+#define CAVALRY_GET_DRAM_CFG	_IOWR ('C', 0x83, struct cavalry_dram_cfg *)
+#define CAVALRY_START_PROFILE		_IOWR ('C', 0x84, void *)
+#define CAVALRY_STOP_PROFILE		_IOWR ('C', 0x85, void *)
+#define CAVALRY_QUERY_MEM_ATTR	_IOWR ('C', 0x86, void *)
 #define CAVALRY_GET_CV_CHIP_ID	_IOWR ('C', 0x87, uint32_t *)
-
-/*!
- *  This API can be used to query cavalry status.
- */
 #define CAVALRY_GET_CAVALRY_STATUS	_IOWR ('C', 0x88, struct cavalry_status *)
-
-/*!
- *  This API can be used to query memory usage for a specific memory partition.
- */
- #define CAVALRY_QUERY_USAGE_MEM	_IOWR ('C', 0x89, struct cavalry_mem_usage_query *)
-
-/*!
- *  This API query hotlink buffer configuration.
- */
+#define CAVALRY_QUERY_USAGE_MEM	_IOWR ('C', 0x89, struct cavalry_mem_usage_query *)
 #define CAVALRY_QUERY_HOTLINK_SLOT_BUF_CFG	_IOWR ('C', 0x90, struct cavalry_hotlink_slot_cfg *)
-
-/*!
- *  This API can be used to query ARM cluster id.
- */
 #define CAVALRY_GET_ARM_CLUSTER_ID	_IOWR ('C', 0x91, uint32_t *)
-
-/*!
- *  This API can be used to get cavalry driver version.
- */
 #define CAVALRY_GET_DRIVER_VERSION	_IOWR ('C', 0x92, struct cavalry_driver_version *)
-
-/*!
- *  This API can be used to append physical continuous memory to memory pool.
- */
 #define CAVALRY_APPEND_TO_MEMPOOL		_IOWR ('C', 0xA0, struct cavalry_buddy_mem *)
-
-/*!
- *  This API can be used to remove physical continuous memory from memory pool.
- */
 #define CAVALRY_REMOVE_FROM_MEMPOOL		_IOWR ('C', 0xA1, struct cavalry_buddy_mem *)
+#endif
 
 
 /*! @} */  /* End of cavalry-ioctl-api */

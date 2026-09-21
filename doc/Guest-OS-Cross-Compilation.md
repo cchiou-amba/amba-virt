@@ -68,9 +68,14 @@ To achieve rapid developer turnaround (~7s total build time), `amba-virt` implem
             │ aarch64-linux-gnu-  │                     │
             │   (~4s per target)  │                     │
             ▼                     ▼                     ▼
-   build/guest/ubuntu/   build/guest/alpine/   build/guest/qnx/
-     ├── amba_virt.ko      ├── amba_virt.ko      ├── amba-virt-resmgr
-     └── amba-virt-client  └── amba-virt-client  └── amba-virt-client
+    build/guest/ubuntu/   build/guest/alpine/   build/guest/qnx/
+      ├── amba_virt.ko      ├── amba_virt.ko      ├── amba-virt-resmgr
+      ├── amba_cavalry.ko   ├── amba_cavalry.ko   ├── amba-cavalry-resmgr
+      ├── amba-virt-client  ├── amba-virt-client  ├── libamba_virt.so
+      ├── amba-virt-cli     ├── amba-virt-cli     ├── amba-virt-client
+      ├── cavalry_hvm_demo  ├── cavalry_hvm_demo  ├── amba-virt-cli
+      └── cavalry_hvm_yolo  └── cavalry_hvm_yolo  ├── cavalry_hvm_demo
+                                                  └── cavalry_hvm_yolo
 ```
 
 ### The Kbuild Host Helper Bootstrap Challenge
@@ -147,9 +152,9 @@ source ~/qnx/qnx800/qnxsdp-env.sh
 | Target | Description | Output Location |
 | :--- | :--- | :--- |
 | `make guest` | Build all guest targets consecutively | `build/guest/{ubuntu,alpine,qnx}` |
-| `make guest-ubuntu` | Build Ubuntu 24.04 kernel module and client | `build/guest/ubuntu/` |
-| `make guest-alpine` | Build Alpine 3.20 kernel module and client | `build/guest/alpine/` |
-| `make guest-qnx` | Build QNX 8.0 resource manager and client | `build/guest/qnx/` |
+| `make guest-ubuntu` | Build Ubuntu 24.04 kernel modules, clients, and AI apps | `build/guest/ubuntu/` |
+| `make guest-alpine` | Build Alpine 3.20 kernel modules, clients, and AI apps | `build/guest/alpine/` |
+| `make guest-qnx` | Build QNX 8.0 resource managers, C library, clients, and AI apps | `build/guest/qnx/` |
 | `make guest-qnx-image` | Generate bootable QNX 8.0 QCOW2 cloud image | `build/guest/qnx/qnx-8.0-arm64-cloudimg.qcow2` |
 | `make guest-windows` | Build Windows 11 ARM64 HVM QCOW2 cloud image | `guest-os/windows/windows-build/output/dist/windows-11-arm64-cloudimg.qcow2` |
 | `make clean-guest` | Clean staged binaries (preserves cached headers) | `build/guest/{ubuntu,alpine,qnx}` |

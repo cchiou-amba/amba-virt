@@ -193,11 +193,15 @@ TEST(VFS, MmapBoundsAndOversize) {
         CHECK_TRUE_TEXT(ptr != MAP_FAILED, "mmap 4KB page failed");
         dev.unmapShm();
 
-        // Over-allocation: request larger than window should fail with EINVAL
+        // Over-allocation: request larger than window should fail with EINVAL (Linux) or ENXIO/EINVAL (QNX)
         void *badPtr = mmap(nullptr, (size_t)shmSz + 4096, PROT_READ | PROT_WRITE,
                             MAP_SHARED, dev.getFd(), 0);
         CHECK_EQUAL(MAP_FAILED, badPtr);
+#if defined(__QNX__) || defined(__QNXNTO__)
+        CHECK_TRUE(errno == EINVAL || errno == ENXIO);
+#else
         CHECK_EQUAL(EINVAL, errno);
+#endif
     }
     dev.closeDevice();
 }
@@ -365,6 +369,8 @@ TEST_GROUP(SHM) {
         if (shmSz > 0) {
             mapPtr = dev.mapShm(shmSz);
             CHECK_TRUE(mapPtr != MAP_FAILED);
+            if (dev.getMappedSize() > 0)
+                shmSz = static_cast<uint32_t>(dev.getMappedSize());
         }
     }
 
@@ -984,9 +990,10 @@ void runBenchmarks(int iterations, int threadsNum, const std::string &jsonOut) {
 
             jsonStream << ",\n    \"shm_handoff\": [\n";
 
+            uint32_t effectiveShmSz = (dev.getMappedSize() > 0) ? static_cast<uint32_t>(dev.getMappedSize()) : shmSz;
             for (size_t s = 0; s < shmTransferSizes.size(); ++s) {
                 uint32_t bsz = shmTransferSizes[s];
-                if (bsz > shmSz)
+                if (bsz > effectiveShmSz)
                     continue;
 
                 int benchIters = std::max(50, iterations / 10);

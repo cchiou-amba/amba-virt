@@ -1,0 +1,4 @@
+amba-cavalry-resmgr
+*.o
+*.a
+*.so

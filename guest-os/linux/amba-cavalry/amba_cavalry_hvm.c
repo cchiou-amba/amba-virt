@@ -471,7 +471,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		if (copy_from_user(&run_hdr, (void __user *)arg, sizeof(run_hdr)))
 			return -EFAULT;
 
-		u32 arena_off = g_cav.rpc_arena_offset ? g_cav.rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+		u32 arena_off = g_cav.rpc_arena_offset;
 		u32 arena_sz = g_cav.rpc_arena_size ? g_cav.rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
 
 		if (run_hdr.dag_cnt == 0 || run_hdr.dag_cnt > 128)
@@ -534,7 +534,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		if (copy_from_user(&reg_u, (void __user *)arg, sizeof(reg_u)))
 			return -EFAULT;
 
-		u32 arena_off = g_cav.rpc_arena_offset ? g_cav.rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+		u32 arena_off = g_cav.rpc_arena_offset;
 		u32 arena_sz = g_cav.rpc_arena_size ? g_cav.rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
 
 		if (reg_u.run_dags_bytes == 0 ||
@@ -657,7 +657,7 @@ static long amba_cavalry_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 		rrun.port_cnt = run_u.port_cnt;
 		memcpy(rrun.ports, run_u.ports, sizeof(run_u.ports));
 
-		u32 arena_off = g_cav.rpc_arena_offset ? g_cav.rpc_arena_offset : CAVALRY_RPC_ARENA_OFFSET;
+		u32 arena_off = g_cav.rpc_arena_offset;
 
 		/* Lock arena mutex across write -> RPC -> read results */
 		mutex_lock(&g_cav.arena_mutex);

@@ -182,6 +182,7 @@ create_node:
     bool isOpen() const { return _fd >= 0; }
     const struct amba_virt_info &getInfo() const { return _info; }
     uint32_t getShmSize() const { return _shmSize; }
+    size_t getMappedSize() const { return _mappedSize; }
 
     int refreshInfo() {
         if (_fd < 0)
@@ -206,7 +207,6 @@ create_node:
         if (len == 0 || len > AMBA_VIRT_MAX_MSG)
             return -EINVAL;
 
-#if defined(__linux__)
         if (!data)
             return -EINVAL;
         if (!_pendingRequest.empty())
@@ -214,17 +214,6 @@ create_node:
         const uint8_t *bytes = static_cast<const uint8_t *>(data);
         _pendingRequest.assign(bytes, bytes + len);
         return 0;
-#else
-        struct amba_virt_xfer xfer;
-        memset(&xfer, 0, sizeof(xfer));
-        xfer.len = len;
-        if (data && len > 0)
-            memcpy(xfer.data, data, len);
-
-        if (ioctl(_fd, AMBA_VIRT_IOC_SEND, &xfer) < 0)
-            return -errno;
-        return 0;
-#endif
     }
 
     int recv(void *buf, uint32_t maxLen, uint32_t &receivedLen, int32_t timeoutMs = 5000) {
@@ -235,7 +224,6 @@ create_node:
         memset(&rx, 0, sizeof(rx));
         rx.timeout_ms = timeoutMs;
 
-#if defined(__linux__)
         if (_pendingRequest.empty())
             return -ENODATA;
         rx.len = static_cast<uint32_t>(_pendingRequest.size());
@@ -243,10 +231,6 @@ create_node:
         _pendingRequest.clear();
         if (ioctl(_fd, AMBA_VIRT_IOC_RPC, &rx) < 0)
             return -errno;
-#else
-        if (ioctl(_fd, AMBA_VIRT_IOC_RECV, &rx) < 0)
-            return -errno;
-#endif
 
         receivedLen = rx.len;
         if (buf && rx.len > 0) {
@@ -257,25 +241,11 @@ create_node:
     }
 
     int flushRx(int maxDrain = 100) {
+        (void)maxDrain;
         if (_fd < 0)
             return -EBADF;
-#if defined(__linux__)
-        (void)maxDrain;
         _pendingRequest.clear();
         return 0;
-#else
-        struct amba_virt_xfer rx;
-        int drained = 0;
-        while (drained < maxDrain) {
-            memset(&rx, 0, sizeof(rx));
-            rx.timeout_ms = 10;
-            if (ioctl(_fd, AMBA_VIRT_IOC_RECV, &rx) < 0) {
-                break;
-            }
-            drained++;
-        }
-        return drained;
-#endif
     }
 
     void *mapShm(size_t size = 0, int prot = PROT_READ | PROT_WRITE, int flags = MAP_SHARED, off_t offset = 0) {
@@ -289,6 +259,25 @@ create_node:
         if (_shmMap != MAP_FAILED)
             unmapShm();
 
+#if defined(__QNX__) || defined(__QNXNTO__)
+        if (_info.shm_phys != 0) {
+            _shmMap = mmap_device_memory(nullptr, size, prot, 0, _info.shm_phys + offset);
+            if (_shmMap != MAP_FAILED) {
+                _mappedSize = size;
+                return _shmMap;
+            }
+        } else {
+            size_t map_sz = size;
+            if (map_sz > 64 * 1024 * 1024)
+                map_sz = 64 * 1024 * 1024;
+            _shmMap = mmap(nullptr, map_sz, prot, MAP_ANON | MAP_PRIVATE, NOFD, 0);
+            if (_shmMap != MAP_FAILED) {
+                _mappedSize = map_sz;
+                return _shmMap;
+            }
+        }
+#endif
+
         _shmMap = mmap(nullptr, size, prot, flags, _fd, offset);
         if (_shmMap == MAP_FAILED)
             return MAP_FAILED;
@@ -299,7 +288,14 @@ create_node:
 
     void unmapShm() {
         if (_shmMap != MAP_FAILED) {
+#if defined(__QNX__) || defined(__QNXNTO__)
+            if (_info.shm_phys != 0)
+                munmap_device_memory(_shmMap, _mappedSize);
+            else
+                munmap(_shmMap, _mappedSize);
+#else
             munmap(_shmMap, _mappedSize);
+#endif
             _shmMap = MAP_FAILED;
             _mappedSize = 0;
         }

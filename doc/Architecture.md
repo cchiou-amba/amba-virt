@@ -127,14 +127,16 @@ VComLink). The container must not connect to a guest CID.
 |---|---|---|
 | EVE-OS / KVM | Hypervisor OS on the SoC | EL2 (host kernel) |
 | **NOHYPER** | Privileged Ubuntu **container** on that host kernel, not a VM | EL2-side process |
-| **HVM** | KVM guest domain. Guest kernel / userspace | EL1 / EL0 |
+| **Linux HVM** | KVM Linux guest domain (Ubuntu / Alpine) | EL1 (kernel) / EL0 (userspace) |
+| **QNX 8.0 HVM** | KVM QNX Neutrino RTOS microkernel guest domain | EL1 (microkernel) / EL0 (resource managers & apps) |
 | Secure monitor | Not used by this stack | EL3 |
 
 Do not call the guest VM EL3. The NOHYPER container does not “run at EL2” as a
 hypervisor; it runs **on the hypervisor OS**. `insmod` inside a privileged
 NOHYPER app loads a module into the **EVE host kernel**. Build that module
 against `eve-kernel` (or the running EVE `/lib/modules/$(uname -r)/build`).
-Build HVM modules against target guest distribution headers or toolchains.
+Build Linux HVM modules against target guest distribution headers (`gcc-aarch64-linux-gnu`).
+Build QNX HVM resource managers and applications using QNX SDP 8.0 (`qcc -Vgcc_ntoaarch64le`).
 Do not give the guest the Ambarella kernel tree.
 
 Zedcontroller assigns devices (PhyIo / assigngrp) to the NOHYPER app so it can
