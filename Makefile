@@ -173,7 +173,7 @@ mode-prod: set-mode-production
 
 
 eve: linuxkit-ca-image $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
-	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar
+	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar pkg/grub pkg/mkimage-raw-efi pkg/mkrootfs-squash
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
 		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
 			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD)) live && \
