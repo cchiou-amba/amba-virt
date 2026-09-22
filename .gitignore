@@ -1,5 +1,6 @@
 .cursor
 .agents
+.claude
 .vscode
 apps/*.json
 build/
