@@ -8,10 +8,12 @@ CROSS_COMPILE ?= aarch64-linux-gnu-
 
 .PHONY: all modules clean
 
+CAVALRY_SYMVERS := $(wildcard $(CURDIR)/../cavalry/cavalry_v3/Module.symvers)
+
 all modules:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) \
 		ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
-		KBUILD_EXTRA_SYMBOLS=$(CURDIR)/../cavalry/cavalry_v3/Module.symvers \
+		$(if $(CAVALRY_SYMVERS),KBUILD_EXTRA_SYMBOLS=$(CAVALRY_SYMVERS)) \
 		modules
 
 clean:

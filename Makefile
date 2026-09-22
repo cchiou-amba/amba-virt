@@ -221,33 +221,55 @@ drivers: $(call my-depend,eve-kernel-headers)
 	for drv in $(OOT_DRIVERS); do \
 		echo "Building out-of-tree driver: $$drv..."; \
 		if [ "$$drv" = "pwr_gpu" ]; then \
-			$(MAKE) -C $(DRIVERS_DIR)/$$drv KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
+			if [ -d "$(DRIVERS_DIR)/$$drv" ]; then \
+				$(MAKE) -C $(DRIVERS_DIR)/$$drv KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
+			else \
+				echo "[skip] $$drv: driver source not present in tree"; \
+			fi; \
 		elif [ "$$drv" = "amba_otp" ]; then \
-			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/amba_otp/sec_v2) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-I$$(realpath $(DRIVERS_DIR)/amba_otp/include) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules || exit 1; \
+			if [ -d "$(DRIVERS_DIR)/amba_otp/sec_v2" ]; then \
+				$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/amba_otp/sec_v2) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-I$$(realpath $(DRIVERS_DIR)/amba_otp/include) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules || exit 1; \
+			else \
+				echo "[skip] $$drv: driver source not present in tree"; \
+			fi; \
 		elif [ "$$drv" = "ambvideo" ]; then \
-			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+			if [ -d "$(DRIVERS_DIR)/ambvideo/dsp_v6" ]; then \
+				$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+			else \
+				echo "[skip] $$drv: driver source not present in tree"; \
+			fi; \
 		elif [ "$$drv" = "dsplog" ]; then \
-			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655" KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+			if [ -d "$(DRIVERS_DIR)/dsplog" -a -f "$(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers" ]; then \
+				$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655" KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+			else \
+				echo "[skip] $$drv: driver source or ambvideo prerequisite not present in tree"; \
+			fi; \
 		elif [ "$$drv" = "pci_platform" ]; then \
-			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+			if [ -d "$(DRIVERS_DIR)/pci_platform" ]; then \
+				$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+			else \
+				echo "[skip] $$drv: driver source not present in tree"; \
+			fi; \
 		elif [ -f "$(DRIVERS_DIR)/$$drv/Makefile" ]; then \
 			$(MAKE) -C $(DRIVERS_DIR)/$$drv KDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		else \
+			echo "[skip] $$drv: Makefile not found"; \
 		fi; \
-		for ko in $$(find $(DRIVERS_DIR)/$$drv/ -name "*.ko"); do \
+		for ko in $$(find $(DRIVERS_DIR)/$$drv/ -name "*.ko" 2>/dev/null); do \
 			if [ -x "$$sign_bin" ] && [ -f "$$key" ]; then \
 				echo "Signing $$ko with $$(basename $$key)..."; \
 				"$$sign_bin" sha256 "$$key" "$$cert" "$$ko"; \
 			fi; \
 			cp -f "$$ko" $(BUILD_DIR)/modules/; \
 		done; \
-		for bin in $$(find $(DRIVERS_DIR)/$$drv/ -name "*.bin"); do \
+		for bin in $$(find $(DRIVERS_DIR)/$$drv/ -name "*.bin" 2>/dev/null); do \
 			cp -f "$$bin" $(BUILD_DIR)/firmware/; \
 		done; \
 		if [ -d "$(DRIVERS_DIR)/$$drv/tools" ]; then \
 			if [ -f "$(DRIVERS_DIR)/$$drv/tools/Makefile" ]; then \
 				$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
 			fi; \
-			for exe in $$(find $(DRIVERS_DIR)/$$drv/tools/ -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o"); do \
+			for exe in $$(find $(DRIVERS_DIR)/$$drv/tools/ -maxdepth 1 -type f -executable ! -name "*.sh" ! -name "*.o" 2>/dev/null); do \
 				mkdir -p $(BUILD_DIR)/bin; \
 				cp -f "$$exe" $(BUILD_DIR)/bin/; \
 			done; \
@@ -265,15 +287,35 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	cert=$(BUILD_DIR)/certs/signing_key.x509; \
 	echo "Building out-of-tree driver: $@..."; \
 	if [ "$@" = "pwr_gpu" ]; then \
-		$(MAKE) -C $(DRIVERS_DIR)/$@ KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
+		if [ -d "$(DRIVERS_DIR)/$@" ]; then \
+			$(MAKE) -C $(DRIVERS_DIR)/$@ KERNELDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kbuild || exit 1; \
+		else \
+			echo "[skip] $@: driver source not present in tree"; \
+		fi; \
 	elif [ "$@" = "amba_otp" ]; then \
-		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/amba_otp/sec_v2) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-I$$(realpath $(DRIVERS_DIR)/amba_otp/include) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules || exit 1; \
+		if [ -d "$(DRIVERS_DIR)/amba_otp/sec_v2" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/amba_otp/sec_v2) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-I$$(realpath $(DRIVERS_DIR)/amba_otp/include) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655" modules || exit 1; \
+		else \
+			echo "[skip] $@: driver source not present in tree"; \
+		fi; \
 	elif [ "$@" = "ambvideo" ]; then \
-		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		if [ -d "$(DRIVERS_DIR)/ambvideo/dsp_v6" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		else \
+			echo "[skip] $@: driver source not present in tree"; \
+		fi; \
 	elif [ "$@" = "dsplog" ]; then \
-		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655" KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+		if [ -d "$(DRIVERS_DIR)/dsplog" -a -f "$(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/dsplog) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- EXTRA_CFLAGS="-DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655" KBUILD_EXTRA_SYMBOLS=$$(realpath $(DRIVERS_DIR)/ambvideo/dsp_v6/Module.symvers) modules || exit 1; \
+		else \
+			echo "[skip] $@: driver source or ambvideo prerequisite not present in tree"; \
+		fi; \
 	elif [ "$@" = "pci_platform" ]; then \
-		$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		if [ -d "$(DRIVERS_DIR)/pci_platform" ]; then \
+			$(MAKE) -C $$hdr M=$$(realpath $(DRIVERS_DIR)/pci_platform) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
+		else \
+			echo "[skip] $@: driver source not present in tree"; \
+		fi; \
 	elif [ -f "$(DRIVERS_DIR)/$@/Makefile" ]; then \
 		$(MAKE) -C $(DRIVERS_DIR)/$@ KDIR=$$hdr ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules || exit 1; \
 	else \

@@ -85,8 +85,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 log_step() {
-    echo ""
-    echo "[$(date '+%H:%M:%S')] >>> $1"
+    echo "" >&2
+    echo "[$(date '+%H:%M:%S')] >>> $1" >&2
 }
 
 do_clean() {
@@ -136,7 +136,7 @@ ensure_image() {
             "${ROOT_DIR}/guest-os/docker"
         log_step "Cached builder image ${img_tag} created successfully."
     else
-        echo "[*] Using cached builder image: ${img_tag}"
+        log_step "Using cached builder image: ${img_tag}"
     fi
 }
 
