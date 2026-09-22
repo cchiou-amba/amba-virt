@@ -19,6 +19,7 @@ modules.order
 
 # Built binaries
 drivers/amba_virt/tools/amba-virt-ctl
+tools/host_mkimage/host_mkimage
 
 # Generated certificates
 apps/*.cert.pem

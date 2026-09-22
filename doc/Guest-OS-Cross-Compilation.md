@@ -90,7 +90,7 @@ When an x86 host executes `make -C <headers> ARCH=arm64 CROSS_COMPILE=aarch64-li
 
 ### The Solution: Rapid Host Helper Bootstrapping
 
-Rather than rebuilding the entire kernel tree or running under slow QEMU emulation, `scripts/build_guest.sh` extracts the distribution headers once to `build/guest/headers/` and compiles the three small host helper tools with the host's native `gcc`:
+Rather than rebuilding the entire kernel tree or running under slow QEMU emulation, `guest-os/build_guest.sh` extracts the distribution headers once to `build/guest/headers/` and compiles the three small host helper tools with the host's native `gcc`:
 
 ```bash
 # 1. Compile fixdep with host x86 gcc (~0.05s)

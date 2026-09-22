@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# scripts/build_guest.sh
+# guest-os/build_guest.sh
 # Automated fast cross-compilation driver for Ambarella HVM guest targets:
 #   - Ubuntu 24.04 LTS (AArch64 HVM: amba_virt.ko + amba-virt-client)
 #   - Alpine Linux 3.20 (AArch64 HVM: amba_virt.ko + amba-virt-client)

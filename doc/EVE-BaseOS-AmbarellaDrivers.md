@@ -60,38 +60,34 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 ### 3.1 Mandatory Reserved Memory Carveouts
 Both `ambcma.ko` and `cavalry.ko` enforce strict hardware memory carveout checks during module initialization. If the active device tree lacks these nodes, `ambcma.ko` immediately aborts with `-ENODEV` (`#iav_error# ambarella_get_cma_pool_info: /reserved-memory/cavalry@0 not found`), preventing `/dev/iav` and `/dev/cavalry` from being created.
 
-The verified EVE platform device tree must declare the following reserved memory nodes under `/reserved-memory`:
+The verified EVE platform device tree (`eve_iav_cooper.dtb`) declares the following reserved memory nodes under `/reserved-memory`:
 
-| Node | Physical Address Range | Size | Allocation Policy | Purpose |
-|---|---|---|---|---|
-| `/reserved-memory/iav@0` | `0x00a3000000`–`0x00ffffffff` | 1488 MiB | `no-map;` | Primary IAV & DSP private buffer window (`dsp_buf_size=0x40000000` allocates 1024 MiB) |
-| `/reserved-memory/iav@1` | `0x0028000000`–`0x003fffffff` | 384 MiB | `no-map;` | IAV shared memory pool (pyramid layers, stats, overlays) |
-| `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | Cavalry User / CVMEM execution pool (`virt_user_window_mb=2048`) |
-| `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA pool |
-| `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry ucode staging buffer |
+| Memory / Carveout Node | Physical Address Range | Size | Allocation Policy | Functional Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | System physical RAM address space (`reg = <0x0 0x0 0x8 0x0>`) |
+| `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Explicit DRAM size node for `ambcma.ko` DRAM size validation |
+| `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
+| `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer (`cavalry_ucode`) |
+| `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA descriptors (`cavalry_shared`) |
+| `/reserved-memory/disp@0` | `0x00a3000000`–`0x00a4ffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer |
+| `/reserved-memory/iav@1` | `0x00a5000000`–`0x00bcffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
+| `/reserved-memory/iav@0` | `0x00bd000000`–`0x00ffffffff` | 1072 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers) |
+| `/reserved-memory/linux,cma` | Dynamically placed | 512 MiB | `reusable;` | Linux kernel default CMA allocator pool |
+| `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | NPU / Cavalry user DRAM pool (`cavalry_reserved`, 64-bit space) |
+| `amba_virt_shm` | `0x0100000000`–`0x017fffffff` | 2 GiB | `shm_phys` | Guest VM zero-copy shared memory window (HVM tenants) |
 
-In addition, the device tree must declare the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specify `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation.
+In addition, the device tree declares the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specifies `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation.
 
-### 3.2 The 32-Bit DSP Microcode Boundary & Address Wraparound
+### 3.2 The 32-Bit DSP Microcode Boundary & Address Alignment
 
-The Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bin`) execute within an internal **32-bit physical address space** (`< 0x100000000` / 4 GiB). All pointer arithmetic, partition tables, and bounds checks in microcode (e.g. `dsp_mempar.c`) utilize 32-bit unsigned registers.
+The Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bin`) execute strictly within an internal **32-bit physical address space** (`< 0x100000000` / 4 GiB). All pointer arithmetic, partition tables, and bounds checks in microcode (e.g. `dsp_mempar.c`) utilize 32-bit unsigned registers.
 
 This establishes a critical architectural rule: **All memory managed by `ambcma.ko` for DSP buffers must reside strictly below the 4 GiB physical address boundary.**
 
-#### The 32-Bit Overflow Failure Mode
-If `/reserved-memory/iav@0` is placed too high (for example, starting at `0xbd000000` as in stock Cooper U-Boot):
-1. When `ambcma.ko` initializes with `dsp_buf_size=0x30000000` (768 MiB) or `0x40000000` (1024 MiB), the DSP DRAM buffer begins at `dram_base = 0xd1f59000`.
-2. Adding `dsp_buf_size` yields `0x101f59000` (4127 MiB). Because the microcode operates in 32-bit arithmetic, the upper bit is truncated, wrapping the end address to `end = 0x01f59000` (32.8 MiB).
-3. The microcode allocator performs the bounds check: `if (next_off > end) { assert("MM:: no more dram"); }`.
-4. On the very first sub-buffer allocation, `next_off` (`0xd1f82980`) is compared against `end` (`0x01f59000`). Because `0xd1f82980 > 0x01f59000`, the bounds check fails immediately, triggering a false out-of-memory kernel panic during `IAV_IOC_ENABLE_PREVIEW`:
-   ```text
-   #iav_error# dsp_check_assertion(770): DSP assertion happened!
-   [IDSP1:0] Assertion failure at line:1057 of .../dsp_mempar.c module 1
-   MM:: no more dram, size_aligned=512 next_off=0xd1f82980 dram_base=0xd1f59000, end=0x01f59000
-   ```
-
-#### The Phase 1 Resolution
-To guarantee the DSP buffer never crosses 4 GiB, `/reserved-memory/iav@0` is anchored at `0x00a3000000` with size `0x5d000000` (1488 MiB). Because `0x00a3000000 + 0x5d000000 = 0x100000000`, the pool spans exactly up to the 4 GiB boundary without overflowing. `cavalry@0` (12 GiB) starts at `0x0100000000`, completely non-overlapping in 64-bit space.
+In the authoritative 32 GiB Cooper Pro layout:
+1. `/reserved-memory/iav@0` starts at `0x00bd000000` with size `0x43000000` (1072 MiB), spanning up to `0x0100000000` (4 GiB).
+2. When `ambcma.ko` initializes with `ama_enable=1 dsp_buf_size=0x40000000` (1024 MiB), the DSP buffer `0xbd000000` + `0x40000000` = `0xfd000000` (< 4 GiB) remains completely inside 32-bit space with zero address wraparound.
+3. `cavalry@0` (12 GiB) is anchored at `0x0100000000` in 64-bit address space, non-overlapping with DSP memory.
 
 ### 3.3 U-Boot SMP Relocation Top (`/u-boot_cfg/reloc-top`)
 
@@ -128,8 +124,8 @@ To deploy the verified device tree:
 mkdir -p /tmp/cfgmnt
 mount /dev/mmcblk0p4 /tmp/cfgmnt
 
-# 2. Stage the verified DevKit DTB as eve.dtb
-cp /path/to/build/eve_iav.dtb /tmp/cfgmnt/eve.dtb
+# 2. Stage the verified Cooper Pro DTB as eve.dtb
+cp /path/to/build/eve_iav_cooper.dtb /tmp/cfgmnt/eve.dtb
 
 # 3. Configure grub.cfg override to load eve.dtb
 cat << 'EOF' > /tmp/cfgmnt/grub.cfg
@@ -147,9 +143,9 @@ Upon reboot, GRUB reads `($config_part)/grub.cfg` and loads `eve.dtb`. Verify ac
 nproc --all
 # Expected output: 4
 cat /proc/device-tree/model
-# Expected output: n1-655 cooper devkit
+# Expected output: Ambarella N1-655 Cooper Pro Board
 ls -la /proc/device-tree/reserved-memory/
-# Confirms iav@0, iav@1, cavalry@0..2 are present
+# Confirms disp@0, iav@0, iav@1, cavalry@0..2 are present
 ```
 
 ---

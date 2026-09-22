@@ -17,31 +17,32 @@
 # ==============================================================================
 
 # Core Timers & Memory Management
-#ENABLE_HW_TIMER=${ENABLE_HW_TIMER:-1}
-#ENABLE_AMBCMA=${ENABLE_AMBCMA:-1}
-#ARGS_AMBCMA=${ARGS_AMBCMA:-""}
+ENABLE_HW_TIMER=${ENABLE_HW_TIMER:-1}
+ENABLE_AMBCMA=${ENABLE_AMBCMA:-1}
+ARGS_AMBCMA=${ARGS_AMBCMA:-"ama_enable=1 dsp_buf_size=0x40000000"}
 
 # IPC & DSP Video Processing Subsystem
-#ENABLE_MSG=${ENABLE_MSG:-1}
-#ENABLE_AMBNL=${ENABLE_AMBNL:-1}
-#ENABLE_DSP=${ENABLE_DSP:-1}
-#ENABLE_AMBA_OPTI_PRINT=${ENABLE_AMBA_OPTI_PRINT:-1}
-#ENABLE_IMGPROC=${ENABLE_IMGPROC:-1}
-#ENABLE_IAV=${ENABLE_IAV:-1}
-#ENABLE_DSPLOG=${ENABLE_DSPLOG:-1}
+ENABLE_MSG=${ENABLE_MSG:-1}
+ENABLE_AMBNL=${ENABLE_AMBNL:-1}
+ARGS_AMBNL=${ARGS_AMBNL:-"amb_nl_cn=1"}
+ENABLE_DSP=${ENABLE_DSP:-1}
+ENABLE_AMBA_OPTI_PRINT=${ENABLE_AMBA_OPTI_PRINT:-1}
+ENABLE_IMGPROC=${ENABLE_IMGPROC:-1}
+ENABLE_IAV=${ENABLE_IAV:-1}
+ENABLE_DSPLOG=${ENABLE_DSPLOG:-0}
 
 # Camera / Bridge / Deserializer Subsystem
-#ENABLE_VIO_MONITOR=${ENABLE_VIO_MONITOR:-0}
-#ENABLE_AMBRG=${ENABLE_AMBRG:-0}
-#ENABLE_MAX96712=${ENABLE_MAX96712:-0}
-#ARGS_MAX96712=${ARGS_MAX96712:-"id=0x08040201 dts_addr=1 use_max20087=0"}
-#ENABLE_OS08A10_MIPI_BRG=${ENABLE_OS08A10_MIPI_BRG:-0}
-#ARGS_OS08A10_MIPI_BRG=${ARGS_OS08A10_MIPI_BRG:-"brg_id=0x2"}
+ENABLE_VIO_MONITOR=${ENABLE_VIO_MONITOR:-0}
+ENABLE_AMBRG=${ENABLE_AMBRG:-0}
+ENABLE_MAX96712=${ENABLE_MAX96712:-0}
+ARGS_MAX96712=${ARGS_MAX96712:-"id=0x01 dts_addr=1 use_max20087=0 port_mode=0"}
+ENABLE_OS08A10_MIPI_BRG=${ENABLE_OS08A10_MIPI_BRG:-0}
+ARGS_OS08A10_MIPI_BRG=${ARGS_OS08A10_MIPI_BRG:-"brg_id=0x1"}
 
 # NPU / Virtualization / GPU Subsystem
 # (amba_virt provides /dev/amba_virt_shm required by Ubuntu and Alpine HVM guests)
-#ENABLE_CAVALRY=${ENABLE_CAVALRY:-1}
-#ARGS_CAVALRY=${ARGS_CAVALRY:-"virt_user_window_mb=2048"}
+ENABLE_CAVALRY=${ENABLE_CAVALRY:-1}
+ARGS_CAVALRY=${ARGS_CAVALRY:-"virt_user_window_mb=2048"}
 ENABLE_AMBA_VIRT=${ENABLE_AMBA_VIRT:-1}
 ARGS_AMBA_VIRT=${ARGS_AMBA_VIRT:-"shm_phys=0x100000000 shm_size=0x80000000"}
 #ENABLE_AMBA_PCI_PLATFORM=${ENABLE_AMBA_PCI_PLATFORM:-1}
@@ -105,7 +106,7 @@ if [ "$STATUS" -eq 1 ]; then
     check_status "hw_timer"          "$ENABLE_HW_TIMER"          ""
     check_status "ambcma"            "$ENABLE_AMBCMA"            "$ARGS_AMBCMA"
     check_status "msg"               "$ENABLE_MSG"               ""
-    check_status "ambnl"             "$ENABLE_AMBNL"             ""
+    check_status "ambnl"             "$ENABLE_AMBNL"             "$ARGS_AMBNL"
     check_status "dsp"               "$ENABLE_DSP"               ""
     check_status "amba_opti_print"   "$ENABLE_AMBA_OPTI_PRINT"   ""
     check_status "imgproc"           "$ENABLE_IMGPROC"           ""
@@ -200,12 +201,23 @@ if [ -d "$MODULES_DIR" ]; then
     load_mod "hw_timer"          "$ENABLE_HW_TIMER"
     load_mod "ambcma"            "$ENABLE_AMBCMA"            "$ARGS_AMBCMA"
     load_mod "msg"               "$ENABLE_MSG"
-    load_mod "ambnl"             "$ENABLE_AMBNL"
+    load_mod "ambnl"             "$ENABLE_AMBNL"             "$ARGS_AMBNL"
     load_mod "dsp"               "$ENABLE_DSP"
     load_mod "amba_opti_print"   "$ENABLE_AMBA_OPTI_PRINT"
     load_mod "imgproc"           "$ENABLE_IMGPROC"
     load_mod "iav"               "$ENABLE_IAV"
     load_mod "dsplog"            "$ENABLE_DSPLOG"
+
+    # Assert POC power GPIOs if SerDes or Sensor is enabled
+    if [ "$ENABLE_MAX96712" = "1" ] || [ "$ENABLE_AMBRG" = "1" ] || [ "$ENABLE_OS08A10_MIPI_BRG" = "1" ]; then
+        for g in 92 93 98 99; do
+            echo $g > /sys/class/gpio/export 2>/dev/null || true
+            echo out > /sys/class/gpio/gpio$g/direction 2>/dev/null || true
+            echo 1 > /sys/class/gpio/gpio$g/value 2>/dev/null || true
+        done
+        sleep 2
+    fi
+
     load_mod "vio_monitor"       "$ENABLE_VIO_MONITOR"
     load_mod "ambrg"             "$ENABLE_AMBRG"
     load_mod "max96712"          "$ENABLE_MAX96712"          "$ARGS_MAX96712"
@@ -219,3 +231,13 @@ if [ -d "$MODULES_DIR" ]; then
     load_mod "diag_stage2_pte"   "$ENABLE_DIAG_STAGE2_PTE"
     load_mod "amba_otp"          "$ENABLE_AMBA_OTP"
 fi
+
+# 4. Create character device nodes dynamically from /proc/devices
+IAV_MAJOR=$(awk '$2=="iav_ucode" {print $1}' /proc/devices 2>/dev/null || true)
+CAV_MAJOR=$(awk '$2=="cavalry" {print $1}' /proc/devices 2>/dev/null || true)
+OTP_MAJOR=$(awk '$2=="amba_otp" {print $1}' /proc/devices 2>/dev/null || true)
+
+[ -n "$IAV_MAJOR" ] && rm -f /dev/iav /dev/ucode && mknod /dev/iav c "$IAV_MAJOR" 1 && mknod /dev/ucode c "$IAV_MAJOR" 0 && chmod 666 /dev/iav /dev/ucode
+[ -n "$CAV_MAJOR" ] && rm -f /dev/cavalry && mknod /dev/cavalry c "$CAV_MAJOR" 0 && chmod 666 /dev/cavalry
+[ -n "$OTP_MAJOR" ] && rm -f /dev/amba_otp && mknod /dev/amba_otp c "$OTP_MAJOR" 0 && chmod 600 /dev/amba_otp
+

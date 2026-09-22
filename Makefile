@@ -304,28 +304,28 @@ test-gdma: diag
 guest: guest-all
 
 guest-all:
-	@$(ROOT_DIR)/scripts/build_guest.sh --distro=all
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=all
 
 guest-ubuntu:
-	@$(ROOT_DIR)/scripts/build_guest.sh --distro=ubuntu
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=ubuntu
 
 guest-alpine:
-	@$(ROOT_DIR)/scripts/build_guest.sh --distro=alpine
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=alpine
 
 guest-qnx:
-	@$(ROOT_DIR)/scripts/build_guest.sh --distro=qnx
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=qnx
 
 guest-qnx-image:
-	@$(ROOT_DIR)/scripts/build_guest.sh --distro=qnx --qnx-image
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=qnx --qnx-image
 
 guest-windows:
 	@$(ROOT_DIR)/guest-os/windows/windows-build/build.sh
 
 clean-guest:
-	@$(ROOT_DIR)/scripts/build_guest.sh --clean
+	@$(ROOT_DIR)/guest-os/build_guest.sh --clean
 
 distclean-guest:
-	@$(ROOT_DIR)/scripts/build_guest.sh --distclean
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distclean
 
 # ==============================================================================
 # U-Boot Bootloader & Host Firmware Packaging Targets

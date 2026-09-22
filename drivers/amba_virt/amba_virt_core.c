@@ -241,6 +241,19 @@ static int conn_rx_worker(void *data)
 
 	kfree(buf);
 	pr_info("amba_virt: rx worker exiting for CID %u\n", conn->cid);
+
+	mutex_lock(&dev->conn_lock);
+	if (conn->sock) {
+		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
+		sock_release(conn->sock);
+		conn->sock = NULL;
+	}
+	if (conn->rx_thread) {
+		put_task_struct(conn->rx_thread);
+		conn->rx_thread = NULL;
+	}
+	conn->in_use = false;
+	mutex_unlock(&dev->conn_lock);
 	return 0;
 }
 
@@ -252,6 +265,7 @@ static int accept_one(void *data)
 		struct socket *newsock = NULL;
 		struct sockaddr_vm peer_addr = { 0 };
 		unsigned int peer_cid = 0;
+		struct task_struct *t = NULL;
 		int slot = -1, i;
 		int ret;
 
@@ -304,13 +318,17 @@ static int accept_one(void *data)
 
 		if (dev->conns[slot].in_use) {
 			if (dev->conns[slot].rx_thread) {
-				kthread_stop(dev->conns[slot].rx_thread);
+				struct task_struct *old_t = dev->conns[slot].rx_thread;
 				dev->conns[slot].rx_thread = NULL;
+				kthread_stop(old_t);
+				put_task_struct(old_t);
 			}
 			if (dev->conns[slot].sock) {
 				kernel_sock_shutdown(dev->conns[slot].sock, SHUT_RDWR);
 				sock_release(dev->conns[slot].sock);
+				dev->conns[slot].sock = NULL;
 			}
+			dev->conns[slot].in_use = false;
 		}
 
 		dev->conns[slot].dev = dev;
@@ -318,8 +336,14 @@ static int accept_one(void *data)
 		dev->conns[slot].cid = peer_cid;
 		dev->conns[slot].in_use = true;
 
-		dev->conns[slot].rx_thread = kthread_run(conn_rx_worker, &dev->conns[slot],
-							 "amba_rx_%u", peer_cid);
+		t = kthread_run(conn_rx_worker, &dev->conns[slot],
+				"amba_rx_%u", peer_cid);
+		if (!IS_ERR(t)) {
+			get_task_struct(t);
+			dev->conns[slot].rx_thread = t;
+		} else {
+			dev->conns[slot].rx_thread = NULL;
+		}
 		mutex_unlock(&dev->conn_lock);
 
 		pr_info("amba_virt: accepted vsock connection from CID %u on slot %d\n",
@@ -355,6 +379,7 @@ int amba_virt_vsock_listen(struct amba_virt_dev *dev)
 		dev->accept_thread = NULL;
 		goto err;
 	}
+	get_task_struct(dev->accept_thread);
 	pr_info("amba_virt: listening vsock *:%u\n", dev->vsock_port);
 	return 0;
 err:
@@ -1037,24 +1062,26 @@ void amba_virt_core_exit(struct amba_virt_dev *dev)
 	unsigned long flags;
 
 	if (dev->accept_thread) {
-		kthread_stop(dev->accept_thread);
+		struct task_struct *t = dev->accept_thread;
 		dev->accept_thread = NULL;
+		kthread_stop(t);
+		put_task_struct(t);
 	}
 
 	mutex_lock(&dev->conn_lock);
 	for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
-		if (dev->conns[i].in_use) {
-			if (dev->conns[i].rx_thread) {
-				kthread_stop(dev->conns[i].rx_thread);
-				dev->conns[i].rx_thread = NULL;
-			}
-			if (dev->conns[i].sock) {
-				kernel_sock_shutdown(dev->conns[i].sock, SHUT_RDWR);
-				sock_release(dev->conns[i].sock);
-				dev->conns[i].sock = NULL;
-			}
-			dev->conns[i].in_use = false;
+		if (dev->conns[i].rx_thread) {
+			struct task_struct *t = dev->conns[i].rx_thread;
+			dev->conns[i].rx_thread = NULL;
+			kthread_stop(t);
+			put_task_struct(t);
 		}
+		if (dev->conns[i].sock) {
+			kernel_sock_shutdown(dev->conns[i].sock, SHUT_RDWR);
+			sock_release(dev->conns[i].sock);
+			dev->conns[i].sock = NULL;
+		}
+		dev->conns[i].in_use = false;
 	}
 	mutex_unlock(&dev->conn_lock);
 

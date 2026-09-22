@@ -7,6 +7,8 @@ This directory contains host-side utilities and binaries for development, board 
 | Path | Description |
 |---|---|
 | [`tools/bin/usb-matrix`](bin/usb-matrix) | Ambarella USB flash programming and boot utility for x86-64 Linux |
+| [`tools/host_mkimage/`](host_mkimage/) | Host firmware packaging and partition image generation tool |
+| [`tools/bringup/`](bringup/) | Target hardware diagnostic utilities (SerDes locks, IAV state, MMIO, I2C scanner) |
 
 ---
 
