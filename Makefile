@@ -53,6 +53,24 @@ endef
 V ?= 1
 EVE_MAKE = env -u MAKEFLAGS $(MAKE) V=$(V)
 
+# TLS-intercepting proxy support; all no-ops when tools/misc/ca holds no
+# certificates. See tools/misc/ca/README.md. linuxkit resolves ADD <git-url>
+# and ADD <https-url> inside its own buildkit container rather than in a build
+# stage, so it needs an image that trusts them. LINUXKIT_BUILDER_VERSION must
+# track the default reported by 'linuxkit pkg build --help'.
+CA_CERTS_DIR ?= $(ROOT_DIR)/tools/misc/ca
+CA_CERTS := $(wildcard $(CA_CERTS_DIR)/*.crt)
+LINUXKIT_BUILDER_VERSION ?= v0.26.3
+ifneq ($(CA_CERTS),)
+export LINUXKIT_BUILDER_IMAGE := moby/buildkit:$(LINUXKIT_BUILDER_VERSION)-localca
+endif
+
+.PHONY: linuxkit-ca-image
+linuxkit-ca-image:
+ifneq ($(CA_CERTS),)
+	@$(CA_CERTS_DIR)/mkbuildkit.sh $(LINUXKIT_BUILDER_VERSION) $(LINUXKIT_BUILDER_IMAGE)
+endif
+
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
 	drivers $(OOT_DRIVERS) nohyper nohyper-apps everything clean distclean \
 	diag test-gdma \
@@ -154,7 +172,7 @@ mode-dev: set-mode-development
 mode-prod: set-mode-production
 
 
-eve: $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
+eve: linuxkit-ca-image $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar
 	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
 		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
