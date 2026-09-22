@@ -1,0 +1,5 @@
+# Local CA certificates are environment-specific and MUST NOT be committed:
+# the submodule remotes for this tree are public forks. Drop your *.crt here
+# and the build picks them up automatically. See README.md.
+*.crt
+*.pem
