@@ -34,6 +34,7 @@
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
 #include "virt_backend_client.h"
+#include "virt_dma_broker.h"
 #include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
 #include "virt_query.h"
@@ -381,6 +382,58 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 
 		virt_query_handle_req(rx->client_cid, q_req, q_resp);
 		tx->len = sizeof(*out) + sizeof(*q_resp);
+	} else if (in->type == AMBA_VIRT_MSG_DMA_SLAVE_CFG_REQ) {
+		struct amba_virt_dma_slave_cfg *d_req;
+		struct amba_virt_dma_slave_cfg *d_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*d_req)) {
+			fprintf(stderr, "short DMA slave cfg req %u\n", rx->len);
+			return;
+		}
+		d_req = (struct amba_virt_dma_slave_cfg *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_DMA_SLAVE_CFG_RESP;
+		out->seq = in->seq;
+		d_resp = (struct amba_virt_dma_slave_cfg *)(tx->data + sizeof(*out));
+
+		virt_dma_handle_slave_cfg(rx->client_cid, d_req, d_resp);
+		tx->len = sizeof(*out) + sizeof(*d_resp);
+	} else if (in->type == AMBA_VIRT_MSG_DMA_SUBMIT_REQ) {
+		struct amba_virt_dma_submit *d_req;
+		struct amba_virt_dma_submit *d_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*d_req)) {
+			fprintf(stderr, "short DMA submit req %u\n", rx->len);
+			return;
+		}
+		d_req = (struct amba_virt_dma_submit *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_DMA_SUBMIT_RESP;
+		out->seq = in->seq;
+		d_resp = (struct amba_virt_dma_submit *)(tx->data + sizeof(*out));
+
+		virt_dma_handle_submit(rx->client_cid, info->shm_size,
+				      d_req, d_resp);
+		tx->len = sizeof(*out) + sizeof(*d_resp);
+	} else if (in->type == AMBA_VIRT_MSG_DMA_TERMINATE_REQ) {
+		struct amba_virt_dma_terminate *d_req;
+		struct amba_virt_dma_terminate *d_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*d_req)) {
+			fprintf(stderr, "short DMA terminate req %u\n", rx->len);
+			return;
+		}
+		d_req = (struct amba_virt_dma_terminate *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_DMA_TERMINATE_RESP;
+		out->seq = in->seq;
+		d_resp = (struct amba_virt_dma_terminate *)(tx->data + sizeof(*out));
+
+		virt_dma_handle_terminate(rx->client_cid, d_req, d_resp);
+		tx->len = sizeof(*out) + sizeof(*d_resp);
 	} else {
 		fprintf(stderr, "unknown type %u\n", in->type);
 	}
@@ -672,6 +725,7 @@ int main(int argc, char **argv)
 
 	virt_mem_pool_init(0x40000000U); /* 1 GiB default BAR */
 	virt_acl_init();
+	virt_dma_broker_init();
 	virt_admin_ipc_start(NULL);
 	virt_backend_client_init("127.0.0.1", 5556, "/persist/etc/amba-virt-backend.token", on_backend_module_state_change);
 

@@ -7,3 +7,7 @@
 .tmp_versions
 .*.cmd
 tools/amba-virt-server
+tools/amba-virt-ctl
+tools/amba-virt-backend
+tools/test_virt_*
+!tools/test_virt_*.c

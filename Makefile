@@ -118,6 +118,10 @@ help:
 	@echo "  <driver-name>       Build and sign a specific driver (e.g. cavalry, amba_otp)"
 	@echo "  clean-guest         Clean guest build staging (build/guest/)"
 	@echo "  distclean-guest     Full clean of guest build cache (including headers)"
+	@echo "  deploy-guest        Deploy guest artifacts (TARGET=<host-alias>)"
+	@echo "  deploy-hvm-ubuntu   Deploy & reload Ubuntu HVM (TARGET=n1-655-*-ubuntu)"
+	@echo "  deploy-hvm-qnx      Deploy & reload QNX 8.0 HVM (TARGET=n1-655-*-qnx)"
+	@echo "  deploy-nohyper      Deploy & reload NOHYPER container (TARGET=n1-655-*-nohyper)"
 	@echo "  clean               Clean local build outputs and driver artifacts"
 	@echo "  distclean           Full clean of build outputs and EVE system artifacts"
 
@@ -386,6 +390,18 @@ clean-guest:
 
 distclean-guest:
 	@$(ROOT_DIR)/guest-os/build_guest.sh --distclean
+
+deploy-guest:
+	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(TARGET)
+
+deploy-hvm-ubuntu:
+	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-ubuntu) --reload --enable-serial --test
+
+deploy-hvm-qnx:
+	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-qnx) --reload --enable-serial --test
+
+deploy-nohyper:
+	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-nohyper) --reload --test
 
 # ==============================================================================
 # U-Boot Bootloader & Host Firmware Packaging Targets

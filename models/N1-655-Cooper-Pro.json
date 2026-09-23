@@ -147,6 +147,36 @@
       "parentassigngrp": ""
     },
     {
+      "ztype": "IO_TYPE_COM",
+      "phylabel": "COM2",
+      "phyaddrs": {
+        "Serial": "/dev/ttyS1"
+      },
+      "logicallabel": "COM2",
+      "assigngrp": "COM2",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_COM",
+      "phylabel": "COM3",
+      "phyaddrs": {
+        "Serial": "/dev/ttyS2"
+      },
+      "logicallabel": "COM3",
+      "assigngrp": "COM3",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
       "ztype": "IO_TYPE_ETH",
       "phylabel": "eth0",
       "phyaddrs": {

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Ambarella HVM UART Driver Kbuild
+#
+# Copyright (C) 2026, Ambarella International LLC
+
+ccflags-y += -I$(src)
+
+obj-m := amba_uart.o
+

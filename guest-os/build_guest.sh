@@ -93,6 +93,8 @@ do_clean() {
     echo "=== Cleaning guest build artifacts ==="
     rm -rf "${UBUNTU_OUT}" "${ALPINE_OUT}" "${QNX_OUT}"
     make -C "${ROOT_DIR}/guest-os/linux/amba-virt" clean 2>/dev/null || true
+    make -C "${ROOT_DIR}/guest-os/linux/amba-uart" clean 2>/dev/null || true
+    make -C "${ROOT_DIR}/guest-os/linux/amba-dma" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/amba-gdma" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/amba-cavalry" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/test-gdma" clean 2>/dev/null || true
@@ -164,7 +166,8 @@ ensure_ubuntu_headers() {
     log_step "Preparing host kbuild helper tools for Ubuntu headers..."
     gcc -O2 -o "${kdir}/scripts/basic/fixdep" "${kcommon}/scripts/basic/fixdep.c"
     if [ -f "${kcommon}/scripts/mod/modpost.c" ]; then
-        gcc -O2 -I"${kdir}/scripts/mod" -I"${kcommon}/scripts/mod" \
+        gcc -O2 -include "${kdir}/include/linux/kconfig.h" \
+            -I"${kdir}/scripts/mod" -I"${kcommon}/scripts/mod" \
             -o "${kdir}/scripts/mod/modpost" \
             "${kcommon}/scripts/mod/modpost.c" \
             "${kcommon}/scripts/mod/file2alias.c" \
@@ -222,92 +225,140 @@ ensure_alpine_headers() {
     echo "${kdir}"
 }
 
+package_ubuntu_deb() {
+    local out_dir="$1"
+    local kdir="$2"
+    local pkg_name="amba-uart"
+    local pkg_ver="1.0.0"
+    local pkg_arch="arm64"
+    local stage_dir="${BUILD_DIR}/pkg/${pkg_name}_${pkg_ver}_${pkg_arch}"
+    local kver
+    kver="$(basename "${kdir}" | sed 's/linux-headers-//')"
+
+    log_step "Packaging Ubuntu .deb package: ${pkg_name}_${pkg_ver}_${pkg_arch}.deb..."
+    rm -rf "${stage_dir}"
+    mkdir -p "${stage_dir}/DEBIAN" \
+             "${stage_dir}/lib/modules/${kver}/extra" \
+             "${stage_dir}/etc/modules-load.d" \
+             "${stage_dir}/etc/modprobe.d"
+
+    cp -vf "${out_dir}/amba_uart.ko" "${stage_dir}/lib/modules/${kver}/extra/"
+    echo "amba_uart" > "${stage_dir}/etc/modules-load.d/amba-uart.conf"
+
+    cat <<'EOF' > "${stage_dir}/DEBIAN/control"
+Package: amba-uart
+Version: 1.0.0
+Architecture: arm64
+Maintainer: Ambarella International LLC <cchiou@ambarella.com>
+Depends: systemd, kmod
+Section: admin
+Priority: optional
+Description: Ambarella HVM UART Serial Passthrough Driver and Console 2 Service
+ Provides the amba_uart kernel module for hardware UART passthrough in
+ Ambarella HVM guest VMs and automatically configures Console 2 serial-getty.
+EOF
+
+    cat <<'EOF' > "${stage_dir}/DEBIAN/postinst"
+#!/bin/sh
+set -e
+case "$1" in
+    configure)
+        depmod -a
+        systemctl daemon-reload
+        modprobe amba_uart 2>/dev/null || true
+        systemctl enable serial-getty@ttyAMBA0.service
+        systemctl --no-block start serial-getty@ttyAMBA0.service || true
+        ;;
+esac
+exit 0
+EOF
+
+    cat <<'EOF' > "${stage_dir}/DEBIAN/prerm"
+#!/bin/sh
+set -e
+case "$1" in
+    remove|purge|deconfigure)
+        systemctl stop serial-getty@ttyAMBA0.service 2>/dev/null || true
+        systemctl disable serial-getty@ttyAMBA0.service 2>/dev/null || true
+        modprobe -r amba_uart 2>/dev/null || true
+        ;;
+esac
+exit 0
+EOF
+
+    cat <<'EOF' > "${stage_dir}/DEBIAN/postrm"
+#!/bin/sh
+set -e
+case "$1" in
+    purge|remove)
+        depmod -a
+        systemctl daemon-reload
+        ;;
+esac
+exit 0
+EOF
+
+    chmod 0755 "${stage_dir}/DEBIAN/postinst" "${stage_dir}/DEBIAN/prerm" "${stage_dir}/DEBIAN/postrm"
+    if which dpkg-deb >/dev/null 2>&1; then
+        dpkg-deb --root-owner-group --build "${stage_dir}" "${out_dir}/${pkg_name}_${pkg_ver}_${pkg_arch}.deb"
+        log_step "Debian package generated: ${out_dir}/${pkg_name}_${pkg_ver}_${pkg_arch}.deb"
+    else
+        echo "Notice: dpkg-deb not found on host, package staged at ${stage_dir}"
+    fi
+}
+
 build_ubuntu() {
     echo "=========================================================="
     echo " Building Ubuntu 24.04 LTS ARM64 Guest Artifacts"
     echo "=========================================================="
     mkdir -p "${UBUNTU_OUT}"
 
-    if which aarch64-linux-gnu-gcc >/dev/null 2>&1 && which aarch64-linux-gnu-g++ >/dev/null 2>&1; then
-        log_step "Using native host cross-compiler: $(which aarch64-linux-gnu-gcc) (Fast Path)"
-        local kdir
-        kdir="$(ensure_ubuntu_headers)"
+    ensure_binfmt
+    ensure_image "${IMAGE_UBUNTU}" "Dockerfile.ubuntu"
 
-        log_step "Compiling amba_virt.ko natively (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-)..."
-        make -C "${ROOT_DIR}/guest-os/linux/amba-virt" \
-            KDIR_HVM="${kdir}" \
-            ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            clean modules
-        cp -vf "${ROOT_DIR}/guest-os/linux/amba-virt/amba_virt.ko" "${UBUNTU_OUT}/"
+    log_step "Compiling Ubuntu 24.04 kernel modules inside ${IMAGE_UBUNTU} container..."
+    docker run --rm --platform linux/arm64 \
+        -v "${ROOT_DIR}":/workspace -w /workspace \
+        "${IMAGE_UBUNTU}" bash -c '
+            set -euo pipefail
+            KDIR=$(ls -d /usr/src/linux-headers-*-generic 2>/dev/null | tail -n 1)
+            echo "[*] Compiling amba_virt.ko against ${KDIR}..."
+            make -C /workspace/guest-os/linux/amba-virt KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-virt/amba_virt.ko /workspace/build/guest/ubuntu/
 
-        log_step "Compiling ambarella-gdma.ko natively..."
-        make -C "${ROOT_DIR}/guest-os/linux/amba-gdma" \
-            KDIR_HVM="${kdir}" \
-            ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            clean modules
-        cp -vf "${ROOT_DIR}/guest-os/linux/amba-gdma/ambarella-gdma.ko" "${UBUNTU_OUT}/"
+            echo "[*] Compiling ambarella-gdma.ko..."
+            make -C /workspace/guest-os/linux/amba-gdma KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-gdma/ambarella-gdma.ko /workspace/build/guest/ubuntu/
 
-        log_step "Compiling testGDMA.ko natively..."
-        make -C "${ROOT_DIR}/guest-os/linux/test-gdma" \
-            KDIR_HVM="${kdir}" \
-            ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            clean modules
-        cp -vf "${ROOT_DIR}/guest-os/linux/test-gdma/testGDMA.ko" "${UBUNTU_OUT}/"
+            echo "[*] Compiling testGDMA.ko..."
+            make -C /workspace/guest-os/linux/test-gdma KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/test-gdma/testGDMA.ko /workspace/build/guest/ubuntu/
 
-        log_step "Compiling amba_cavalry.ko natively..."
-        make -C "${ROOT_DIR}/guest-os/linux/amba-cavalry" \
-            KDIR_HVM="${kdir}" \
-            ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            clean modules
-        cp -vf "${ROOT_DIR}/guest-os/linux/amba-cavalry/amba_cavalry.ko" "${UBUNTU_OUT}/"
+            echo "[*] Compiling amba_cavalry.ko..."
+            make -C /workspace/guest-os/linux/amba-cavalry KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-cavalry/amba_cavalry.ko /workspace/build/guest/ubuntu/
 
-        log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ glibc)..."
-        make -C "${ROOT_DIR}/guest-os/client" \
-            clean all \
-            CROSS_COMPILE=aarch64-linux-gnu-
-        cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${UBUNTU_OUT}/"
-        if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
-            cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${UBUNTU_OUT}/"
-        fi
-    else
-        log_step "[NOTE] Host aarch64 cross-compiler not found. Falling back to container build..."
-        ensure_binfmt
-        ensure_image "${IMAGE_UBUNTU}" "Dockerfile.ubuntu"
+            echo "[*] Compiling amba_uart.ko..."
+            make -C /workspace/guest-os/linux/amba-uart KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-uart/amba_uart.ko /workspace/build/guest/ubuntu/
 
-        log_step "Running compilation inside ${IMAGE_UBUNTU} container..."
-        docker run --rm --platform linux/arm64 \
-            -v "${ROOT_DIR}":/workspace -w /workspace \
-            "${IMAGE_UBUNTU}" bash -c '
-                set -euo pipefail
-                KDIR=$(ls -d /lib/modules/*/build 2>/dev/null | tail -n 1)
-                echo "[*] Compiling amba_virt.ko against ${KDIR}..."
-                make -C /workspace/guest-os/linux/amba-virt KDIR_HVM="${KDIR}" clean modules
-                cp -vf /workspace/guest-os/linux/amba-virt/amba_virt.ko /workspace/build/guest/ubuntu/
+            echo "[*] Compiling amba_dma.ko..."
+            make -C /workspace/guest-os/linux/amba-dma KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-dma/amba_dma.ko /workspace/build/guest/ubuntu/
+        '
 
-                echo "[*] Compiling ambarella-gdma.ko..."
-                make -C /workspace/guest-os/linux/amba-gdma KDIR_HVM="${KDIR}" clean modules
-                cp -vf /workspace/guest-os/linux/amba-gdma/ambarella-gdma.ko /workspace/build/guest/ubuntu/
-
-                echo "[*] Compiling testGDMA.ko..."
-                make -C /workspace/guest-os/linux/test-gdma KDIR_HVM="${KDIR}" clean modules
-                cp -vf /workspace/guest-os/linux/test-gdma/testGDMA.ko /workspace/build/guest/ubuntu/
-
-                echo "[*] Compiling amba_cavalry.ko..."
-                make -C /workspace/guest-os/linux/amba-cavalry KDIR_HVM="${KDIR}" clean modules
-                cp -vf /workspace/guest-os/linux/amba-cavalry/amba_cavalry.ko /workspace/build/guest/ubuntu/
-
-                echo "[*] Compiling amba-virt-client..."
-                make -C /workspace/guest-os/client clean all
-                cp -vf /workspace/guest-os/client/amba-virt-client /workspace/build/guest/ubuntu/
-                if [ -f /workspace/guest-os/client/amba-virt-cli ]; then
-                    cp -vf /workspace/guest-os/client/amba-virt-cli /workspace/build/guest/ubuntu/
-                fi
-            '
+    log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ glibc)..."
+    make -C "${ROOT_DIR}/guest-os/client" \
+        clean all \
+        CROSS_COMPILE=aarch64-linux-gnu-
+    cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${UBUNTU_OUT}/"
+    if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
+        cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${UBUNTU_OUT}/"
     fi
+
+    local kdir
+    kdir="$(ensure_ubuntu_headers)"
+    package_ubuntu_deb "${UBUNTU_OUT}" "${kdir}"
 
     echo ""
     log_step "Ubuntu 24.04 artifacts staged in ${UBUNTU_OUT}:"
@@ -352,6 +403,24 @@ build_alpine() {
             clean modules
         cp -vf "${ROOT_DIR}/guest-os/linux/test-gdma/testGDMA.ko" "${ALPINE_OUT}/"
 
+        log_step "Compiling amba_uart.ko natively for Alpine..."
+        make -C "${ROOT_DIR}/guest-os/linux/amba-uart" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_GCC_PLUGINS=n \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/amba-uart/amba_uart.ko" "${ALPINE_OUT}/"
+
+        log_step "Compiling amba_dma.ko natively for Alpine..."
+        make -C "${ROOT_DIR}/guest-os/linux/amba-dma" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_GCC_PLUGINS=n \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/amba-dma/amba_dma.ko" "${ALPINE_OUT}/"
+
         log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ -static musl/standalone)..."
         make -C "${ROOT_DIR}/guest-os/client" \
             clean all \
@@ -383,6 +452,10 @@ build_alpine() {
                 echo "[*] Compiling testGDMA.ko..."
                 make -C /workspace/guest-os/linux/test-gdma KDIR_HVM="${KDIR}" clean modules
                 cp -vf /workspace/guest-os/linux/test-gdma/testGDMA.ko /workspace/build/guest/alpine/
+
+                echo "[*] Compiling amba_uart.ko for Alpine..."
+                make -C /workspace/guest-os/linux/amba-uart KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/amba-uart/amba_uart.ko /workspace/build/guest/alpine/
 
                 echo "[*] Compiling amba-virt-client (static musl)..."
                 make -C /workspace/guest-os/client clean all STATIC=1
@@ -451,6 +524,15 @@ build_qnx() {
     log_step "Compiling cavalry_hvm_yolo (QNX YOLO inference engine)..."
     make -C "${ROOT_DIR}/guest-os/apps/cavalry-yolo" OS=qnx clean all
     cp -vf "${ROOT_DIR}/guest-os/apps/cavalry-yolo/cavalry_hvm_yolo" "${QNX_OUT}/"
+
+    log_step "Staging devc-ser8250 (SDP built-in DW_apb_uart serial driver)..."
+    if [ -f "${QNX_TARGET:-}/aarch64le/sbin/devc-ser8250" ]; then
+        cp -vf "${QNX_TARGET}/aarch64le/sbin/devc-ser8250" "${QNX_OUT}/"
+    elif [ -f "${HOME}/qnx/qnx800/target/qnx/aarch64le/sbin/devc-ser8250" ]; then
+        cp -vf "${HOME}/qnx/qnx800/target/qnx/aarch64le/sbin/devc-ser8250" "${QNX_OUT}/"
+    elif [ -f "${HOME}/qnx800/target/qnx/aarch64le/sbin/devc-ser8250" ]; then
+        cp -vf "${HOME}/qnx800/target/qnx/aarch64le/sbin/devc-ser8250" "${QNX_OUT}/"
+    fi
 
     if [ "${BUILD_QNX_IMAGE}" -eq 1 ]; then
         log_step "Building QNX 8.0 HVM disk image..."

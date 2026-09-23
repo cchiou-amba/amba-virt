@@ -100,6 +100,15 @@ struct amba_virt_dmabuf_slice {
 #define AMBA_VIRT_MSG_ACL_GET_REQ		30u
 #define AMBA_VIRT_MSG_DEV_STATE_EVENT		40u
 
+/* Virtual Peripheral DMA Messages */
+#define AMBA_VIRT_MSG_DMA_SLAVE_CFG_REQ		50u
+#define AMBA_VIRT_MSG_DMA_SLAVE_CFG_RESP	51u
+#define AMBA_VIRT_MSG_DMA_SUBMIT_REQ		52u
+#define AMBA_VIRT_MSG_DMA_SUBMIT_RESP		53u
+#define AMBA_VIRT_MSG_DMA_TERMINATE_REQ		54u
+#define AMBA_VIRT_MSG_DMA_TERMINATE_RESP		55u
+#define AMBA_VIRT_MSG_DMA_COMPLETE_EVENT		56u
+
 enum vcav_opcode {
 	VCAV_OP_GET_VERSION	= 1,
 	VCAV_OP_GET_CHIP_ID	= 2,
@@ -331,13 +340,14 @@ struct amba_virt_query_resp {
 #define AMBA_VIRT_CAP_CAVALRY_PATH_A    0x00000400U
 #define AMBA_VIRT_CAP_CAVALRY_REGISTER  0x00000800U
 #define AMBA_VIRT_CAP_IAV_STREAM        0x00001000U
+#define AMBA_VIRT_CAP_DMA_SLAVE         0x00002000U
 
 #define AMBA_VIRT_ROLE_UNTRUSTED \
 	(AMBA_VIRT_CAP_PING | AMBA_VIRT_CAP_QUERY_SELF | AMBA_VIRT_CAP_CAVALRY_PATH_B | AMBA_VIRT_CAP_CAVALRY_REGISTER)
 
 #define AMBA_VIRT_ROLE_STANDARD \
 	(AMBA_VIRT_ROLE_UNTRUSTED | AMBA_VIRT_CAP_MEM_ALLOC | AMBA_VIRT_CAP_DEV_CONFIG | \
-	 AMBA_VIRT_CAP_GDMA_COPY | AMBA_VIRT_CAP_GDMA_PITCH)
+	 AMBA_VIRT_CAP_GDMA_COPY | AMBA_VIRT_CAP_GDMA_PITCH | AMBA_VIRT_CAP_DMA_SLAVE)
 
 struct amba_virt_acl_rule {
 	__u32 cid;
@@ -437,6 +447,55 @@ struct amba_virt_push_msg {
 	_IOR(AMBA_VIRT_IOC_MAGIC, 0x20, struct amba_virt_guest_list)
 #define AMBA_VIRT_IOC_PUSH \
 	_IOW(AMBA_VIRT_IOC_MAGIC, 0x21, struct amba_virt_push_msg)
+
+/* ---- Virtual Peripheral DMA Protocol Structures ---- */
+
+#define AMBA_VIRT_DMA_DIR_MEM_TO_DEV	1u
+#define AMBA_VIRT_DMA_DIR_DEV_TO_MEM	2u
+
+/* CID-to-DMA-Channel ACL entry */
+struct amba_virt_dma_channel_acl {
+	__u32 cid;
+	__u32 tx_channel;	/* DMA channel for MEM_TO_DEV */
+	__u32 rx_channel;	/* DMA channel for DEV_TO_MEM */
+};
+
+/* Slave configuration request/response */
+struct amba_virt_dma_slave_cfg {
+	__u32 channel;		/* Physical DMA channel number */
+	__u32 direction;	/* AMBA_VIRT_DMA_DIR_* */
+	__u32 src_addr_lo;	/* Peripheral FIFO or memory phys (low 32) */
+	__u32 dst_addr_lo;
+	__u32 src_addr_width;	/* Transfer width: 1, 2, or 4 bytes */
+	__u32 dst_addr_width;
+	__u32 src_maxburst;	/* Burst length in units of addr_width */
+	__u32 dst_maxburst;
+	__s32 status;		/* Response: 0 or -errno */
+};
+
+/* DMA transfer submit request/response */
+struct amba_virt_dma_submit {
+	__u32 channel;
+	__u32 direction;
+	__u32 buf_offset;	/* Offset within guest's ivshmem window */
+	__u32 buf_len;		/* Transfer length in bytes */
+	__u32 cookie;		/* Guest-assigned transfer ID */
+	__s32 status;		/* Response: 0 or -errno */
+};
+
+/* DMA terminate request/response */
+struct amba_virt_dma_terminate {
+	__u32 channel;
+	__s32 status;		/* Response: 0 or -errno */
+};
+
+/* Asynchronous DMA completion notification (server -> guest push) */
+struct amba_virt_dma_complete {
+	__u32 channel;
+	__u32 cookie;		/* Echoed from submit request */
+	__u32 bytes_transferred;
+	__s32 status;		/* 0 = success, -ETIMEDOUT = watchdog */
+};
 
 #endif /* _UAPI_AMBA_VIRT_H */
 

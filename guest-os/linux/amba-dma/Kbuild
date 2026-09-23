@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Ambarella Virtual Peripheral DMA Guest Driver Kbuild
+#
+# Copyright (C) 2026, Ambarella International LLC
+
+ccflags-y += -I$(src)
+ccflags-y += -I$(src)/../amba-virt
+ccflags-y += -I$(src)/../../../drivers/amba_virt/include/uapi
+
+KBUILD_EXTRA_SYMBOLS := $(src)/../amba-virt/Module.symvers
+
+obj-m := amba_dma.o
+
