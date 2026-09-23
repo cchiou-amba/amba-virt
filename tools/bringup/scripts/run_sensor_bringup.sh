@@ -46,7 +46,7 @@ load_mod() {
 
 echo "=== 2. Inserting base kernel video stack ==="
 load_mod "hw_timer"
-load_mod "ambcma" "ama_enable=1 dsp_buf_size=0x40000000"
+load_mod "ambcma" "ama_enable=1 dsp_buf_size=0x68000000"
 load_mod "cavalry" "virt_user_window_mb=2048"
 load_mod "msg"
 load_mod "ambnl"
@@ -75,7 +75,7 @@ if [ -n "$ROOTFS" ] && [ -d "$ROOTFS" ]; then
     LD_SO="$ROOTFS/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
     LIB_PATH="$ROOTFS/usr/lib/aarch64-linux-gnu:$ROOTFS/lib/aarch64-linux-gnu:$ROOTFS/usr/lib:$ROOTFS/lib:/persist/lib"
     killall -9 dsp_monitor_service 2>/dev/null || true
-    "$LD_SO" --library-path "$LIB_PATH" /persist/bin/dsp_monitor_service > /tmp/dsp_monitor.log 2>&1 &
+    nohup "$LD_SO" --library-path "$LIB_PATH" /persist/bin/dsp_monitor_service < /dev/null > /tmp/dsp_monitor.log 2>&1 &
     DSP_MON_PID=$!
     echo "dsp_monitor_service started (PID $DSP_MON_PID), waiting 3s for chip ID write..."
     sleep 3

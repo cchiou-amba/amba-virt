@@ -69,9 +69,9 @@ The verified EVE platform device tree (`eve_iav_cooper.dtb`) declares the follow
 | `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
 | `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer (`cavalry_ucode`) |
 | `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA descriptors (`cavalry_shared`) |
-| `/reserved-memory/disp@0` | `0x00a3000000`–`0x00a4ffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer |
-| `/reserved-memory/iav@1` | `0x00a5000000`–`0x00bcffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
-| `/reserved-memory/iav@0` | `0x00bd000000`–`0x00ffffffff` | 1072 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers) |
+| `/reserved-memory/disp@0` | `0x007e000000`–`0x007fffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer (`disp_buffer`) |
+| `/reserved-memory/iav@1` | `0x0080000000`–`0x0097ffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
+| `/reserved-memory/iav@0` | `0x0098000000`–`0x00ffffffff` | 1664 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers, contiguous with `iav@1`) |
 | `/reserved-memory/linux,cma` | Dynamically placed | 512 MiB | `reusable;` | Linux kernel default CMA allocator pool |
 | `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | NPU / Cavalry user DRAM pool (`cavalry_reserved`, 64-bit space) |
 | `amba_virt_shm` | `0x0100000000`–`0x017fffffff` | 2 GiB | `shm_phys` | Guest VM zero-copy shared memory window (HVM tenants) |
@@ -80,14 +80,15 @@ In addition, the device tree declares the `sub_scheduler0` platform device for C
 
 ### 3.2 The 32-Bit DSP Microcode Boundary & Address Alignment
 
-The Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bin`) execute strictly within an internal **32-bit physical address space** (`< 0x100000000` / 4 GiB). All pointer arithmetic, partition tables, and bounds checks in microcode (e.g. `dsp_mempar.c`) utilize 32-bit unsigned registers.
+The Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bin`, `orcvin0.bin`, `orcvin1.bin`) execute strictly within an internal **32-bit physical address space** (`< 0x100000000` / 4 GiB). All pointer arithmetic, partition tables, and bounds checks in microcode (e.g. `dsp_mempar.c`, `orcvin_boot.c`) require that the IDSP shared and DSP private regions reside in a single contiguous top-memory window.
 
-This establishes a critical architectural rule: **All memory managed by `ambcma.ko` for DSP buffers must reside strictly below the 4 GiB physical address boundary.**
+This establishes a critical architectural rule: **All memory managed by `ambcma.ko` for DSP buffers must reside strictly below the 4 GiB physical address boundary and align contiguously with `iav@1`.**
 
 In the authoritative 32 GiB Cooper Pro layout:
-1. `/reserved-memory/iav@0` starts at `0x00bd000000` with size `0x43000000` (1072 MiB), spanning up to `0x0100000000` (4 GiB).
-2. When `ambcma.ko` initializes with `ama_enable=1 dsp_buf_size=0x40000000` (1024 MiB), the DSP buffer `0xbd000000` + `0x40000000` = `0xfd000000` (< 4 GiB) remains completely inside 32-bit space with zero address wraparound.
-3. `cavalry@0` (12 GiB) is anchored at `0x0100000000` in 64-bit address space, non-overlapping with DSP memory.
+1. `/reserved-memory/iav@1` starts at `0x0080000000` with size `0x18000000` (384 MiB) for IDSP shared memory.
+2. `/reserved-memory/iav@0` starts at `0x0098000000` with size `0x68000000` (1664 MiB), spanning contiguously up to `0x0100000000` (4 GiB), forming a single contiguous 2.0 GiB window `[0x80000000 .. 0x100000000]`.
+3. When `ambcma.ko` initializes with `ama_enable=1 dsp_buf_size=0x68000000` (1664 MiB), the DSP buffer `0x98000000` + `0x68000000` = `0x100000000` (4 GiB) remains completely inside 32-bit space with zero address wraparound and satisfies OrcVIN descriptor invariants.
+4. `cavalry@0` (12 GiB) is anchored at `0x0100000000` in 64-bit address space, non-overlapping with DSP memory.
 
 ### 3.3 U-Boot SMP Relocation Top (`/u-boot_cfg/reloc-top`)
 

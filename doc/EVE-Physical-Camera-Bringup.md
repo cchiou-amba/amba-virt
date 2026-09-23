@@ -56,9 +56,9 @@ All Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bi
 | `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
 | `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer (`cavalry_ucode`) |
 | `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA descriptors (`cavalry_shared`) |
-| `/reserved-memory/disp@0` | `0x00a3000000`–`0x00a4ffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer |
-| `/reserved-memory/iav@1` | `0x00a5000000`–`0x00bcffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
-| `/reserved-memory/iav@0` | `0x00bd000000`–`0x00ffffffff` | 1072 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers) |
+| `/reserved-memory/disp@0` | `0x007e000000`–`0x007fffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer (`disp_buffer`) |
+| `/reserved-memory/iav@1` | `0x0080000000`–`0x0097ffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
+| `/reserved-memory/iav@0` | `0x0098000000`–`0x00ffffffff` | 1664 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers, contiguous with `iav@1`) |
 | `/reserved-memory/linux,cma` | Dynamically placed | 512 MiB | `reusable;` | Linux kernel default CMA allocator pool |
 | `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | NPU / Cavalry user DRAM pool (`cavalry_reserved`, 64-bit space) |
 | `amba_virt_shm` | `0x0100000000`–`0x017fffffff` | 2 GiB | `shm_phys` | Guest VM zero-copy shared memory window (HVM tenants) |
@@ -142,7 +142,7 @@ echo -n "/persist/firmware" > /sys/module/firmware_class/parameters/path
 
 # Insert core timing, CMA, and messaging drivers
 insmod /persist/modules/hw_timer.ko
-insmod /persist/modules/ambcma.ko ama_enable=1 dsp_buf_size=0x40000000
+insmod /persist/modules/ambcma.ko ama_enable=1 dsp_buf_size=0x68000000
 insmod /persist/modules/cavalry.ko
 insmod /persist/modules/msg.ko
 insmod /persist/modules/ambnl.ko
