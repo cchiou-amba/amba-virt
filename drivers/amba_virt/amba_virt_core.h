@@ -92,6 +92,10 @@ int amba_virt_rpc_dev(struct amba_virt_dev *dev, const void *request,
 		      u32 request_len, void *response, u32 *response_len,
 		      unsigned int timeout_ms);
 
+int amba_virt_register_state_notifier(struct notifier_block *nb);
+int amba_virt_unregister_state_notifier(struct notifier_block *nb);
+void amba_virt_dispatch_state_event(struct amba_virt_dev_state_event *evt);
+
 extern const struct file_operations amba_virt_fops;
 
 #endif

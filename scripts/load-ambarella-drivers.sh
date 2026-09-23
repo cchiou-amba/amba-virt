@@ -241,3 +241,49 @@ OTP_MAJOR=$(awk '$2=="amba_otp" {print $1}' /proc/devices 2>/dev/null || true)
 [ -n "$CAV_MAJOR" ] && rm -f /dev/cavalry && mknod /dev/cavalry c "$CAV_MAJOR" 0 && chmod 666 /dev/cavalry
 [ -n "$OTP_MAJOR" ] && rm -f /dev/amba_otp && mknod /dev/amba_otp c "$OTP_MAJOR" 0 && chmod 600 /dev/amba_otp
 
+# 5. Start amba-virt-backend background supervisor if binary present
+BACKEND_BIN=""
+if [ -x "$PERSIST_DIR/bin/amba-virt-backend" ]; then
+    BACKEND_BIN="$PERSIST_DIR/bin/amba-virt-backend"
+elif [ -x "/usr/local/bin/amba-virt-backend" ]; then
+    BACKEND_BIN="/usr/local/bin/amba-virt-backend"
+fi
+
+if [ -n "$BACKEND_BIN" ]; then
+    mkdir -p "$PERSIST_DIR/log" "$PERSIST_DIR/etc"
+    if ! pidof amba-virt-backend >/dev/null 2>&1; then
+        echo "Starting amba-virt-backend supervisor with crash backoff..."
+        (
+            FAIL_COUNT=0
+            FIRST_FAIL_TIME=0
+            while true; do
+                if [ -x "$BACKEND_BIN" ]; then
+                    NOW=$(date +%s)
+                    if [ "$FAIL_COUNT" -eq 0 ]; then
+                        FIRST_FAIL_TIME=$NOW
+                    fi
+                    
+                    "$BACKEND_BIN" --port 5556 --log-file "$PERSIST_DIR/log/amba-virt-backend.log" >> "$PERSIST_DIR/log/amba-virt-backend.log" 2>&1 || true
+                    
+                    NOW=$(date +%s)
+                    FAIL_COUNT=$((FAIL_COUNT + 1))
+                    
+                    if [ $((NOW - FIRST_FAIL_TIME)) -le 60 ] && [ "$FAIL_COUNT" -ge 5 ]; then
+                        echo "[$(date)] amba-virt-backend crashing repeatedly (5 times in 60s). Backing off 30s..." >> "$PERSIST_DIR/log/amba-virt-backend.log"
+                        sleep 30
+                        FAIL_COUNT=0
+                    else
+                        if [ $((NOW - FIRST_FAIL_TIME)) -gt 60 ]; then
+                            FAIL_COUNT=1
+                            FIRST_FAIL_TIME=$NOW
+                        fi
+                        sleep 2
+                    fi
+                else
+                    sleep 5
+                fi
+            done
+        ) &
+    fi
+fi
+

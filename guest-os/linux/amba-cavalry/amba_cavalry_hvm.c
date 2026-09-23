@@ -701,6 +701,27 @@ static const struct file_operations amba_cavalry_fops = {
 	.llseek = no_llseek,
 };
 
+static int cavalry_state_notifier_call(struct notifier_block *nb, unsigned long action, void *data)
+{
+	struct amba_virt_dev_state_event *evt = data;
+	(void)nb;
+	(void)action;
+
+	if (!evt)
+		return NOTIFY_DONE;
+
+	if (evt->dev_id == AMBA_VIRT_DEV_TYPE_CAVALRY) {
+		g_cav.online = (evt->state == AMBA_VIRT_DEV_STATE_ONLINE);
+		pr_info("amba_cavalry: host state changed -> %s (reason=%u)\n",
+			g_cav.online ? "ONLINE" : "OFFLINE", evt->reason_code);
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block g_cavalry_state_nb = {
+	.notifier_call = cavalry_state_notifier_call,
+};
+
 static int __init amba_cavalry_init(void)
 {
 	int ret;
@@ -734,6 +755,7 @@ static int __init amba_cavalry_init(void)
 	}
 
 	g_cav.online = true;
+	amba_virt_register_state_notifier(&g_cavalry_state_nb);
 	pr_info("amba_cavalry: guest frontend registered /dev/cavalry (bar %pa, size %zu)\n",
 		&g_cav.bar_phys, g_cav.bar_size);
 	return 0;
@@ -741,6 +763,7 @@ static int __init amba_cavalry_init(void)
 
 static void __exit amba_cavalry_exit(void)
 {
+	amba_virt_unregister_state_notifier(&g_cavalry_state_nb);
 	g_cav.online = false;
 	misc_deregister(&g_cav.misc);
 	amba_cavalry_release_bounds(&g_cav);

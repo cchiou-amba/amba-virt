@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,8 @@
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
+#include "virt_backend_client.h"
+#include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
 #include "virt_query.h"
 
@@ -46,6 +49,59 @@ struct server_ctx {
 };
 
 static struct server_ctx g_ctx;
+
+int server_broadcast_dev_state(uint32_t dev_id, uint32_t state, uint32_t reason_code, uint32_t host_mod_mask)
+{
+	if (g_ctx.fd < 0)
+		return -1;
+
+	struct amba_virt_push_msg push;
+	memset(&push, 0, sizeof(push));
+	push.target_cid = 0; /* 0 = broadcast to all active guests */
+
+	struct amba_virt_msg *msg = (struct amba_virt_msg *)push.data;
+	msg->type = AMBA_VIRT_MSG_DEV_STATE_EVENT;
+	msg->seq = 0;
+
+	struct amba_virt_dev_state_event *evt =
+		(struct amba_virt_dev_state_event *)(push.data + sizeof(*msg));
+	evt->dev_id = dev_id;
+	evt->state = state;
+	evt->reason_code = reason_code;
+	evt->host_mod_mask = host_mod_mask;
+
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	evt->timestamp_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+
+	push.len = sizeof(*msg) + sizeof(*evt);
+
+	int ret = ioctl(g_ctx.fd, AMBA_VIRT_IOC_PUSH, &push);
+	return ret;
+}
+
+static void on_backend_module_state_change(uint32_t new_mod_mask)
+{
+	virt_query_set_host_mod_mask(new_mod_mask);
+
+	if (new_mod_mask & 0x00000002) {
+		cavalry_proxy_reopen();
+	}
+
+	for (size_t i = 0; i < DRIVER_MATRIX_COUNT; i++) {
+		if (g_driver_matrix[i].virt_dev_id == 0)
+			continue;
+
+		uint32_t needed = g_driver_matrix[i].module_mask | g_driver_matrix[i].prerequisite_mask;
+		uint32_t state = ((new_mod_mask & needed) == needed) ?
+				 AMBA_VIRT_DEV_STATE_ONLINE : AMBA_VIRT_DEV_STATE_OFFLINE;
+
+		server_broadcast_dev_state(g_driver_matrix[i].virt_dev_id,
+					   state,
+					   (state == AMBA_VIRT_DEV_STATE_ONLINE) ? 0 : 1,
+					   new_mod_mask);
+	}
+}
 
 static void process_incoming_msg(const struct amba_virt_xfer *rx,
 				 struct amba_virt_xfer *tx,
@@ -554,6 +610,7 @@ int main(int argc, char **argv)
 		{0, 0, 0, 0}
 	};
 
+	signal(SIGPIPE, SIG_IGN);
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
@@ -616,6 +673,7 @@ int main(int argc, char **argv)
 	virt_mem_pool_init(0x40000000U); /* 1 GiB default BAR */
 	virt_acl_init();
 	virt_admin_ipc_start(NULL);
+	virt_backend_client_init("127.0.0.1", 5556, "/persist/etc/amba-virt-backend.token", on_backend_module_state_change);
 
 	if (enforce_path_b) {
 		cavalry_proxy_set_enforce_path_b(1);

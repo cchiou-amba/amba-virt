@@ -17,6 +17,9 @@ int virt_query_handle_req(uint32_t caller_cid,
 			  const struct amba_virt_query_req *req,
 			  struct amba_virt_query_resp *resp);
 
+void virt_query_set_host_mod_mask(uint32_t mask);
+uint32_t virt_query_get_host_mod_mask(void);
+
 #endif /* _VIRT_QUERY_H_ */
 
 /*

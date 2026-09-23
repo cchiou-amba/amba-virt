@@ -19,7 +19,10 @@
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
+#include "virt_backend_client.h"
+#include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
+#include "virt_query.h"
 
 static pthread_t g_admin_thread;
 static int g_admin_running = 0;
@@ -195,6 +198,78 @@ static void handle_client(int client_fd)
 	} else if (strcmp(cmd, "RELOAD") == 0) {
 		virt_acl_load_policies(NULL);
 		snprintf(resp_buf, sizeof(resp_buf), "OK\n");
+	} else if (strcmp(cmd, "BACKEND_STATUS") == 0) {
+		bool conn = virt_backend_client_is_connected();
+		uint32_t mask = virt_backend_client_get_mod_mask();
+		snprintf(resp_buf, sizeof(resp_buf), "OK CONNECTED=%d MASK=0x%08x\n",
+			 conn ? 1 : 0, mask);
+	} else if (strcmp(cmd, "MODULE_LOAD") == 0) {
+		if (sscanf(req_buf, "%*s %63s", str_arg) == 1) {
+			int ret = virt_backend_client_load_module(str_arg);
+			if (ret == 0) {
+				snprintf(resp_buf, sizeof(resp_buf), "OK LOADED %s\n", str_arg);
+			} else {
+				snprintf(resp_buf, sizeof(resp_buf), "ERR LOAD_FAILED (%d)\n", ret);
+			}
+		} else {
+			snprintf(resp_buf, sizeof(resp_buf), "ERR USAGE: MODULE_LOAD <name>\n");
+		}
+	} else if (strcmp(cmd, "MODULE_UNLOAD") == 0) {
+		if (sscanf(req_buf, "%*s %63s", str_arg) == 1) {
+			if (strstr(str_arg, "cavalry") != NULL) {
+				cavalry_proxy_start_drain();
+				int drained = cavalry_proxy_wait_drained(200);
+				if (drained < 0) {
+					virt_backend_client_hardware_reset(AMBA_VIRT_DEV_TYPE_CAVALRY);
+				}
+				cavalry_proxy_finish_drain();
+			}
+			int ret = virt_backend_client_unload_module(str_arg);
+			if (ret == 0) {
+				snprintf(resp_buf, sizeof(resp_buf), "OK UNLOADED %s\n", str_arg);
+			} else {
+				snprintf(resp_buf, sizeof(resp_buf), "ERR UNLOAD_FAILED (%d)\n", ret);
+			}
+		} else {
+			snprintf(resp_buf, sizeof(resp_buf), "ERR USAGE: MODULE_UNLOAD <name>\n");
+		}
+	} else if (strcmp(cmd, "PIPELINE_START") == 0) {
+		if (sscanf(req_buf, "%*s %63s", str_arg) == 1) {
+			if (strcmp(str_arg, "npu") == 0) {
+				virt_backend_client_load_module("ambcma.ko");
+				int ret = virt_backend_client_load_module("cavalry.ko");
+				snprintf(resp_buf, sizeof(resp_buf), ret == 0 ? "OK PIPELINE npu STARTED\n" : "ERR PIPELINE npu FAILED (%d)\n", ret);
+			} else if (strcmp(str_arg, "camera") == 0) {
+				virt_backend_client_load_module("hw_timer.ko");
+				virt_backend_client_load_module("ambcma.ko");
+				virt_backend_client_load_module("msg.ko");
+				virt_backend_client_load_module("dsp.ko");
+				virt_backend_client_load_module("imgproc.ko");
+				int ret = virt_backend_client_load_module("iav.ko");
+				snprintf(resp_buf, sizeof(resp_buf), ret == 0 ? "OK PIPELINE camera STARTED\n" : "ERR PIPELINE camera FAILED (%d)\n", ret);
+			} else {
+				snprintf(resp_buf, sizeof(resp_buf), "ERR UNKNOWN_PIPELINE %s\n", str_arg);
+			}
+		} else {
+			snprintf(resp_buf, sizeof(resp_buf), "ERR USAGE: PIPELINE_START <npu|camera>\n");
+		}
+	} else if (strcmp(cmd, "FIRMWARE") == 0) {
+		struct backend_firmware_resp fw;
+		memset(&fw, 0, sizeof(fw));
+		int ret = virt_backend_client_get_firmware(&fw);
+		if (ret == 0) {
+			int offset = snprintf(resp_buf, sizeof(resp_buf), "OK COUNT %u\n", fw.count);
+			for (uint32_t i = 0; i < fw.count; i++) {
+				offset += snprintf(resp_buf + offset, sizeof(resp_buf) - offset,
+						   "FW NAME %s SIZE %u SHA256 %s PRESENT %u\n",
+						   fw.entries[i].name, fw.entries[i].size,
+						   fw.entries[i].sha256, fw.entries[i].present);
+				if ((size_t)offset >= sizeof(resp_buf) - 128)
+					break;
+			}
+		} else {
+			snprintf(resp_buf, sizeof(resp_buf), "ERR FIRMWARE_QUERY_FAILED (%d)\n", ret);
+		}
 	} else {
 		snprintf(resp_buf, sizeof(resp_buf), "ERR UNKNOWN_CMD\n");
 	}

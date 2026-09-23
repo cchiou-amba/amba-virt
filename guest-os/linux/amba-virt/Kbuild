@@ -2,7 +2,7 @@
 #
 # Ambarella Virtualization Linux Guest Driver Kbuild
 
-ccflags-y += -I$(src)/include/uapi -I$(src)
+ccflags-y += -I$(src)/include/uapi -I$(src) -DAMBA_VIRT_GUEST
 
 obj-m := amba_virt.o
 amba_virt-y := amba_virt_hvm.o amba_virt_core.o

@@ -22,23 +22,6 @@
 
 #define TEST_SOCK "/tmp/test_admin.sock"
 
-void cavalry_proxy_client_disconnect(uint32_t cid)
-{
-	(void)cid;
-}
-
-int cavalry_proxy_set_tenant_bounds(uint32_t cid, uint32_t base_offset,
-				    uint32_t pool_size, uint32_t rpc_arena_offset,
-				    uint32_t rpc_arena_size)
-{
-	(void)cid;
-	(void)base_offset;
-	(void)pool_size;
-	(void)rpc_arena_offset;
-	(void)rpc_arena_size;
-	return 0;
-}
-
 static void send_cmd(const char *cmd, char *out, size_t out_len)
 {
 	int fd = socket(AF_UNIX, SOCK_STREAM, 0);

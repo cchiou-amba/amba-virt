@@ -34,6 +34,7 @@ struct cavalry_tenant_ctx {
 };
 
 int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size, uint64_t phys_base);
+int cavalry_proxy_reopen(void);
 void cavalry_proxy_cleanup(void);
 
 int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
@@ -56,7 +57,13 @@ int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 int cavalry_proxy_close_session(uint32_t client_cid, uint32_t session_id);
 void cavalry_proxy_client_disconnect(uint32_t client_cid);
 
+int cavalry_proxy_start_drain(void);
+int cavalry_proxy_wait_drained(unsigned int timeout_ms);
+void cavalry_proxy_finish_drain(void);
+int cavalry_proxy_is_draining(void);
+
 #endif /* _CAVALRY_PROXY_H_ */
+
 
 /*
  * Local variables:

@@ -13,8 +13,21 @@
 
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
+#include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
 #include "virt_query.h"
+
+static uint32_t g_host_mod_mask = 0;
+
+void virt_query_set_host_mod_mask(uint32_t mask)
+{
+	g_host_mod_mask = mask;
+}
+
+uint32_t virt_query_get_host_mod_mask(void)
+{
+	return g_host_mod_mask;
+}
 
 int virt_query_handle_req(uint32_t caller_cid,
 			  const struct amba_virt_query_req *req,
@@ -143,6 +156,48 @@ int virt_query_handle_req(uint32_t caller_cid,
 		}
 
 		resp->count = out_count;
+		resp->status = 0;
+		break;
+	}
+
+	case AMBA_VIRT_QUERY_DRIVER_CAPS: {
+		if (!virt_acl_has_cap(caller_cid, AMBA_VIRT_CAP_QUERY_SELF)) {
+			resp->status = -EPERM;
+			return 0;
+		}
+
+		struct amba_virt_driver_caps_resp caps;
+		memset(&caps, 0, sizeof(caps));
+		caps.host_mod_mask = g_host_mod_mask;
+
+		uint32_t entry_idx = 0;
+		for (size_t i = 0; i < DRIVER_MATRIX_COUNT; i++) {
+			if (g_driver_matrix[i].virt_dev_id == 0)
+				continue;
+			if (entry_idx >= sizeof(caps.entries) / sizeof(caps.entries[0]))
+				break;
+
+			caps.entries[entry_idx].dev_id = g_driver_matrix[i].virt_dev_id;
+			caps.entries[entry_idx].module_mask = g_driver_matrix[i].module_mask;
+			if (g_driver_matrix[i].device_node) {
+				strncpy(caps.entries[entry_idx].dev_name,
+					g_driver_matrix[i].device_node,
+					sizeof(caps.entries[entry_idx].dev_name) - 1);
+			}
+
+			/* Check if module and its prerequisites are satisfied */
+			uint32_t needed = g_driver_matrix[i].module_mask | g_driver_matrix[i].prerequisite_mask;
+			if ((caps.host_mod_mask & needed) == needed) {
+				caps.entries[entry_idx].state = AMBA_VIRT_DEV_STATE_ONLINE;
+			} else {
+				caps.entries[entry_idx].state = AMBA_VIRT_DEV_STATE_OFFLINE;
+			}
+			entry_idx++;
+		}
+
+		caps.count = entry_idx;
+		memcpy(resp->payload, &caps, sizeof(caps));
+		resp->count = caps.count;
 		resp->status = 0;
 		break;
 	}

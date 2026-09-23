@@ -366,10 +366,106 @@ void pingServer(AmbaVirtDevice &dev) {
     }
 }
 
+void showDrivers(AmbaVirtDevice &dev, bool json) {
+    struct amba_virt_driver_caps_resp caps;
+    memset(&caps, 0, sizeof(caps));
+    int ret = dev.queryDriverCaps(caps);
+    if (ret < 0) {
+        std::cerr << "Error: queryDriverCaps failed (" << ret << ")\n";
+        return;
+    }
+
+    if (json) {
+        std::cout << "{\n"
+                  << "  \"host_mod_mask\": \"" << toHex(caps.host_mod_mask) << "\",\n"
+                  << "  \"drivers\": [\n";
+        for (uint32_t i = 0; i < caps.count; ++i) {
+            const auto &e = caps.entries[i];
+            std::cout << "    {\n"
+                      << "      \"dev_name\": \"" << e.dev_name << "\",\n"
+                      << "      \"dev_id\": " << e.dev_id << ",\n"
+                      << "      \"state\": \"" << (e.state == AMBA_VIRT_DEV_STATE_ONLINE ? "ONLINE" : "OFFLINE") << "\",\n"
+                      << "      \"module_mask\": \"" << toHex(e.module_mask) << "\"\n"
+                      << "    }" << (i + 1 < caps.count ? "," : "") << "\n";
+        }
+        std::cout << "  ]\n}\n";
+        return;
+    }
+
+    std::cout << "Ambarella Virtual Driver Capabilities & Availability:\n";
+    std::cout << " Host Module Mask: " << toHex(caps.host_mod_mask) << "\n";
+    std::cout << " Device Node      ID   Status     Module Mask\n";
+    std::cout << "--------------------------------------------------------------------------------\n";
+    for (uint32_t i = 0; i < caps.count; ++i) {
+        const auto &e = caps.entries[i];
+        std::cout << " " << std::left << std::setw(16) << e.dev_name << " "
+                  << std::setw(4) << e.dev_id << " "
+                  << std::setw(10) << (e.state == AMBA_VIRT_DEV_STATE_ONLINE ? "ONLINE" : "OFFLINE") << " "
+                  << toHex(e.module_mask) << "\n";
+    }
+}
+
+void showModules(AmbaVirtDevice &dev, bool json) {
+    struct amba_virt_driver_caps_resp caps;
+    memset(&caps, 0, sizeof(caps));
+    int ret = dev.queryDriverCaps(caps);
+    if (ret < 0) {
+        std::cerr << "Error: queryDriverCaps failed (" << ret << ")\n";
+        return;
+    }
+
+    if (json) {
+        std::cout << "{\n"
+                  << "  \"host_mod_mask\": \"" << toHex(caps.host_mod_mask) << "\"\n"
+                  << "}\n";
+        return;
+    }
+
+    std::cout << "Host Module Inventory (Bitmask: " << toHex(caps.host_mod_mask) << ")\n";
+    std::cout << "  ambcma.ko:       " << ((caps.host_mod_mask & (1U << 0)) ? "LOADED" : "ABSENT") << "\n";
+    std::cout << "  cavalry.ko:      " << ((caps.host_mod_mask & (1U << 1)) ? "LOADED" : "ABSENT") << "\n";
+    std::cout << "  dsp.ko:          " << ((caps.host_mod_mask & (1U << 2)) ? "LOADED" : "ABSENT") << "\n";
+    std::cout << "  iav.ko:          " << ((caps.host_mod_mask & (1U << 3)) ? "LOADED" : "ABSENT") << "\n";
+    std::cout << "  amba_virt.ko:    " << ((caps.host_mod_mask & (1U << 4)) ? "LOADED" : "ABSENT") << "\n";
+    std::cout << "  amba_otp.ko:     " << ((caps.host_mod_mask & (1U << 5)) ? "LOADED" : "ABSENT") << "\n";
+}
+
+void monitorEvents(AmbaVirtDevice &dev) {
+    std::cout << "Monitoring asynchronous hardware state events from host (Ctrl+C to stop)...\n";
+    for (;;) {
+        uint8_t rxBuf[512];
+        uint32_t rxLen = 0;
+        int ret = dev.recv(rxBuf, sizeof(rxBuf), rxLen, 10000);
+        if (ret < 0) {
+            if (ret == -ETIMEDOUT)
+                continue;
+            std::cerr << "Error receiving event (" << ret << ")\n";
+            break;
+        }
+
+        if (rxLen >= sizeof(struct amba_virt_msg)) {
+            const struct amba_virt_msg *msg = reinterpret_cast<const struct amba_virt_msg *>(rxBuf);
+            if (msg->type == AMBA_VIRT_MSG_DEV_STATE_EVENT &&
+                rxLen >= sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dev_state_event)) {
+                const struct amba_virt_dev_state_event *evt =
+                    reinterpret_cast<const struct amba_virt_dev_state_event *>(rxBuf + sizeof(struct amba_virt_msg));
+                std::cout << "[EVENT] dev_id=" << evt->dev_id << " (" << getDevTypeName(evt->dev_id) << ") "
+                          << "state=" << (evt->state == AMBA_VIRT_DEV_STATE_ONLINE ? "ONLINE" : "OFFLINE") << " "
+                          << "reason=" << evt->reason_code << " "
+                          << "host_mask=" << toHex(evt->host_mod_mask) << " "
+                          << "timestamp_ns=" << evt->timestamp_ns << "\n";
+            }
+        }
+    }
+}
+
 void printUsage(const char *prog) {
     std::cout << "Usage: " << prog << " [command] [options]\n\n"
               << "Commands:\n"
               << "  layout, mem     Display virtual device memory layout and partition map (default)\n"
+              << "  drivers, caps   Display virtual driver availability and host readiness state\n"
+              << "  modules, kmods  Display host kernel module inventory bitmask\n"
+              << "  monitor, events Stream real-time hardware state change events asynchronously\n"
               << "  info, status    Display guest tenant identity, quota, and assigned capabilities\n"
               << "  topo, topology  Display physical Ambarella silicon accelerator topology\n"
               << "  peers           List registered peer tenant VMs (requires QUERY_PEERS capability)\n"
@@ -410,6 +506,12 @@ int main(int argc, char **argv) {
 
     if (cmd == "layout" || cmd == "mem") {
         showLayout(dev, json);
+    } else if (cmd == "drivers" || cmd == "caps") {
+        showDrivers(dev, json);
+    } else if (cmd == "modules" || cmd == "kmods") {
+        showModules(dev, json);
+    } else if (cmd == "monitor" || cmd == "events") {
+        monitorEvents(dev);
     } else if (cmd == "info" || cmd == "status") {
         showInfo(dev, json);
     } else if (cmd == "topo" || cmd == "topology") {

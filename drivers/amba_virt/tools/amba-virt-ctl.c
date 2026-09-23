@@ -23,6 +23,11 @@ static void usage(const char *prog)
 	fprintf(stderr, "Usage: %s <command> [arguments]\n\n", prog);
 	fprintf(stderr, "Commands:\n");
 	fprintf(stderr, "  status                               Show amba-virt-server status\n");
+	fprintf(stderr, "  backend status                       Show amba-virt-backend connection & module status\n");
+	fprintf(stderr, "  module load <name>                   Load host kernel module via backend\n");
+	fprintf(stderr, "  module unload <name>                 Drain and unload host kernel module\n");
+	fprintf(stderr, "  pipeline start <npu|camera>          Start composite subsystem pipeline\n");
+	fprintf(stderr, "  firmware                             Query firmware inventory status\n");
 	fprintf(stderr, "  list-guests                          List all registered guest tenants\n");
 	fprintf(stderr, "  get-guest <cid>                      Get detailed info for tenant CID\n");
 	fprintf(stderr, "  set-quota <cid> <size[M]>            Set quota ceiling for tenant CID\n");
@@ -97,6 +102,57 @@ int main(int argc, char **argv)
 
 	if (strcmp(action, "status") == 0) {
 		snprintf(cmd_buf, sizeof(cmd_buf), "STATUS\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return 0;
+	}
+
+	if (strcmp(action, "backend") == 0) {
+		if (argc < 3 || strcmp(argv[2], "status") != 0) {
+			fprintf(stderr, "Usage: %s backend status\n", argv[0]);
+			return 1;
+		}
+		snprintf(cmd_buf, sizeof(cmd_buf), "BACKEND_STATUS\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return 0;
+	}
+
+	if (strcmp(action, "module") == 0) {
+		if (argc < 4) {
+			fprintf(stderr, "Usage: %s module <load|unload> <name>\n", argv[0]);
+			return 1;
+		}
+		if (strcmp(argv[2], "load") == 0) {
+			snprintf(cmd_buf, sizeof(cmd_buf), "MODULE_LOAD %s\n", argv[3]);
+		} else if (strcmp(argv[2], "unload") == 0) {
+			snprintf(cmd_buf, sizeof(cmd_buf), "MODULE_UNLOAD %s\n", argv[3]);
+		} else {
+			fprintf(stderr, "Usage: %s module <load|unload> <name>\n", argv[0]);
+			return 1;
+		}
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return 0;
+	}
+
+	if (strcmp(action, "pipeline") == 0) {
+		if (argc < 4 || strcmp(argv[2], "start") != 0) {
+			fprintf(stderr, "Usage: %s pipeline start <npu|camera>\n", argv[0]);
+			return 1;
+		}
+		snprintf(cmd_buf, sizeof(cmd_buf), "PIPELINE_START %s\n", argv[3]);
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return 0;
+	}
+
+	if (strcmp(action, "firmware") == 0) {
+		snprintf(cmd_buf, sizeof(cmd_buf), "FIRMWARE\n");
 		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
 			return 1;
 		printf("%s", resp_buf);

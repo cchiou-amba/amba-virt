@@ -26,7 +26,30 @@
 #include <linux/fdtable.h>
 
 #include <amba_virt.h>
+#include <linux/notifier.h>
 #include "amba_virt_core.h"
+
+static BLOCKING_NOTIFIER_HEAD(amba_virt_state_notifier_chain);
+
+int amba_virt_register_state_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&amba_virt_state_notifier_chain, nb);
+}
+EXPORT_SYMBOL_GPL(amba_virt_register_state_notifier);
+
+int amba_virt_unregister_state_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&amba_virt_state_notifier_chain, nb);
+}
+EXPORT_SYMBOL_GPL(amba_virt_unregister_state_notifier);
+
+void amba_virt_dispatch_state_event(struct amba_virt_dev_state_event *evt)
+{
+	if (evt) {
+		blocking_notifier_call_chain(&amba_virt_state_notifier_chain, evt->state, evt);
+	}
+}
+EXPORT_SYMBOL_GPL(amba_virt_dispatch_state_event);
 
 static int recv_exact(struct socket *sock, void *buf, size_t len, long timeout_jiffies)
 {
@@ -490,6 +513,8 @@ int amba_virt_mmap_window(struct amba_virt_dev *dev,
 }
 EXPORT_SYMBOL_GPL(amba_virt_mmap_window);
 
+#ifndef AMBA_VIRT_GUEST
+
 static int amba_virt_dmabuf_attach(struct dma_buf *dmabuf,
 				   struct dma_buf_attachment *attachment)
 {
@@ -646,6 +671,33 @@ int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
 }
 EXPORT_SYMBOL_GPL(amba_virt_export_dmabuf);
 
+#else /* AMBA_VIRT_GUEST */
+
+int amba_virt_export_dmabuf_slice(struct amba_virt_dev *dev,
+				  unsigned int slice_idx,
+				  size_t offset,
+				  size_t size,
+				  int *out_fd)
+{
+	(void)dev;
+	(void)slice_idx;
+	(void)offset;
+	(void)size;
+	(void)out_fd;
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(amba_virt_export_dmabuf_slice);
+
+int amba_virt_export_dmabuf(struct amba_virt_dev *dev, int *out_fd)
+{
+	(void)dev;
+	(void)out_fd;
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(amba_virt_export_dmabuf);
+
+#endif /* !AMBA_VIRT_GUEST */
+
 int amba_virt_mmap_slice(struct amba_virt_dev *dev,
 			 struct vm_area_struct *vma,
 			 unsigned int slice_idx)
@@ -796,6 +848,54 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		return 0;
 	}
 
+	case AMBA_VIRT_IOC_LIST_GUESTS:
+	{
+		struct amba_virt_guest_list glist;
+		int i;
+
+		if (!dev->is_host)
+			return -EPERM;
+		memset(&glist, 0, sizeof(glist));
+		mutex_lock(&dev->conn_lock);
+		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+			if (dev->conns[i].in_use && dev->conns[i].sock) {
+				if (glist.count < AMBA_VIRT_MAX_GUESTS) {
+					glist.cids[glist.count++] = dev->conns[i].cid;
+				}
+			}
+		}
+		mutex_unlock(&dev->conn_lock);
+		if (copy_to_user((void __user *)arg, &glist, sizeof(glist)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case AMBA_VIRT_IOC_PUSH:
+	{
+		struct amba_virt_push_msg push;
+		int i, sent = 0;
+
+		if (!dev->is_host)
+			return -EPERM;
+		if (copy_from_user(&push, (void __user *)arg, sizeof(push)))
+			return -EFAULT;
+		if (!push.len || push.len > AMBA_VIRT_MAX_MSG)
+			return -EINVAL;
+
+		mutex_lock(&dev->conn_lock);
+		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+			if (dev->conns[i].in_use && dev->conns[i].sock) {
+				if (push.target_cid == 0 || dev->conns[i].cid == push.target_cid) {
+					int sret = frame_send(dev->conns[i].sock, push.data, push.len);
+					if (!sret)
+						sent++;
+				}
+			}
+		}
+		mutex_unlock(&dev->conn_lock);
+		return sent > 0 ? 0 : -ENOTCONN;
+	}
+
 	case AMBA_VIRT_IOC_SEND:
 	case AMBA_VIRT_IOC_RECV:
 		if (!dev->is_host)
@@ -808,6 +908,7 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 	default:
 		return -ENOTTY;
 	}
+
 
 	xfer = kzalloc(sizeof(*xfer), GFP_KERNEL);
 	if (!xfer)
@@ -1119,6 +1220,8 @@ void amba_virt_core_exit(struct amba_virt_dev *dev)
 	dev->shm_iomem = NULL;
 }
 
+#ifndef AMBA_VIRT_GUEST
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
 MODULE_IMPORT_NS(DMA_BUF);
+#endif
 #endif

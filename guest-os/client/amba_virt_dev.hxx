@@ -498,6 +498,29 @@ create_node:
         return 0;
     }
 
+    int queryDriverCaps(struct amba_virt_driver_caps_resp &caps,
+                        struct amba_virt_query_resp *outResp = nullptr,
+                        uint32_t seq = 1) {
+        struct amba_virt_query_req req;
+        memset(&req, 0, sizeof(req));
+        req.query_op = AMBA_VIRT_QUERY_DRIVER_CAPS;
+        struct amba_virt_query_resp resp;
+        memset(&resp, 0, sizeof(resp));
+        int ret = rpcTransaction(AMBA_VIRT_MSG_QUERY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_QUERY_RESP,
+                                 &resp, sizeof(resp));
+        if (ret < 0)
+            return ret;
+        if (outResp)
+            *outResp = resp;
+        if (resp.status < 0)
+            return resp.status;
+        if (resp.count > 0)
+            memcpy(&caps, resp.payload, sizeof(caps));
+        return 0;
+    }
+
     int queryDevMem(std::vector<struct amba_virt_dev_mem_desc> &devs,
                     uint32_t devId = 0,
                     struct amba_virt_query_resp *outResp = nullptr,

@@ -19,6 +19,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -96,7 +97,13 @@ static struct cavalry_registered_dag g_registered_dags[MAX_REGISTERED_DAGS];
 static pthread_mutex_t g_dag_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_next_dag_id = 1;
 
+static pthread_mutex_t g_drain_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_drain_cond = PTHREAD_COND_INITIALIZER;
+static int g_draining = 0;
+static int g_active_requests = 0;
+
 void cavalry_proxy_set_enforce_path_b(int enforce)
+
 {
 	g_enforce_path_b = enforce;
 }
@@ -554,8 +561,9 @@ int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size
 
 	g_fd_cav = open(CAVALRY_DEV_NODE, O_RDWR);
 	if (g_fd_cav < 0) {
-		perror("cavalry_proxy: open /dev/cavalry");
-		return -1;
+		printf("cavalry_proxy: /dev/cavalry not available yet (starting in OFFLINE mode)\n");
+		g_fd_cav = -1;
+		return 0;
 	}
 
 	/* Export ivshmem window as DMA-BUF for MEMFD run */
@@ -586,6 +594,38 @@ int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size
 
 	printf("cavalry_proxy: initialized (cav_fd=%d, window_fd=%d, chip=%u, started=%u, phys=0x%lx)\n",
 	       g_fd_cav, g_window_fd, g_chip_id, status.is_cavalry_started, (unsigned long)g_phys_base);
+	return 0;
+}
+
+int cavalry_proxy_reopen(void)
+{
+	pthread_mutex_lock(&g_visorc_hw_mutex);
+	if (g_fd_cav >= 0) {
+		pthread_mutex_unlock(&g_visorc_hw_mutex);
+		return 0;
+	}
+
+	int fd = open(CAVALRY_DEV_NODE, O_RDWR);
+	if (fd < 0) {
+		pthread_mutex_unlock(&g_visorc_hw_mutex);
+		return -1;
+	}
+	g_fd_cav = fd;
+
+	struct cavalry_status status = { 0 };
+	if (ioctl(g_fd_cav, CAVALRY_GET_CV_CHIP_ID, &g_chip_id) < 0) {
+		g_chip_id = 10;
+	}
+	if (ioctl(g_fd_cav, CAVALRY_GET_CAVALRY_STATUS, &status) < 0 ||
+	    status.is_cavalry_started == 0) {
+		if (ioctl(g_fd_cav, CAVALRY_START_VP, 0) == 0) {
+			status.is_cavalry_started = 1;
+			printf("cavalry_proxy: VisORC ucode started successfully\n");
+		}
+	}
+	printf("cavalry_proxy: reopened (cav_fd=%d, window_fd=%d, chip=%u, started=%u)\n",
+	       g_fd_cav, g_window_fd, g_chip_id, status.is_cavalry_started);
+	pthread_mutex_unlock(&g_visorc_hw_mutex);
 	return 0;
 }
 
@@ -1223,8 +1263,26 @@ int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 	memset(resp, 0, sizeof(*resp));
 	resp->opcode = req->opcode;
 
+	pthread_mutex_lock(&g_drain_mutex);
+	if (g_draining) {
+		pthread_mutex_unlock(&g_drain_mutex);
+		resp->status = -EHOSTDOWN;
+		return 0;
+	}
+	g_active_requests++;
+	pthread_mutex_unlock(&g_drain_mutex);
+
+	if (g_fd_cav < 0) {
+		cavalry_proxy_reopen();
+	}
+
 	if (g_fd_cav < 0) {
 		resp->status = -ENODEV;
+		pthread_mutex_lock(&g_drain_mutex);
+		g_active_requests--;
+		if (g_active_requests == 0 && g_draining)
+			pthread_cond_broadcast(&g_drain_cond);
+		pthread_mutex_unlock(&g_drain_mutex);
 		return 0;
 	}
 
@@ -1372,8 +1430,70 @@ int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 		break;
 	}
 
+	pthread_mutex_lock(&g_drain_mutex);
+	g_active_requests--;
+	if (g_active_requests == 0 && g_draining) {
+		pthread_cond_broadcast(&g_drain_cond);
+	}
+	pthread_mutex_unlock(&g_drain_mutex);
+
 	return ret;
 }
+
+int cavalry_proxy_start_drain(void)
+{
+	pthread_mutex_lock(&g_drain_mutex);
+	g_draining = 1;
+	pthread_mutex_unlock(&g_drain_mutex);
+	return 0;
+}
+
+int cavalry_proxy_wait_drained(unsigned int timeout_ms)
+{
+	struct timespec ts;
+	struct timeval tv;
+	int ret = 0;
+
+	gettimeofday(&tv, NULL);
+	ts.tv_sec = tv.tv_sec + (timeout_ms / 1000);
+	ts.tv_nsec = (tv.tv_usec + (timeout_ms % 1000) * 1000) * 1000;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec += 1;
+		ts.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&g_drain_mutex);
+	while (g_active_requests > 0 && ret == 0) {
+		ret = pthread_cond_timedwait(&g_drain_cond, &g_drain_mutex, &ts);
+	}
+	int remaining = g_active_requests;
+	pthread_mutex_unlock(&g_drain_mutex);
+
+	return remaining == 0 ? 0 : -ETIMEDOUT;
+}
+
+void cavalry_proxy_finish_drain(void)
+{
+	pthread_mutex_lock(&g_drain_mutex);
+	g_draining = 0;
+	pthread_mutex_unlock(&g_drain_mutex);
+
+	pthread_mutex_lock(&g_visorc_hw_mutex);
+	if (g_fd_cav >= 0) {
+		close(g_fd_cav);
+		g_fd_cav = -1;
+	}
+	pthread_mutex_unlock(&g_visorc_hw_mutex);
+}
+
+int cavalry_proxy_is_draining(void)
+{
+	pthread_mutex_lock(&g_drain_mutex);
+	int d = g_draining;
+	pthread_mutex_unlock(&g_drain_mutex);
+	return d;
+}
+
 
 
 /*

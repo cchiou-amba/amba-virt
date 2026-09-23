@@ -98,6 +98,7 @@ struct amba_virt_dmabuf_slice {
 #define AMBA_VIRT_MSG_MEM_ALLOC_REQ		28u
 #define AMBA_VIRT_MSG_MEM_ALLOC_RESP		29u
 #define AMBA_VIRT_MSG_ACL_GET_REQ		30u
+#define AMBA_VIRT_MSG_DEV_STATE_EVENT		40u
 
 enum vcav_opcode {
 	VCAV_OP_GET_VERSION	= 1,
@@ -246,6 +247,31 @@ enum amba_virt_query_op {
 	AMBA_VIRT_QUERY_PEERS        = 2,
 	AMBA_VIRT_QUERY_DEV_TOPOLOGY = 3,
 	AMBA_VIRT_QUERY_DEV_MEM      = 4,
+	AMBA_VIRT_QUERY_DRIVER_CAPS  = 5,
+};
+
+#define AMBA_VIRT_DEV_STATE_OFFLINE   0u
+#define AMBA_VIRT_DEV_STATE_ONLINE    1u
+
+struct amba_virt_dev_state_event {
+	__u32 dev_id;         /* AMBA_VIRT_DEV_TYPE_* */
+	__u32 state;          /* AMBA_VIRT_DEV_STATE_OFFLINE / ONLINE */
+	__u32 reason_code;    /* 0 = Normal, 1 = Host Unloaded, 2 = Drain Timeout */
+	__u32 host_mod_mask;  /* Current live host module bitmask */
+	__u64 timestamp_ns;   /* Monotonic host timestamp */
+};
+
+struct amba_virt_driver_cap_entry {
+	__u32 dev_id;
+	__u32 state;
+	__u32 module_mask;
+	char  dev_name[32];
+};
+
+struct amba_virt_driver_caps_resp {
+	__u32 count;
+	__u32 host_mod_mask;
+	struct amba_virt_driver_cap_entry entries[8];
 };
 
 struct amba_virt_query_req {
@@ -343,6 +369,59 @@ struct amba_virt_gdma_copy {
 #define AMBA_VIRT_GDMA_F_NONE	0u
 #define AMBA_VIRT_GDMA_F_PITCH	(1u << 0)
 
+/* Backend IPC Opcodes (over persistent TCP on port 5556) */
+#define BACKEND_MSG_AUTH_REQ           0x01u
+#define BACKEND_MSG_AUTH_RESP          0x02u
+#define BACKEND_OP_HEARTBEAT           0x03u
+#define BACKEND_OP_HEARTBEAT_ACK       0x04u
+#define BACKEND_OP_FULL_STATUS         0x05u
+#define BACKEND_OP_FULL_STATUS_RESP    0x06u
+#define BACKEND_OP_MODULE_LOAD         0x07u
+#define BACKEND_OP_MODULE_LOAD_RESP    0x08u
+#define BACKEND_OP_MODULE_UNLOAD       0x09u
+#define BACKEND_OP_MODULE_UNLOAD_RESP  0x0Au
+#define BACKEND_OP_HARDWARE_RESET      0x0Bu
+#define BACKEND_OP_HARDWARE_RESET_RESP 0x0Cu
+#define BACKEND_OP_FIRMWARE_VERSIONS   0x0Du
+#define BACKEND_OP_FIRMWARE_VERSIONS_RESP 0x0Eu
+#define BACKEND_EVENT_MODULE_CHANGED   0x10u
+
+#define BACKEND_MSG_MAGIC              0x4156424BU /* 'AVBK' */
+#define BACKEND_TOKEN_MAX_LEN          64
+
+struct backend_msg_hdr {
+	__u32 magic;       /* BACKEND_MSG_MAGIC */
+	__u32 msg_type;    /* BACKEND_OP_* */
+	__u32 seq;
+	__u32 len;         /* Payload length following header */
+	__s32 status;      /* 0 = success, negative = errno */
+};
+
+struct backend_firmware_entry {
+	char  name[32];
+	__u32 size;
+	char  sha256[64];
+	__u32 present;
+};
+
+struct backend_firmware_resp {
+	__u32 count;
+	struct backend_firmware_entry entries[8];
+};
+
+#define AMBA_VIRT_MAX_GUESTS 8
+
+struct amba_virt_guest_list {
+	__u32 count;
+	__u32 cids[AMBA_VIRT_MAX_GUESTS];
+};
+
+struct amba_virt_push_msg {
+	__u32 target_cid;   /* 0 = broadcast to all active guests */
+	__u32 len;
+	__u8  data[AMBA_VIRT_MAX_MSG];
+};
+
 #define AMBA_VIRT_IOC_MAGIC	'A'
 #define AMBA_VIRT_IOC_GET_INFO	_IOR(AMBA_VIRT_IOC_MAGIC, 1, struct amba_virt_info)
 #define AMBA_VIRT_IOC_CONNECT	_IO(AMBA_VIRT_IOC_MAGIC, 2)
@@ -354,5 +433,10 @@ struct amba_virt_gdma_copy {
 #define AMBA_VIRT_IOC_EXPORT_DMABUF _IOR(AMBA_VIRT_IOC_MAGIC, 7, __s32)
 #define AMBA_VIRT_IOC_EXPORT_DMABUF_SLICE \
 	_IOWR(AMBA_VIRT_IOC_MAGIC, 8, struct amba_virt_dmabuf_slice)
+#define AMBA_VIRT_IOC_LIST_GUESTS \
+	_IOR(AMBA_VIRT_IOC_MAGIC, 0x20, struct amba_virt_guest_list)
+#define AMBA_VIRT_IOC_PUSH \
+	_IOW(AMBA_VIRT_IOC_MAGIC, 0x21, struct amba_virt_push_msg)
 
 #endif /* _UAPI_AMBA_VIRT_H */
+
