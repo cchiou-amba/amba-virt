@@ -41,7 +41,7 @@ done
 
 BUILD_MOD_DIR="$ROOT/build/modules"
 BUILD_FW_DIR="$ROOT/build/firmware"
-LOADER_SCRIPT="$ROOT/scripts/load-ambarella-drivers.sh"
+LOADER_SCRIPT="$ROOT/tools/bringup/scripts/load-ambarella-drivers.sh"
 
 echo "Target Node: $TARGET_NODE"
 echo "Creating /persist/modules, /persist/firmware, /persist/bin on $TARGET_NODE..."
