@@ -71,6 +71,9 @@ into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
 - Assign `amba_virt` only to NOHYPER (`Ifname=/dev/amba_virt`).
 - Assign `amba_shm` only to the HVM (window marker). One window per pair;
   `shmsize` is `1G`.
+- Current `COM2`/`COM3` entries are legacy delivered configuration. Their
+  populated `Serial=/dev/ttyS*` fields make Pillar emit QEMU `pci-serial`;
+  they are not the planned Ambarella UART virtualization path.
 
 ## Shared `ioMemberList`
 
@@ -80,6 +83,8 @@ Both models have the same adapters (`zcli model show … --detail`):
 |---|---|---|---|---|---|
 | USB | USB | `IO_TYPE_USB_CONTROLLER` | USB | — | unspecified |
 | COM1 | COM1 | `IO_TYPE_COM` | COM1 | `Serial=/dev/ttyS0` | unspecified |
+| COM2 | COM2 | `IO_TYPE_COM` | COM2 | `Serial=/dev/ttyS1` | legacy; replace with UART1 adapter bundle |
+| COM3 | COM3 | `IO_TYPE_COM` | COM3 | `Serial=/dev/ttyS2` | legacy; replace with UART2 adapter bundle |
 | eth0 | eth0 | `IO_TYPE_ETH` | eth0 | `Ifname=eth0` | **management** |
 | cavalry | cavalry | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry` | unspecified |
 | cavalry_profile | cavalry_profile | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry_profile` | unspecified |
@@ -89,7 +94,7 @@ Both models have the same adapters (`zcli model show … --detail`):
 | amba_virt | amba_virt | `IO_TYPE_OTHER` | amba_virt | `Ifname=/dev/amba_virt` | unspecified |
 | amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | *(empty)* | unspecified |
 
-`amba_shm` has empty `phyaddrs` and `cbattr` `shmpath=/dev/shm/amba-virt`,
+`amba_shm` has empty `phyaddrs` and `cbattr` `shmpath=/dev/amba_virt_shm`,
 `shmsize=1G`. Assigning it to an HVM is a window marker: `kvm.go` emits
 `ivshmem-plain`. One window is shared by every virtual driver on that pair
 (Cavalry, DMA, SD/eMMC, …). Do not add a second `amba_shm`. 16M is PoC-only.
@@ -97,6 +102,26 @@ Both models have the same adapters (`zcli model show … --detail`):
 
 `amba_virt` is the host chardev injected into NOHYPER. The container's
 `/dev/shm` is a private tmpfs and cannot see the backing file.
+
+### Planned UART Adapter Bundles
+
+UART1/UART2 will use `IO_TYPE_OTHER` bundles with:
+
+- empty `PciLong`, `Ifname`, `Serial`, and `UsbAddr`;
+- an exclusive `assigngrp`;
+- UART-specific `cbattr`.
+
+This reuses the delivered ivshmem recognition shape and fails safe if a
+`Serial` value appears. `IO_TYPE_OTHER` does not mean “UART,” and the bundle is
+not inert: its `cbattr` designates real silicon.
+
+The UART parser and `amba_shm` bulk-window parser must be mutually exclusive on
+their `cbattr` keys. `IoOther` and `IoNVME` both have numeric value 255, so type
+alone cannot identify the bundle.
+
+The exact UART `cbattr` schema is not implemented yet. Do not publish guessed
+model entries. When implementation lands, replace the current `COM2`/`COM3`
+entries and update the shared table above in the same change.
 
 `/dev/ucode` was not added (not confirmed on the host). Assigning a missing
 `Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails)
@@ -221,7 +246,7 @@ On the **HVM** those host Cavalry nodes must not be passed through.
 | Expected | Why it matters | Suggested ztype if added later |
 |---|---|---|
 | `mac1` / eth1 | Second RGMII (not enabled in `n1_655.dts`) | `IO_TYPE_ETH` |
-| uart1–uart4 | Extra COM in dtsi | `IO_TYPE_COM` |
+| uart1–uart4 | HVM UART MMIO/vGIC adapter; planned, not delivered | `IO_TYPE_OTHER` with empty `phyaddrs` and UART `cbattr` |
 | `can0`–`can2` | dtsi CAN | `IO_TYPE_CAN` |
 | `/dev/ucode` | IAV companion if present on host | `IO_TYPE_OTHER` (`assigngrp` `iav`) |
 | PowerVR GPU | `ambarella,pvr-gpu` | `IO_TYPE_HDMI` + CDI, if used |

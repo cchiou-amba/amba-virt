@@ -16,6 +16,19 @@ However, the hardware peripheral DMA controller (**`dma1` at MMIO `0xffe0021000`
 
 **`amba-dma`** resolves this challenge by virtualizing peripheral DMA channels across the **`amba-virt`** vsock RPC control plane and ivshmem zero-copy data plane, following the proven architectural design of **`amba-gdma`** (2D/Memcpy DMA) and **`amba-cavalry`** (NPU virtualization).
 
+### Delivery Status
+
+The guest protocol, channel ACL, ivshmem bounds checks, and watchdog framework
+exist. The host broker does not yet submit or abort real physical peripheral
+DMA transfers; those paths remain TODOs in
+`drivers/amba_virt/tools/virt_dma_broker.c`. This document specifies the target
+architecture and must not be read as hardware qualification.
+
+UART register access and UART interrupts are also separate from this DMA data
+path. The guest reaches UART registers through its planned ivshmem-backed MMIO
+BAR and receives a virtual MSI-X interrupt through the vGIC. Physical UART SPI
+114/115 never enters the guest.
+
 ---
 
 ## 2. Subsystem Architecture & Data Flow
@@ -25,9 +38,9 @@ However, the hardware peripheral DMA controller (**`dma1` at MMIO `0xffe0021000`
 |                                    GUEST DOMAINS (Multi-Tenant Isolation)                         |
 |                                                                                                   |
 |   +-------------------------------------------------------+  +--------------------------------+   |
-|   | Ubuntu 24.04 LTS HVM (CID 6, Console 2)               |  | QNX Neutrino RTOS 8.0 (CID 7)  |   |
+|   | Ubuntu 24.04 LTS HVM (runtime CID, Console 2)          |  | QNX Neutrino RTOS 8.0          |   |
 |   |   - /dev/ttyAMBA0 (serial-getty@ttyAMBA0.service)     |  |   - /dev/ser2 (tinit / ksh)    |   |
-|   |   - amba_uart.ko (MMIO 0xffe0017000, SPI 114)         |  |   - devc-seramb (0xffe0018000) |   |
+|   |   - amba_uart.ko (UART BAR + vGIC IRQ)                |  |   - QNX UART BAR frontend      |   |
 |   |   - amba_dma.ko (Virtual dmaengine provider)          |  |   - Optional DMA client        |   |
 |   +---------------------------|---------------------------+  +----------------|---------------+   |
 |                               | (Chan 11 TX / 12 RX)                          | (Chan 13/14)      |
@@ -44,8 +57,8 @@ However, the hardware peripheral DMA controller (**`dma1` at MMIO `0xffe0021000`
 |   |                                                                                           |   |
 |   |   +-----------------------------------------------------------------------------------+   |   |
 |   |   | CID Channel Authorization Matrix (ACL Verification)                               |   |   |
-|   |   |   - CID 6 (Ubuntu): Authorized for UART1 TX (11) & RX (12).                       |   |   |
-|   |   |   - CID 7 (QNX):    Authorized for UART2 TX (13) & RX (14).                       |   |   |
+|   |   |   - Assigned Ubuntu CID: UART1 TX (11) & RX (12).                                 |   |   |
+|   |   |   - Assigned QNX CID:    UART2 TX (13) & RX (14).                                 |   |   |
 |   |   |   - Unauthorized channel access rejected with -EPERM (Security Event EVT-092)     |   |   |
 |   |   +-----------------------------------------------------------------------------------+   |   |
 |   |   | ivshmem 1 GiB Memory Bounds Clamping                                              |   |   |
@@ -96,7 +109,8 @@ However, the hardware peripheral DMA controller (**`dma1` at MMIO `0xffe0021000`
 ## 3. Protocol Specification & Message Exchange
 
 ### 3.1 Message Types
-Defined in [`drivers/amba_virt/include/uapi/amba_virt.h`](file:///home/samurai/work/amba-virt/drivers/amba_virt/include/uapi/amba_virt.h):
+Defined in
+[`drivers/amba_virt/include/uapi/amba_virt.h`](../drivers/amba_virt/include/uapi/amba_virt.h):
 * `AMBA_VIRT_MSG_DMA_REQ` (`50`): Guest-to-Host DMA operation request.
 * `AMBA_VIRT_MSG_DMA_RESP` (`51`): Host-to-Guest synchronous operation response.
 * `AMBA_VIRT_MSG_DMA_COMPLETE` (`52`): Host-to-Guest asynchronous transfer completion event.
@@ -129,7 +143,7 @@ Guest Driver (amba_uart)     Guest Virt DMA (amba_dma)      Host Server (amba-vi
 
 | Security Vector | Threat / Attack Description | Mitigation & Enforcement Mechanism |
 | :--- | :--- | :--- |
-| **Channel Hijacking** | Rogue guest attempts to allocate or inject commands into another VM's UART DMA channel. | `amba-virt-server` checks CID against immutable adapter ACL table; unauthorized requests rejected with `-EPERM` (`EVT-092`). |
+| **Channel Hijacking** | Rogue guest attempts to allocate or inject commands into another VM's UART DMA channel. | `amba-virt-server` checks the kernel-authenticated runtime CID against current adapter ownership; unauthorized requests are rejected with `-EPERM` (`EVT-092`). |
 | **Memory Boundary Escape** | Guest passes DMA buffer addresses pointing outside its assigned partition into host DRAM. | Strict clamping: `0 <= offset + len <= window_size` (1 GiB ivshmem extent). Out-of-bounds requests rejected with `-ERANGE` (`EVT-091`). |
 | **RPC DoS Flooding** | Compromised guest floods vsock with rapid requests to exhaust host CPU. | Per-CID token bucket rate limiting drops excessive requests without impacting legitimate owner VM. |
 | **Hardware DREQ Stall** | Faulty peripheral fails to assert hardware DREQ lines, stalling the DMA controller. | 500 ms watchdog timer aborts stalled transfer, resets channel, and returns `-ETIMEDOUT`. |

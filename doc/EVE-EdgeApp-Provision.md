@@ -40,6 +40,17 @@ Do not attach VisORC to the HVM. `amba_shm` is an `IO_TYPE_OTHER` window
 marker (empty `phyaddrs`); assigning it is what makes `kvm.go` emit
 `ivshmem-plain`. `amba_virt` is `Ifname=/dev/amba_virt` on the host.
 
+Planned UART1/UART2 assignment will add an `IO_TYPE_OTHER` UART adapter bundle
+to the HVM at instance creation. It is distinct from `amba_shm`: the UART
+bundle has empty EVE resource fields but its `cbattr` designates real hardware,
+and Pillar emits an MMIO/doorbell device rather than a bulk DRAM window.
+Current `COM2`/`COM3` entries with `Serial=/dev/ttyS*` produce QEMU
+`pci-serial` and are not that path.
+
+The UART model schema and Pillar implementation are not delivered yet, so the
+commands below intentionally assign only `amba_shm`. Do not add speculative
+UART adapter names or attributes to this operational runbook.
+
 **`--adapter=INTF:NAME` takes `logicallabel`, not `assigngrp`.** GPIO is
 `gpio0:gpio0`. Passing group `gpio` is rejected (`model does not have adapter`).
 
@@ -58,6 +69,12 @@ vsock). Several HVMs would need several windows:
 Control stays on vsock (CID 2, port **5555**, never 2000). Bulk is the BAR.
 A later host allocator hands out non-overlapping slices; Cavalry takes most of
 the pool by quota.
+
+The planned UART register BAR and `ivshmem-doorbell` notification function are
+not allocations from this 1 GiB bulk pool. They carry physical register
+semantics and virtual interrupt delivery, respectively. Do not place UART
+registers inside the bulk allocator or count the notification function as a
+second `amba_shm` data window.
 
 **16M is PoC-only.** It cannot hold Cavalry tensors or DVI. Host
 `cavalry_reserved` is **12 GB AMA**; the VP DMA-reads those HPAs. ivshmem is
@@ -509,7 +526,8 @@ without `amba_virt`.
 ## 4. Create instances on n1-655-devkit
 
 `create_instance.sh` writes `apps/.custom-config.<edge-app>.json` from the
-local manifest and passes `--custom-configuration=/home/zcli/apps/...`.
+local manifest and passes `--custom-configuration=$HOME/apps/...` inside the
+zcli container.
 Dry-run must show that flag. Override with
 `--custom-configuration=apps/FILE.json` or skip with
 `--no-custom-configuration` (do not skip for this pair).
@@ -636,9 +654,9 @@ a firmware miss.
 Putting the YAML only on the edge-app is not enough for
 `zcli edge-app-instance create`. `zcli` does not copy the bundle
 template onto the instance. Dry-run **must** show
-`--custom-configuration=/home/zcli/apps/...`. The file has to live under
+`--custom-configuration=$HOME/apps/...`. The file has to live under
 `apps/` because the zcli container mounts that directory read-only at
-`/home/zcli/apps`. `--no-custom-configuration` is how you get an empty
+`$HOME/apps`. `--no-custom-configuration` is how you get an empty
 ISO on purpose; do not skip it for this pair.
 
 `create_instance.sh` / `app_manifest.py extract-custom-config` reads the

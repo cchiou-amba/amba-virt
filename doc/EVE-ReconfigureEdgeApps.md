@@ -98,6 +98,16 @@ Window markers are allowed: an `IO_TYPE_OTHER` bundle with no
 `Ifname`/`PciLong`/`Serial`/`UsbAddr` carries no physical resource, so `amba_shm`
 goes onto an HVM without `--force` while `cavalry` still does not.
 
+The planned UART adapter also has empty EVE resource fields, but it is not an
+inert window marker: UART-specific `cbattr` designates real silicon. Provision
+it only after the UART-aware safety check and Pillar parser are implemented.
+The UART and `amba_shm` parsers must be mutually exclusive on `cbattr` content.
+
+Like every other interface, a future UART adapter must already be listed on a
+new edge-app and assigned when its new instance is created. Do not try to add
+it to an existing HVM in place, and do not substitute current `COM2`/`COM3`
+`Serial=/dev/ttyS*` entries; those emit QEMU `pci-serial`.
+
 ### 3. Create the edge-app (not update)
 
 ```bash

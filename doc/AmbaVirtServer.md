@@ -8,6 +8,8 @@ The **`amba-virt-server`** is the privileged host-side virtualization daemon run
 - **VisORC NPU (Cavalry)**: Deep learning neural network acceleration (`/dev/cavalry`).
 - **GDMA Engine**: Hardware-accelerated 2D pitch copy and memory DMA (`/dev/gdma`).
 - **Image Audio Video (IAV)**: Video sensor capture pipelines and DSP encoding (`/dev/iav`).
+- **Planned UART / Peripheral DMA**: UART IRQ relay and host-owned Generic-DMA
+  submission for HVM serial frontends. This path is not delivered yet.
 
 ```text
 +-----------------------------------------------------------------------------------------------+
@@ -133,6 +135,38 @@ Rather than provisioning separate PCI apertures for each virtualized peripheral,
 - **Data Plane (`ivshmem`)**:
   - Provides zero-copy shared DRAM mapping between guest user space and host physical memory.
   - Payloads (image frames, neural network weight tensors, activation maps) reside directly in shared memory; only 32-bit offsets and size descriptors traverse the vsock control channel.
+
+### 2.3 Planned UART IRQ Relay
+
+UART uses a third mechanism for interrupt notification. It does not turn UART
+register accesses or FIFO bytes into vsock RPC:
+
+1. An EVE-managed ivshmem server supplies the UART MMIO backing FD and eventfds
+   before QEMU starts.
+2. `amba-virt-server` connects as the host peer and registers the guest-bound
+   eventfd with the Dom0 UART stub.
+3. The physical UART IRQ is masked and signals that eventfd.
+4. `ivshmem-doorbell` raises MSI-X; KVM injects it through the guest vGIC.
+5. After servicing the UART registers, the guest sends an ACK doorbell.
+6. The server validates ownership and tells the stub to unmask the physical
+   IRQ.
+
+The physical IRQ remains masked after timeout, guest death, or stale ACK.
+The stub must not read IIR/RBR or consume any guest-visible UART state.
+
+This is planned work. Current code has no UART eventfd registration or
+ivshmem-server peer path.
+
+### 2.4 Planned Peripheral DMA
+
+Physical Generic-DMA remains in Dom0. The guest submits channel, direction,
+offset, and length over vsock; payload stays in the existing shared DRAM BAR.
+The server validates the caller's assigned UART, permitted channel pair, and
+window bounds before using the host dmaengine API.
+
+The delivered `virt_dma_broker.c` contains policy and watchdog scaffolding but
+does not yet execute or abort physical DMA. Do not report DMA mode as working
+until that path and bit-exact external UART I/O have been verified.
 
 ### 2.3 Compilation Matrix
 

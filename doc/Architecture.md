@@ -16,6 +16,8 @@ Related: [AmbaVirtServer.md](AmbaVirtServer.md) (amba-virt-server architecture, 
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
 [EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md)
 (native KVM ivshmem implementation),
+[UART-Passthrough.md](UART-Passthrough.md) (UART MMIO and vGIC design),
+[AmbaVirtDMA.md](AmbaVirtDMA.md) (host-owned peripheral DMA),
 [EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (scaling past one pair, deferred),
 [Guest-OS-Cross-Compilation.md](Guest-OS-Cross-Compilation.md) (guest toolchain),
 [drivers/amba_virt/](../drivers/amba_virt/README.md) and [guest-os/](../guest-os/).
@@ -178,6 +180,29 @@ The container reaches the same DRAM through `/dev/amba_virt`, not by opening
 the backing file (NOHYPER `/dev/shm` is a private tmpfs).
 
 Do not copy bulk data over vsock.
+
+### UART and Peripheral DMA
+
+UART virtualization follows the same controller-facing adapter convention but
+does not put UART register state into the bulk shared-memory allocator:
+
+- ZEDEDA assigns an `IO_TYPE_OTHER` UART adapter bundle with empty EVE resource
+  fields, exclusive `assigngrp`, and UART-specific `cbattr`.
+- EVE maps the selected physical UART register aperture into a guest PCI BAR.
+- A Dom0 stub owns the physical level IRQ and relays it through eventfd and
+  `ivshmem-doorbell`; KVM injects MSI-X through the guest vGIC.
+- The guest services the real UART registers and sends a doorbell ACK before
+  the host unmasks the physical IRQ.
+- Generic-DMA remains in Dom0. Guest DMA requests use vsock control messages
+  and offsets into the existing bulk ivshmem DRAM window.
+
+The UART adapter is not an inert window marker. Its `cbattr` selects real
+hardware. The UART and bulk-window parsers must therefore be mutually
+exclusive on their attribute keys.
+
+Do not use VFIO, SMMU, direct physical SPI assignment, raw Generic-DMA MMIO, or
+QEMU `pci-serial` for this path. The implementation and qualification status
+are tracked in [UART-Passthrough.md](UART-Passthrough.md).
 
 Both ends of the transport compile a matching kernel module (`amba_virt.ko`) that
 exposes `/dev/amba_virt` (mmap of the shared region + framed vsock send/recv).

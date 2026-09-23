@@ -1,207 +1,208 @@
-# Ambarella Hardware UART Passthrough & Console Guide
+# Ambarella UART Virtualization and Physical Console Guide
 
-*Document Path: `doc/UART-Passthrough.md`*  
 *Copyright (C) 2026, Ambarella International LLC*
 
----
+## Status
 
-## 1. Overview & Objectives
+This document describes the target UART virtualization architecture. It is not
+yet a hardware-qualified runbook.
 
-This guide documents the architecture, configuration, and verification of direct hardware serial (RS-232 / UART) passthrough on the Ambarella N1-655 SoC running EVE OS to HVM guest virtual machines (Ubuntu 24.04 LTS HVM and QNX Neutrino RTOS 8.0 HVM).
+Delivered today:
 
-### Standardized Multi-Guest Demo Topology
-1. **Preserve EVE Dom0 Console**: `uart0` (MMIO `0xffe4000000`, SPI 30) is retained strictly by EVE Dom0 for bootloader output, early kernel crash recovery, and hypervisor management (Channel 0).
-2. **Pass Through Secondary UART (`uart1`) to Ubuntu HVM ("Console 2")**: `uart1` (MMIO `0xffe0017000`, SPI 114) is passed directly to the Ubuntu 24.04 LTS HVM guest VM with an interactive `serial-getty` login shell (Channel 1).
-3. **Pass Through Tertiary UART (`uart2`) to QNX HVM ("Console 3")**: `uart2` (MMIO `0xffe0018000`, SPI 115) is passed directly to the QNX Neutrino RTOS 8.0 HVM guest VM with an interactive `tinit` / `login` prompt or root `ksh` shell (Channel 2).
-4. **Preserve MCU Power/Reset Console**: Channel 3 connects to the Cortex-M3 board MCU for hardware power cycling (`pwr on`, `pwr off -y`) and board telemetry.
+- EVE emits `ivshmem-plain` for the `amba_shm` `IO_TYPE_OTHER` marker.
+- The HVM and NOHYPER applications communicate over vsock and a shared 1 GiB
+  ivshmem DRAM window.
+- Linux `amba_uart.ko` implements the Ambarella UART programming model.
+- Current cloud models still contain `COM2`/`COM3` entries with
+  `phyaddrs.Serial=/dev/ttyS*`; Pillar turns those into QEMU `pci-serial`.
 
----
+Not delivered today:
 
-## 2. Hardware Resource & Pin Routing Map
+- UART register MMIO backed by an ivshmem PCI BAR.
+- `ivshmem-doorbell` eventfd notification into the guest vGIC.
+- The host UART IRQ stub and level-IRQ ACK protocol.
+- A QNX UART frontend for the BAR/doorbell interface.
+- End-to-end physical Console 2 or Console 3 qualification.
 
-```text
-+---------------------------------------------------------------------------------------------------+
-| Multi-Guest Hardware Passthrough & USB-to-Quad-UART Port Mapping                                 |
-|                                                                                                   |
-|   +-------------------+  +-------------------+  +-------------------+  +-----------------------+  |
-|   | SoC UART0         |  | SoC UART1         |  | SoC UART2         |  | Cortex-M3 Board MCU   |  |
-|   | 0xffe4000000      |  | 0xffe0017000      |  | 0xffe0018000      |  | Power / Boot / Reset  |  |
-|   | GIC SPI IRQ 30    |  | GIC SPI IRQ 114   |  | GIC SPI IRQ 115   |  | Protocol & Telemetry  |  |
-|   +---------|---------+  +---------|---------+  +---------|---------+  +-----------|-----------+  |
-|             |                      |                      |                        |              |
-|             v                      v                      v                        v              |
-|   +-------------------------------------------------------------------------------------------+   |
-|   | Onboard CH9344 USB-to-Quad-UART High-Speed Bridge                                         |   |
-|   |                                                                                           |   |
-|   |   - Channel 0: SoC Dom0 System / Bootloader Console                                       |   |
-|   |   - Channel 1: "Console 2" (Direct Passthrough to Ubuntu 24.04 LTS HVM)                   |   |
-|   |   - Channel 2: "Console 3" (Direct Passthrough to QNX Neutrino RTOS 8.0 HVM)              |   |
-|   |   - Channel 3: MCU Power Control Console                                                  |   |
-|   +-------------------------------------------------------------------------------------------+   |
-+---------------------------------------------------------------------------------------------------+
-```
+## Architecture
 
-### Complete CH9344 4-Port Matrix
-
-| Channel | SoC Hardware Resource | DevKit Host Port | Pro Host Port | Assigned Domain | Runtime Service & Shell |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **0** | `uart0` (`0xffe4000000`, SPI 30) | `ttyCH9344USB8` | `ttyCH9344USB0` | **EVE OS Dom0** | U-Boot & EVE Dom0 Root Console |
-| **1** | `uart1` (`0xffe0017000`, SPI 114) | `ttyCH9344USB9` | `ttyCH9344USB1` | **Ubuntu 24.04 HVM** | `serial-getty@ttyAMBA0` (115200 8N1) |
-| **2** | `uart2` (`0xffe0018000`, SPI 115) | `ttyCH9344USB10`| `ttyCH9344USB2` | **QNX 8.0 HVM** | `devc-seramb` / `tinit` / `ksh` (115200 8N1) |
-| **3** | Board MCU UART | `ttyCH9344USB11`| `ttyCH9344USB3` | **Cortex-M3 MCU** | Hardware Power & Reset Management |
-
----
-
-## 3. Ubuntu 24.04 LTS HVM Configuration (Console 2)
-
-### Step 1: Assign `COM2` Adapter to Ubuntu Instance
-In the ZEDEDA Cloud model ([`models/N1-655-Cooper-Devkit.json`](file:///home/samurai/work/amba-virt/models/N1-655-Cooper-Devkit.json)), assign `COM2` (`uart1`) to the Ubuntu edge application instance:
-```json
-{
-  "ztype": "IO_TYPE_COM",
-  "phylabel": "COM2",
-  "logicallabel": "COM2",
-  "phyaddrs": {
-    "Serial": "/dev/ttyS1"
-  },
-  "assigngrp": "COM2"
-}
-```
-
-### Step 2: Automated Cross-Compilation & Deployment Script
-Use the unified guest deployment script [`guest-os/deploy_guest.sh`](file:///home/samurai/work/amba-virt/guest-os/deploy_guest.sh) (or `make deploy-hvm-ubuntu`):
-```bash
-# 1. Build guest drivers
-make guest-ubuntu
-
-# 2. Deploy to target HVM, reload kernel modules, enable serial console, and test:
-./guest-os/deploy_guest.sh n1-655-devkit-ubuntu --reload --enable-serial --test
-# Or for Pro:
-./guest-os/deploy_guest.sh n1-655-pro-ubuntu --reload --enable-serial --test
-```
-This script automatically:
-1. Stages `amba_virt.ko`, `amba_cavalry.ko`, `amba_gdma.ko`, `amba_uart.ko`, and `amba_dma.ko` into `/lib/modules/$(uname -r)/extra/`.
-2. Runs `depmod -a` and inserts `amba_uart.ko` with parameters `use_dma=0 mmio_base=0xffe0017000 irq=114 baud=115200`.
-3. Enables and starts `serial-getty@ttyAMBA0.service`.
-4. Executes a post-deployment sanity check.
-
----
-
-## 4. QNX Neutrino RTOS 8.0 HVM Configuration (Console 3)
-
-### 4.1 Does QNX Have a Login Prompt?
-**Yes.** QNX Neutrino RTOS supports multiple standard interactive console modes:
-1. **Authenticated Login Prompt (`login` / `tinit`)**:
-   When `tinit` or `/bin/login` is bound to the character device (`/dev/ser2`), QNX emits a standard login prompt:
-   ```text
-   QNX Neutrino RTOS 8.0 (n1-655-devkit-qnx) (ser2)
-
-   login: root
-   Password:
-   # 
-   ```
-2. **Direct Korn Shell (`ksh`) / Standard Shell (`sh`)**:
-   In embedded demo configurations, QNX can spawn an immediate root session without password prompting:
-   `[+session] /bin/ksh </dev/ser2 >/dev/ser2 2>&1 &`
-
-### 4.2 Step 1: Assign `COM3` Adapter to QNX Instance
-In the ZEDEDA Cloud model, assign `COM3` (`uart2` at `0xffe0018000`, SPI 115) to the QNX edge application instance:
-```json
-{
-  "ztype": "IO_TYPE_COM",
-  "phylabel": "COM3",
-  "logicallabel": "COM3",
-  "phyaddrs": {
-    "Serial": "/dev/ttyS2"
-  },
-  "assigngrp": "COM3"
-}
-```
-
-### 4.3 Step 2: Automated QNX Driver Build & Deployment Script
-Use the unified guest deployment script [`guest-os/deploy_guest.sh`](file:///home/samurai/work/amba-virt/guest-os/deploy_guest.sh) (or `make deploy-hvm-qnx`):
-```bash
-# 1. Build QNX guest artifacts
-make guest-qnx
-
-# 2. Deploy to target QNX HVM, restart resource managers, enable console, and test:
-./guest-os/deploy_guest.sh n1-655-devkit-qnx --reload --enable-serial --test
-# Or for Pro:
-./guest-os/deploy_guest.sh n1-655-pro-qnx --reload --enable-serial --test
-```
-
-### 4.4 Step 3: Dynamic FDT Device Tree Discovery & Boot Script
-Neither Ubuntu nor QNX hardcode specific hardware UART addresses. Both operating systems dynamically probe the Device Tree (FDT) injected by QEMU:
-- **In Linux (`amba_uart.c`)**: Matches `compatible = "ambarella,uart"`. If present, extracts MMIO `reg` and `interrupts` dynamically. If no UART adapter was assigned to this VM instance, the driver probes 0 devices and consumes 0 resources.
-- **In QNX (`startup_postpci.custom`)**:
-  At startup, QNX checks the FDT for an `ambarella,uart` node:
-  ```sh
-  # In startup_postpci.custom:
-  # Check if Device Tree contains Ambarella UART node
-  if fdt_get_node "ambarella,uart" >/dev/null 2>&1 || [ -e /sys/fdt ]; then
-      MMIO=$(fdt_get_reg "ambarella,uart" 0 2>/dev/null || echo "0xffe0018000")
-      IRQ=$(fdt_get_irq "ambarella,uart" 0 2>/dev/null || echo "115")
-      devc-seramb -e -F -b115200 "${MMIO},${IRQ}" &
-      waitfor /dev/ser2 2
-  fi
-
-  # Automatically spawn interactive shell / login prompt on any active serial port
-  for dev in /dev/ser*; do
-      if [ "$dev" != "/dev/ser1" ] && [ -e "$dev" ]; then
-          echo "---> Starting shell on serial $dev"
-          on -d -t "$dev" ksh -l &
-      fi
-  done
-  ```
-- **Golden Image Reuse**: The identical QCOW2 image can be deployed across $N$ instances—instances with assigned serial adapters dynamically get a serial console, while instances without serial adapters run cleanly as standard headless/SSH VMs.
-
----
-
-## 5. Verification & Target Testing
-
-### 5.1 Connecting to "Console 2" (Ubuntu Shell)
-From the host workstation:
-* **On `n1-655-devkit`**: `screen /dev/ttyCH9344USB9 115200`
-* **On `n1-655-pro`**: `screen /dev/ttyCH9344USB1 115200`
+The guest owns the UART programming model, but Dom0 mediates infrastructure
+which cannot safely be assigned directly:
 
 ```text
-Ubuntu 24.04 LTS n1-655-devkit-ubuntu ttyAMBA0
+ZEDEDA
+  IO_TYPE_OTHER UART adapter bundle
+  empty phyaddrs + cbattr + assigngrp
+                    |
+                    v
+EVE Pillar -> QEMU ivshmem BAR + ivshmem-doorbell
+                    |
+          +---------+----------+
+          |                    |
+          v                    v
+HVM guest UART driver     Dom0 UART stub
+real register access      physical IRQ 114/115
+MSI-X through vGIC        mask/eventfd/unmask
+          |                    ^
+          +---- doorbell ACK --+
 
-n1-655-devkit-ubuntu login: ubuntu
-Password: 
-Welcome to Ubuntu 24.04 LTS (GNU/Linux 6.8.0-31-generic aarch64)
-ubuntu@n1-655-devkit-ubuntu:~$ 
+Guest virtual dmaengine
+          |
+          v
+vsock descriptors + shared DRAM offsets
+          |
+          v
+amba-virt-server -> host dmaengine -> physical Generic-DMA
 ```
 
-### 5.2 Connecting to "Console 3" (QNX Shell)
-From the host workstation:
-* **On `n1-655-devkit`**: `screen /dev/ttyCH9344USB10 115200`
-* **On `n1-655-pro`**: `screen /dev/ttyCH9344USB2 115200`
+The UART is not a bus master and does not need SMMU translation. The physical
+Generic-DMA controller is a bus master and remains entirely in Dom0.
 
-```text
-QNX Neutrino RTOS 8.0 (n1-655-devkit-qnx) (ser2)
+This design does not use VFIO, `vfio-platform`, direct physical SPI assignment,
+or QEMU `pci-serial`. The planned model uses `IO_TYPE_OTHER` to reuse the
+delivered ivshmem predicate; `IO_TYPE_COM` is not inherently prohibited, but
+the current `IO_TYPE_COM` entries have populated `Serial` fields and therefore
+select the wrong QEMU device.
 
-login: root
-Password: 
-# uname -a
-QNX n1-655-devkit-qnx 8.0.0 2026/08/15-12:00:00UTC aarch64le
-# pidin
-     pid name               prio STATE       code  data
-       1 proc/boot/procnto    0f READY       3.1M  128M
-   16386 devc-seramb         10r RECEIVE      64K  128K
-   20482 sbin/tinit          10r SIGWAITINFO  48K   64K
-   32770 bin/ksh             10r RECEIVE     192K  256K
-# 
-```
+## Hardware Resources
 
-### 5.3 Automated Telemetry with MCP Tools
-Using the `aimon` MCP console tools, automated regression tests can interact with both guest consoles concurrently:
-```python
-# DevKit Console 2 (Ubuntu)
-embdevenv_console_write(target="n1-655-devkit", port="console2", text="\n")
-embdevenv_console_expect(target="n1-655-devkit", port="console2", pattern="login:", timeout=5)
+Values below come from the current
+[`n1_655.dts`](../eve-kernel/arch/arm64/boot/dts/ambarella/n1_655.dts):
 
-# DevKit Console 3 (QNX)
-embdevenv_console_write(target="n1-655-devkit", port="console3", text="\n")
-embdevenv_console_expect(target="n1-655-devkit", port="console3", pattern="login:", timeout=5)
-```
+| Function | Physical address | Physical IRQ | DMA requests | Ownership |
+|---|---:|---:|---:|---|
+| UART0 | `0xffe4000000` | SPI 192 | — | EVE/U-Boot console |
+| UART1 | `0xffe0017000` | SPI 114, level-high | TX 11, RX 12 | Ubuntu HVM target |
+| UART2 | `0xffe0018000` | SPI 115, level-high | TX 13, RX 14 | QNX HVM target |
+| Generic-DMA1 | `0xffe0021000` | SPI 131 | Shared controller | Dom0 only |
+
+UART1 is currently enabled in the DTS. UART2 is currently disabled and must not
+be described as assignable until its clock, pinmux, and host-stub ownership are
+implemented.
+
+Physical routing:
+
+| Console | Devkit endpoint | Pro endpoint | Target domain |
+|---|---|---|---|
+| Dom0 console | `ttyCH9344USB8` | `ttyCH9344USB0` | EVE |
+| Console 2 | `ttyCH9344USB9` | `ttyCH9344USB1` | Ubuntu HVM |
+| Console 3 | `ttyCH9344USB10` | `ttyCH9344USB2` | QNX HVM |
+| MCU | `ttyCH9344USB11` | `ttyCH9344USB3` | Board controller |
+
+## Cloud Adapter Contract
+
+No ZEDEDA API extension is required. UART assignment uses an
+`IO_TYPE_OTHER` adapter bundle with:
+
+- empty `PciLong`, `Ifname`, `Serial`, and `UsbAddr`;
+- an exclusive `assigngrp`;
+- hardware-specific parameters in `cbattr`.
+
+`IO_TYPE_OTHER` is chosen because it reuses the delivered ivshmem recognition
+shape. It does not mean “UART.” The UART parser and bulk-window parser must be
+mutually exclusive on `cbattr` keys.
+
+The `Serial` field must remain empty. Pillar emits `pci-serial` whenever that
+field is non-empty, regardless of adapter type.
+
+The exact UART `cbattr` schema is not delivered yet and must be frozen during
+implementation. Do not publish model JSON containing guessed keys.
+
+## MMIO Path
+
+The host UART stub:
+
+1. Claims one UART platform device instead of `ambarella-uart`.
+2. Keeps its clock and pinmux active.
+3. Exposes exactly the selected 4 KiB register aperture through a restricted
+   character-device mmap.
+4. Does not read IIR/RBR or otherwise consume guest-visible UART state.
+
+EVE supplies that mapping to QEMU as the backing for the UART ivshmem BAR. The
+guest maps the BAR and programs the physical UART registers directly.
+
+Before implementation proceeds, the delivered arm64 KVM must demonstrate that
+it accepts this device-PFN-backed memory slot. A successful shared-DRAM
+ivshmem test does not prove device-MMIO mapping.
+
+## Interrupt Path
+
+The guest does not receive physical SPI 114 or 115. It receives a virtual
+MSI-X interrupt through its vGIC:
+
+1. The physical level-high IRQ enters the Dom0 stub.
+2. The stub masks it without reading UART registers.
+3. The stub signals the eventfd associated with the owning HVM.
+4. `ivshmem-doorbell` raises MSI-X; KVM injects it through the vGIC.
+5. The guest ISR services the physical UART registers through the BAR.
+6. The guest sends a doorbell ACK.
+7. The host verifies ownership and unmasks the physical IRQ.
+
+Guest death, timeout, or stale ACK must leave the physical IRQ masked until
+ownership is safely restored.
+
+The doorbell server/socket must exist before QEMU starts. EVE must supervise
+that lifecycle; a missing helper or eventfd must fail domain creation rather
+than falling back to `pci-serial`.
+
+## DMA Path
+
+FIFO/PIO mode is qualified first.
+
+DMA mode uses [`AmbaVirtDMA.md`](AmbaVirtDMA.md):
+
+- guest `amba_dma.ko` implements the `dmaengine` API;
+- requests contain only offsets into the guest's existing shared DRAM BAR;
+- `amba-virt-server` validates adapter ownership, channel, direction, length,
+  overflow, and window bounds;
+- the host submits through its native Ambarella dmaengine driver;
+- completion returns to the guest DMA callback;
+- a watchdog aborts stalled channels.
+
+Never map Generic-DMA controller MMIO into a guest.
+
+## Guest Drivers
+
+Linux `amba_uart.ko` must be changed from its current direct DT/ACPI fallback:
+
+- discover the assigned UART PCI function;
+- map the UART BAR;
+- request its MSI-X/vGIC interrupt;
+- ACK the host only after servicing the UART condition;
+- use FIFO independently of `amba_dma`;
+- optionally bind TX/RX to `amba_dma` after DMA qualification.
+
+QNX requires the equivalent PCI BAR discovery, interrupt attachment, UART
+register driver integration, ACK, and teardown behavior. Existing README-only
+claims are not implementation evidence.
+
+## Verification
+
+Software checks are diagnostics only:
+
+- QEMU contains the intended ivshmem devices.
+- The guest enumerates the BAR and MSI-X vector.
+- Host eventfd and guest IRQ counters increase.
+- The UART driver and login service are active.
+
+Qualification requires physical I/O:
+
+1. Observe the guest login prompt on Console 2 or Console 3.
+2. Inject a unique command through that physical endpoint.
+3. Match the exact command output and returned prompt.
+4. Exercise bidirectional deterministic patterns.
+5. Repeat under FIFO saturation, guest restart, server restart, and adapter
+   reassignment.
+6. Repeat with DMA enabled and verify bit-exact data.
+
+Report MMIO mapping, vGIC delivery, FIFO, external TX, external RX, and DMA as
+separate results. Do not infer one from another.
+
+## Related Documents
+
+- [`Architecture.md`](Architecture.md)
+- [`AmbaVirtDMA.md`](AmbaVirtDMA.md)
+- [`AmbaVirtServer.md`](AmbaVirtServer.md)
+- [`EVE-Native-ivshmem-Support.md`](EVE-Native-ivshmem-Support.md)
+- [`EVE-Ambarella-Models.md`](EVE-Ambarella-Models.md)
+- [`EVE-EdgeApp-Provision.md`](EVE-EdgeApp-Provision.md)

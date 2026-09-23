@@ -5,15 +5,25 @@
 The Ambarella virtualization architecture relies on two complementary transport mechanisms between the guest domain (Ubuntu HVM at EL1) and the host container (NOHYPER at EL2):
 
 1. **`virtio-vsock` (Control Plane)**: Low-latency, connection-oriented point-to-point RPC and control messaging (CID 2, port 5555).
-2. **`ivshmem` (Data Plane)**: Zero-copy shared DRAM window (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2) mapped to a shared backing file in host memory (`/dev/shm/amba-virt`). Size comes from model `cbattr.shmsize`. **Production is 1 GiB** (shared by Cavalry, DMA, SD/eMMC, and later frontends). **16 MiB was the PoC / verification run** on n1-655-devkit. Do not add a second ivshmem device per driver. See [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+2. **`ivshmem` (Data Plane)**: Zero-copy shared DRAM window (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2) mapped through the model-selected backing. Current production models use `/dev/amba_virt_shm` (and `/dev/amba_virt_shm1` for a second pair); the original PoC used `/dev/shm/amba-virt`. Size comes from model `cbattr.shmsize`. **Production is 1 GiB** (shared by Cavalry, DMA, SD/eMMC, and later frontends). **16 MiB was the PoC / verification run** on n1-655-devkit. Do not add a second bulk window per driver. See [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
-While `virtio-vsock` is already enabled by stock EVE BaseOS, `ivshmem-plain` is currently absent from EVE's hypervisor device model. This document details the technical background, explains why runtime workarounds are unsuitable for production, and outlines the complete proposed implementation for integrating native `ivshmem` support directly into EVE BaseOS.
+Stock upstream EVE does not provide this device, but this repository now has a
+delivered Pillar implementation in `eve/pkg/pillar/hypervisor/kvm.go`.
+`ivshmemWindowFromBundle` recognizes the `amba_shm` marker,
+`ensureSharedMemoryFile` validates its backing, and
+`estimatedVMMOverhead` accounts for the full window. The corresponding tests
+are in `kvm_ivshmem_test.go`.
+
+UART virtualization is a separate planned extension. It reuses this
+controller-facing convention but adds device-MMIO backing and
+`ivshmem-doorbell`/eventfd interrupts. Those UART extensions are not delivered
+yet; see [UART-Passthrough.md](UART-Passthrough.md).
 
 ---
 
 ## 2. Background & Problem Analysis
 
-### 2.1 Current Stock EVE Behavior
+### 2.1 Upstream EVE Behavior
 
 In stock EVE BaseOS (running KVM hypervisor on `arm64`):
 - `domainmgr` automatically injects a `vhost-vsock-pci` device (`eve-vsock0`, guest CID 4) into every HVM domain configuration.
@@ -44,11 +54,12 @@ Attempts to inject `ivshmem` into an already-running EVE node without modifying 
 
    That boundary is real but narrower than it first appears, and it is the hinge of the design. The host-side character device `/dev/amba_virt` *is* expressible as an `IO_TYPE_OTHER` member, which is how the NOHYPER container gets it. And an `IO_TYPE_OTHER` member that carries no physical resource at all is inert everywhere on the KVM path, so it can be attached to the HVM purely as a marker: EVE sees an adapter to reserve, and the patched `kvm.go` sees a request for a window. Its `cbattr` carries the parameters. So while `ivshmem` itself is not assignable, the decision to give a given app instance a window is fully controller-driven.
 
-Therefore, the only clean, robust, and permanent solution is adding native `ivshmem` support to EVE's hypervisor template generator.
+Therefore, the repository implementation adds native `ivshmem` support to
+EVE's hypervisor template generator instead of relying on runtime injection.
 
 ---
 
-## 3. Proposed Implementation in EVE BaseOS
+## 3. Delivered Implementation in EVE BaseOS
 
 ### 3.1 Target Component: EVE Pillar KVM Hypervisor
 
@@ -189,6 +200,46 @@ One caveat: `vmmOverhead` consults `VMMMaxMem` and the global `memory.vmm.limit.
 
    So the module is loaded at boot from `/etc/init.d/000-mod-params` and no longer requires its backing file at load time. It registers the character device immediately and attaches the window on first use, re-reading the size each time. That also means a window grown by a model change is picked up on the next open rather than needing a module reload.
 
+### 3.6 Planned UART MMIO and vGIC Extension
+
+The existing bulk window remains `ivshmem-plain`. UART virtualization must not
+silently change its semantics or add UART registers inside the shared DRAM
+allocator.
+
+The planned UART adapter bundle uses `IO_TYPE_OTHER`, empty EVE resource fields,
+exclusive `assigngrp`, and UART-specific `cbattr`. It is not an inert marker:
+it designates a real physical UART through those attributes.
+
+Two parser rules are mandatory:
+
+1. A UART bundle must not also match `ivshmemWindowFromBundle`. Today that
+   function accepts any `IoOther` bundle with empty resource fields and falls
+   back to a 16 MiB `/dev/shm/<logicallabel>` window.
+2. A bulk `amba_shm` marker must not match the UART parser. The parsers must be
+   mutually exclusive on `cbattr` keys and reject a bundle carrying both key
+   sets.
+
+The planned interrupt path is:
+
+```text
+physical UART IRQ -> Dom0 stub -> eventfd -> ivshmem-doorbell
+                  -> MSI-X -> KVM -> guest vGIC
+guest ISR -> doorbell ACK -> Dom0 stub unmasks physical IRQ
+```
+
+Because the physical IRQ is level-high, the stub masks it before signalling
+and re-enables it only after an owner-validated guest ACK. The stub must not
+read UART cause or data registers.
+
+The doorbell server/socket must be supervised before QEMU starts. The server
+passes the MMIO backing FD and eventfds using the ivshmem server protocol.
+A missing socket, backing, or eventfd must fail domain creation; there is no
+fallback to QEMU `pci-serial`.
+
+Before implementation proceeds, verify on the delivered arm64 KVM that a
+restricted character-device mapping of a UART PFN can back the guest BAR.
+Shared-DRAM ivshmem success does not prove device-MMIO mapping.
+
 ---
 
 ## 4. Build, Packaging & OTA Deployment Workflow
@@ -304,10 +355,10 @@ After the node reports `Online` following the update:
 |---|---|---|
 | **1. Node Firmware** | `./scripts/zcli -- edge-node show n1-655-devkit` | Active Image matches `$EVE_VER` |
 | **2. Host Module** | EVE host: `lsmod \| grep amba_virt && ls -l /dev/amba_virt` | Loaded at boot; node present *before* any app starts |
-| **3. Backing File** | EVE host: `ls -la /dev/shm/amba-virt` | Created once the HVM starts, size matches the model `shmsize` |
+| **3. Backing Device** | EVE host: `ls -l /dev/amba_virt_shm` | Present before QEMU starts; reported size matches model `shmsize` |
 | **4. QEMU Config** | EVE host: `cat /run/domainmgr/xen/xen1.cfg` | Contains `[object "amba_shm"]` and `[device "amba_shm-dev"]`, both before `[device "eve-vsock0"]` |
 | **5. Cgroup Limit** | EVE host: QEMU container `memory.limit_in_bytes` | Exceeds guest RAM by at least the window size |
-| **6. Host Attach** | EVE host: `dmesg \| grep amba_virt` | `attached /dev/shm/amba-virt size N` after first open |
+| **6. QEMU Backing** | EVE host: inspect domain QEMU config | `mem-path` matches model `cbattr.shmpath` (`/dev/amba_virt_shm` in production) |
 | **7. Guest PCI Bus** | Ubuntu HVM: `lspci -nn \| grep -E "1af4:1110\|1af4:1053"` | Both `1af4:1053` (vsock) AND `1af4:1110` (ivshmem) are listed |
 | **8. Guest Driver** | Ubuntu HVM: `insmod amba_virt.ko && ls -l /dev/amba_virt` | Driver probes successfully; `/dev/amba_virt` created |
 | **9. Container Device** | NOHYPER container: `ls -l /dev/amba_virt` | Present without any manual `mknod` and without a cgroup whitelist edit |
@@ -316,7 +367,7 @@ After the node reports `Online` following the update:
 
 Step 9 is the one that distinguishes a working integration from the earlier manual setup: if `/dev/amba_virt` only appears after a hand-run `mknod`, the model entry is not doing its job and the device will vanish on the next container recreate.
 
-### 6.1 Measured results on n1-655-devkit
+### 6.1 Historical 16 MiB PoC Results on n1-655-devkit
 
 Steps 1–7 were confirmed on the devkit against EVE
 `0.0.0-amba-ivshmem-fa7d9904` with `ubuntu_24_04_ivshmem.n1-655-devkit`
@@ -449,7 +500,10 @@ from the controller model.
 
 ## 7. Next Steps & Recommendations
 
-1. **Review**: Review the proposed template additions and backing file allocation in Section 3.
-2. **Code Edit**: Apply the changes to `eve/pkg/pillar/hypervisor/kvm.go`.
-3. **Build Execution**: Trigger `make eve` at the repository root.
-4. **Deployment**: Publish to LocalHTTP and run `eveimage-update` on `n1-655-devkit`.
+The bulk `ivshmem-plain` implementation is delivered. Remaining work is:
+
+1. Keep the production model, Pillar tests, and this document synchronized.
+2. Re-run the verification matrix after any EVE/QEMU or model change.
+3. Implement the UART MMIO/doorbell extension in Section 3.6 only after its
+   device-PFN and vGIC feasibility hardstops pass.
+4. Do not reinterpret the historical 16 MiB PoC output as UART qualification.
