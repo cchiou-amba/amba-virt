@@ -525,6 +525,17 @@ build_qnx() {
     make -C "${ROOT_DIR}/guest-os/apps/cavalry-yolo" OS=qnx clean all
     cp -vf "${ROOT_DIR}/guest-os/apps/cavalry-yolo/cavalry_hvm_yolo" "${QNX_OUT}/"
 
+    log_step "Compiling devc-seramb and qnx-getty (Ambarella UART passthrough & login daemon)..."
+    make -C "${ROOT_DIR}/guest-os/qnx/amba-uart" clean all
+    cp -vf "${ROOT_DIR}/guest-os/qnx/amba-uart/devc-seramb" "${QNX_OUT}/"
+    if [ -f "${ROOT_DIR}/guest-os/qnx/amba-uart/qnx-getty" ]; then
+        cp -vf "${ROOT_DIR}/guest-os/qnx/amba-uart/qnx-getty" "${QNX_OUT}/"
+    fi
+    if [ -f "${ROOT_DIR}/guest-os/qnx/qnx-serial-console.sh" ]; then
+        cp -vf "${ROOT_DIR}/guest-os/qnx/qnx-serial-console.sh" "${QNX_OUT}/"
+        chmod +x "${QNX_OUT}/qnx-serial-console.sh"
+    fi
+
     log_step "Staging devc-ser8250 (SDP built-in DW_apb_uart serial driver)..."
     if [ -f "${QNX_TARGET:-}/aarch64le/sbin/devc-ser8250" ]; then
         cp -vf "${QNX_TARGET}/aarch64le/sbin/devc-ser8250" "${QNX_OUT}/"

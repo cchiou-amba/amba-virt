@@ -8,7 +8,7 @@ CFLAGS ?= -O2 -Wall -Wextra -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/ua
 
 LDFLAGS ?= -static
 
-TARGETS := amba-virt-server amba-virt-ctl amba-virt-backend
+TARGETS := amba-virt-server amba-virt-ctl amba-virt-backend amba_virt_uart_server
 SERVER_SRCS := amba-virt-server.c cavalry_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_query.c virt_backend_client.c virt_dma_broker.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 
@@ -17,6 +17,9 @@ CTL_OBJS := $(CTL_SRCS:.c=.o)
 
 BACKEND_SRCS := amba-virt-backend.c
 BACKEND_OBJS := $(BACKEND_SRCS:.c=.o)
+
+UART_SRCS := amba_virt_uart_server.c
+UART_OBJS := $(UART_SRCS:.c=.o)
 
 TESTS := test_virt_mem_pool test_admin_ipc test_virt_query test_virt_driver_matrix test_backend_ipc test_drain_protocol test_boundary_stress test_state_desync test_fuzz_corruption test_security_exploits test_hardware_safety test_virt_dma_acl test_virt_uart
 
@@ -32,6 +35,9 @@ amba-virt-ctl: $(CTL_OBJS)
 
 amba-virt-backend: $(BACKEND_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -lpthread
+
+amba_virt_uart_server: $(UART_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 
 test: $(TESTS)

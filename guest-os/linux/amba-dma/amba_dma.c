@@ -29,7 +29,6 @@
 #define AMBA_DMA_MAX_CHANNELS   4
 #define AMBA_DMA_RPC_TIMEOUT_MS 1000
 
-/* Per-channel private data */
 struct amba_dma_chan {
     struct dma_chan          chan;
     u32                     hw_channel;     /* Physical DMA channel */
@@ -39,7 +38,7 @@ struct amba_dma_chan {
 
     /* Active transfer tracking */
     dma_cookie_t            last_cookie;
-    struct dma_async_tx_descriptor *active_desc;
+    struct dma_async_tx_descriptor tx_desc;
 };
 
 /* Driver-level device */
@@ -211,6 +210,27 @@ static int amba_dma_slave_config(struct dma_chan *chan,
     return 0;
 }
 
+static dma_cookie_t amba_dma_tx_submit(
+    struct dma_async_tx_descriptor *tx)
+{
+    struct dma_chan *chan = tx->chan;
+    struct amba_dma_chan *achan =
+        container_of(chan, struct amba_dma_chan, chan);
+    dma_cookie_t cookie;
+    unsigned long flags;
+
+    spin_lock_irqsave(&achan->lock, flags);
+    cookie = chan->cookie + 1;
+    if (cookie < 0)
+        cookie = 1;
+    chan->cookie = cookie;
+    tx->cookie = cookie;
+    achan->last_cookie = cookie;
+    spin_unlock_irqrestore(&achan->lock, flags);
+
+    return cookie;
+}
+
 static struct dma_async_tx_descriptor *
 amba_dma_prep_slave_sg(struct dma_chan *chan,
                        struct scatterlist *sgl, unsigned int sg_len,
@@ -240,25 +260,9 @@ amba_dma_prep_slave_sg(struct dma_chan *chan,
         return NULL;
     }
 
-    /* Return a minimal descriptor — the actual work is deferred */
-    return &achan->chan.local->tx;
-}
-
-static dma_cookie_t amba_dma_tx_submit(
-    struct dma_async_tx_descriptor *tx)
-{
-    struct dma_chan *chan = tx->chan;
-    struct amba_dma_chan *achan =
-        container_of(chan, struct amba_dma_chan, chan);
-    dma_cookie_t cookie;
-    unsigned long flags;
-
-    spin_lock_irqsave(&achan->lock, flags);
-    cookie = dma_cookie_assign(tx);
-    achan->last_cookie = cookie;
-    spin_unlock_irqrestore(&achan->lock, flags);
-
-    return cookie;
+    dma_async_tx_descriptor_init(&achan->tx_desc, chan);
+    achan->tx_desc.tx_submit = amba_dma_tx_submit;
+    return &achan->tx_desc;
 }
 
 static void amba_dma_issue_pending(struct dma_chan *chan)
@@ -282,7 +286,10 @@ static enum dma_status amba_dma_tx_status(struct dma_chan *chan,
                                            dma_cookie_t cookie,
                                            struct dma_tx_state *txstate)
 {
-    return dma_cookie_status(chan, cookie, txstate);
+    dma_set_tx_state(txstate, chan->completed_cookie, chan->cookie, 0);
+    if (cookie == chan->completed_cookie)
+        return DMA_COMPLETE;
+    return DMA_IN_PROGRESS;
 }
 
 static int amba_dma_terminate_all(struct dma_chan *chan)
@@ -322,7 +329,6 @@ static int amba_dma_probe(struct platform_device *pdev)
     dma->device_alloc_chan_resources = amba_dma_alloc_chan_resources;
     dma->device_free_chan_resources = amba_dma_free_chan_resources;
     dma->device_prep_slave_sg = amba_dma_prep_slave_sg;
-    dma->device_tx_submit = amba_dma_tx_submit;
     dma->device_issue_pending = amba_dma_issue_pending;
     dma->device_tx_status = amba_dma_tx_status;
     dma->device_terminate_all = amba_dma_terminate_all;

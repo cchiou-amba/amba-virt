@@ -8,13 +8,16 @@ CC            := $(CROSS_COMPILE)gcc
 CFLAGS        ?= -Wall -O2
 
 BUILD_DIR     ?= build
-PROGS         := check_locks iav_status mmio_read scan_i2c1 read_max_regs test_oneshot_ser
+PROGS         := check_locks iav_status mmio_read scan_i2c1 read_max_regs test_oneshot_ser set_uart_pinmux
 TARGETS       := $(addprefix $(BUILD_DIR)/, $(PROGS))
 
 all: $(BUILD_DIR) $(TARGETS)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/set_uart_pinmux: set_uart_pinmux.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $<
 
 $(BUILD_DIR)/check_locks: check_locks.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $<

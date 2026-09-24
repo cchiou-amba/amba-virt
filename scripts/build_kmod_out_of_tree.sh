@@ -18,6 +18,8 @@ DRIVERS_DIR=$(CDPATH= cd -- "$ROOT/../drivers" 2>/dev/null && pwd || true)
 
 KDIR=""
 CLEAN=0
+TARGET_BOARD=""
+VERMAGIC=""
 
 ARCH="${ARCH:-arm64}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
@@ -28,6 +30,8 @@ Usage: scripts/build_kmod_out_of_tree.sh [options]
 
 Options:
   --kdir=DIR          Path to kernel source tree or linux-headers
+  --target=devkit|pro Set kernel release for devkit or pro target
+  --vermagic=STR      Explicit kernel release vermagic
   --clean             Clean build artifacts
   -h, --help          Show this help
 EOF
@@ -41,6 +45,14 @@ while [ "$#" -gt 0 ]; do
         ;;
     --clean)
         CLEAN=1
+        shift
+        ;;
+    --target=*)
+        TARGET_BOARD="${1#--target=}"
+        shift
+        ;;
+    --vermagic=*)
+        VERMAGIC="${1#--vermagic=}"
         shift
         ;;
     --kdir=*)
@@ -63,6 +75,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$TARGET_BOARD" = "devkit" ]; then
+    VERMAGIC="6.1.112-linuxkit-96b16113070c-custom-dirty"
+elif [ "$TARGET_BOARD" = "pro" ]; then
+    VERMAGIC="6.1.112-linuxkit-6e60019d450c-custom"
+fi
+
 # Resolve default KDIR if not specified
 if [ -z "$KDIR" ]; then
     if [ -d "$ROOT/build/usr/src" ]; then
@@ -84,6 +102,11 @@ if [ -z "$KDIR" ] || [ ! -f "$KDIR/Makefile" ]; then
     exit 1
 fi
 
+if [ -n "$VERMAGIC" ] && [ -f "$KDIR/include/generated/utsrelease.h" ]; then
+    echo "Configuring UTS_RELEASE=$VERMAGIC in $KDIR..."
+    echo "#define UTS_RELEASE \"$VERMAGIC\"" > "$KDIR/include/generated/utsrelease.h"
+fi
+
 if [ "$CLEAN" -eq 1 ]; then
     if [ -d "$OUT_DIR" ]; then
         make -C "$KDIR" M="$OUT_DIR" clean || true
@@ -93,24 +116,30 @@ if [ "$CLEAN" -eq 1 ]; then
     exit 0
 fi
 
-mkdir -p "$OUT_DIR/include"
+mkdir -p "$OUT_DIR/include/uapi"
 
 # Stage sources into build directory
 install -m 0644 "$SRC/amba_virt_nohyper.c" "$OUT_DIR/amba_virt_nohyper.c"
 install -m 0644 "$SRC/amba_virt_core.c"     "$OUT_DIR/amba_virt_core.c"
 install -m 0644 "$SRC/amba_virt_core.h"     "$OUT_DIR/amba_virt_core.h"
 install -m 0644 "$SRC/include/uapi/amba_virt.h" "$OUT_DIR/include/amba_virt.h"
+if [ -f "$SRC/amba_virt_uart.c" ]; then
+    install -m 0644 "$SRC/amba_virt_uart.c" "$OUT_DIR/amba_virt_uart.c"
+fi
+if [ -f "$SRC/include/uapi/amba_virt_uart_uapi.h" ]; then
+    install -m 0644 "$SRC/include/uapi/amba_virt_uart_uapi.h" "$OUT_DIR/include/uapi/amba_virt_uart_uapi.h"
+fi
 
 cat > "$OUT_DIR/Kbuild" <<'EOF'
 # SPDX-License-Identifier: GPL-2.0
 
-ccflags-y += -I$(src)/include
+ccflags-y += -I$(src)/include -I$(src)/include/uapi
 
-obj-m := amba_virt.o
+obj-m := amba_virt.o amba_virt_uart.o
 amba_virt-y := amba_virt_nohyper.o amba_virt_core.o
 EOF
 
-echo "Building amba_virt.ko against $KDIR..."
+echo "Building amba_virt.ko and amba_virt_uart.ko against $KDIR..."
 make -C "$KDIR" M="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules
 
 CAVALRY_DIR=""
@@ -168,6 +197,10 @@ if [ -n "$KEY" ] && [ -f "$KEY" ] && [ -f "$CERT" ]; then
     if [ -n "$SIGN_FILE" ] && [ -x "$SIGN_FILE" ]; then
         echo "Signing amba_virt.ko with $(basename "$KEY")..."
         "$SIGN_FILE" sha256 "$KEY" "$CERT" "$OUT_DIR/amba_virt.ko"
+        if [ -f "$OUT_DIR/amba_virt_uart.ko" ]; then
+            echo "Signing amba_virt_uart.ko with $(basename "$KEY")..."
+            "$SIGN_FILE" sha256 "$KEY" "$CERT" "$OUT_DIR/amba_virt_uart.ko"
+        fi
         if [ -n "$CAVALRY_DIR" ] && [ -f "$CAVALRY_DIR/cavalry_v3/cavalry.ko" ]; then
             echo "Signing cavalry.ko with $(basename "$KEY")..."
             "$SIGN_FILE" sha256 "$KEY" "$CERT" "$CAVALRY_DIR/cavalry_v3/cavalry.ko"
@@ -180,6 +213,9 @@ else
 fi
 
 echo "Successfully built: $OUT_DIR/amba_virt.ko"
+if [ -f "$OUT_DIR/amba_virt_uart.ko" ]; then
+    echo "Successfully built: $OUT_DIR/amba_virt_uart.ko"
+fi
 if [ -n "$CAVALRY_DIR" ] && [ -f "$CAVALRY_DIR/cavalry_v3/cavalry.ko" ]; then
     echo "Successfully built: $CAVALRY_DIR/cavalry_v3/cavalry.ko"
 fi

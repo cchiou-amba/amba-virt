@@ -4,5 +4,6 @@
 
 ccflags-y += -I$(src)/include/uapi -I$(src)
 
-obj-m := amba_virt.o
+obj-m := amba_virt.o amba_virt_uart.o
 amba_virt-y := amba_virt_nohyper.o amba_virt_core.o
+
