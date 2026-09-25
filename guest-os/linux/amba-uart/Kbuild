@@ -5,6 +5,8 @@
 # Copyright (C) 2026, Ambarella International LLC
 
 ccflags-y += -I$(src)
+ccflags-y += -I$(src)/../amba-virt
+ccflags-y += -I$(src)/../../../drivers/amba_virt/include/uapi
 
 obj-m := amba_uart.o
 

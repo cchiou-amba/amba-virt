@@ -52,6 +52,8 @@
 #define UART_MC_OFFSET		0x10	/* Modem Control Register            */
 #define UART_LS_OFFSET		0x14	/* Line Status Register              */
 #define UART_MS_OFFSET		0x18	/* Modem Status Register             */
+#define UART_DMAE_OFFSET	0x28	/* DMA Enable Register               */
+#define UART_DMAF_OFFSET	0x40	/* DMA FIFO Register                 */
 #define UART_US_OFFSET		0x7c	/* UART Status Register              */
 #define UART_SRR_OFFSET		0x88	/* Software Reset Register           */
 
@@ -59,6 +61,7 @@
 #define UART_FC_FIFOE		0x01
 #define UART_FC_RCVRR		0x02
 #define UART_FC_XMITR		0x04
+#define UART_FC_DMA_SELECT	0x08
 #define UART_FC_TX_EMPTY	0x00
 #define UART_FC_RX_2_TO_FULL	0xc0
 
@@ -94,6 +97,7 @@ typedef struct dev_entry {
 	char			devname[TTY_NAME_MAX];
 	bool			verbose;
 	bool			foreground;
+	bool			dma_enabled;
 	pci_devhdl_t		pci_hdl;
 } DEV_ENTRY;
 
@@ -120,9 +124,15 @@ static void uart_hw_init(DEV_ENTRY *amb)
 	uart_write(amb, 0x00, UART_SRR_OFFSET);
 
 	/* 2. Configure FIFOs */
-	uart_write(amb, UART_FC_FIFOE | UART_FC_RX_2_TO_FULL |
-		   UART_FC_TX_EMPTY | UART_FC_XMITR | UART_FC_RCVRR,
-		   UART_FC_OFFSET);
+	uint32_t fcr = UART_FC_FIFOE | UART_FC_RX_2_TO_FULL |
+		       UART_FC_TX_EMPTY | UART_FC_XMITR | UART_FC_RCVRR;
+	if (amb->dma_enabled) {
+		fcr |= UART_FC_DMA_SELECT;
+	}
+	uart_write(amb, fcr, UART_FC_OFFSET);
+	if (amb->dma_enabled) {
+		uart_write(amb, 0x02, UART_DMAE_OFFSET);
+	}
 
 	/* 3. Disable all interrupts (pure FIFO polling mode) */
 	uart_write(amb, 0x00, UART_IE_OFFSET);
@@ -138,10 +148,11 @@ static void uart_hw_init(DEV_ENTRY *amb)
 	uart_write(amb, 0x03, UART_MC_OFFSET);
 
 	if (amb->verbose) {
-		printf("devc-seramb: HW Init complete (US=0x%08x, LS=0x%08x, divisor=%u)\n",
+		printf("devc-seramb: HW Init complete (US=0x%08x, LS=0x%08x, divisor=%u, DMA=%s)\n",
 		       uart_read(amb, UART_US_OFFSET),
 		       uart_read(amb, UART_LS_OFFSET),
-		       quot);
+		       quot,
+		       amb->dma_enabled ? "enabled" : "disabled");
 	}
 }
 
@@ -286,6 +297,7 @@ static void print_usage(const char *prog)
 	printf("  -b, --baud <rate>     Baud rate (default: %u)\n", DEFAULT_BAUD);
 	printf("  -c, --clk <hz>        UART reference clock in Hz (default: %u)\n", DEFAULT_CLK_HZ);
 	printf("  -a, --phys <hex>      Physical MMIO aperture address\n");
+	printf("  -D, --no-dma          Disable DMA acceleration (use pure PIO)\n");
 	printf("  -f, --foreground      Run in foreground (do not daemonize)\n");
 	printf("  -v, --verbose         Enable verbose debugging output\n");
 	printf("  -?, --help            Show this help message\n");
@@ -300,6 +312,7 @@ int main(int argc, char **argv)
 		{"baud",       required_argument, NULL, 'b'},
 		{"clk",        required_argument, NULL, 'c'},
 		{"phys",       required_argument, NULL, 'a'},
+		{"no-dma",     no_argument,       NULL, 'D'},
 		{"foreground", no_argument,       NULL, 'f'},
 		{"verbose",    no_argument,       NULL, 'v'},
 		{"help",       no_argument,       NULL, '?'},
@@ -310,8 +323,9 @@ int main(int argc, char **argv)
 	strncpy(g_amb_dev.devname, DEFAULT_DEV_NAME, sizeof(g_amb_dev.devname) - 1);
 	g_amb_dev.clk = DEFAULT_CLK_HZ;
 	g_amb_dev.baud = DEFAULT_BAUD;
+	g_amb_dev.dma_enabled = true; /* Default: DMA acceleration enabled */
 
-	while ((opt = getopt_long(argc, argv, "p:b:c:a:fv?", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:b:c:a:Dfv?", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p':
 			strncpy(g_amb_dev.devname, optarg, sizeof(g_amb_dev.devname) - 1);
@@ -324,6 +338,9 @@ int main(int argc, char **argv)
 			break;
 		case 'a':
 			g_amb_dev.phys = strtoull(optarg, NULL, 0);
+			break;
+		case 'D':
+			g_amb_dev.dma_enabled = false;
 			break;
 		case 'f':
 			g_amb_dev.foreground = true;

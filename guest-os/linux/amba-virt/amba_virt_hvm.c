@@ -69,6 +69,12 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 		return -ENODEV;
 	}
 
+	/* Only bind to shared memory window (>= 16 MiB), ignore aperture devices (e.g. UART) */
+	if (gdev.shm_phys != 0 || len < 0x1000000) {
+		pci_disable_device(pdev);
+		return -ENODEV;
+	}
+
 	ret = pci_request_region(pdev, bar, "amba_virt");
 	if (ret) {
 		dev_err(&pdev->dev, "cannot request ivshmem BAR%d\n", bar);
@@ -105,6 +111,9 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 
 static void amba_virt_pci_remove(struct pci_dev *pdev)
 {
+	if (pci_get_drvdata(pdev) != &gdev)
+		return;
+
 	amba_virt_core_exit(&gdev);
 	if (gdev.shm_iomem) {
 		iounmap(gdev.shm_iomem);
@@ -112,6 +121,7 @@ static void amba_virt_pci_remove(struct pci_dev *pdev)
 	}
 	pci_release_region(pdev, shm_bar);
 	pci_disable_device(pdev);
+	memset(&gdev, 0, sizeof(gdev));
 }
 
 static const struct pci_device_id amba_virt_pci_ids[] = {
@@ -130,7 +140,19 @@ static struct pci_driver amba_virt_pci_driver = {
 	},
 };
 
-module_pci_driver(amba_virt_pci_driver);
+static int __init amba_virt_guest_init(void)
+{
+	return pci_register_driver(&amba_virt_pci_driver);
+}
+
+static void __exit amba_virt_guest_exit(void)
+{
+	pci_unregister_driver(&amba_virt_pci_driver);
+	amba_virt_core_exit(&gdev);
+}
+
+module_init(amba_virt_guest_init);
+module_exit(amba_virt_guest_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("amba_virt guest (ivshmem PCI + vsock)");

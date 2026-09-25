@@ -22,12 +22,17 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 
 #include <amba_virt.h>
 #include "amba_virt_kernel.h"
 
 #define AMBA_DMA_MAX_CHANNELS   4
 #define AMBA_DMA_RPC_TIMEOUT_MS 1000
+
+static unsigned int base_channel = 13;
+module_param(base_channel, uint, 0644);
+MODULE_PARM_DESC(base_channel, "Base Generic-DMA1 hardware channel (default 13 for UART2 TX)");
 
 struct amba_dma_chan {
     struct dma_chan          chan;
@@ -39,6 +44,12 @@ struct amba_dma_chan {
     /* Active transfer tracking */
     dma_cookie_t            last_cookie;
     struct dma_async_tx_descriptor tx_desc;
+
+    /* Pending transfer info and work item */
+    phys_addr_t             pending_buf_addr;
+    u32                     pending_buf_len;
+    u32                     pending_dir;
+    struct work_struct      work;
 };
 
 /* Driver-level device */
@@ -172,6 +183,8 @@ static void amba_dma_free_chan_resources(struct dma_chan *chan)
     struct amba_dma_chan *achan =
         container_of(chan, struct amba_dma_chan, chan);
 
+    cancel_work_sync(&achan->work);
+
     /* Terminate any active transfer */
     if (achan->hw_channel)
         amba_dma_rpc_terminate(achan->hw_channel);
@@ -231,6 +244,52 @@ static dma_cookie_t amba_dma_tx_submit(
     return cookie;
 }
 
+static void amba_dma_chan_work(struct work_struct *work)
+{
+    struct amba_dma_chan *achan =
+        container_of(work, struct amba_dma_chan, work);
+    phys_addr_t shm_phys = 0;
+    void __iomem *shm_iomem = NULL;
+    size_t shm_size = 0;
+    u32 buf_offset;
+    dma_async_tx_callback cb;
+    void *cb_param;
+    unsigned long flags;
+    int ret;
+
+    /* Determine ivshmem offset */
+    ret = amba_virt_get_window(&shm_phys, &shm_iomem, &shm_size);
+    if (ret == 0 && achan->pending_buf_addr >= shm_phys &&
+        achan->pending_buf_addr < shm_phys + shm_size) {
+        buf_offset = (u32)(achan->pending_buf_addr - shm_phys);
+    } else {
+        buf_offset = (u32)achan->pending_buf_addr;
+        pr_warn_ratelimited("amba_dma: chan %u buffer 0x%llx not in ivshmem window [0x%llx..0x%llx]\n",
+                            achan->hw_channel,
+                            (unsigned long long)achan->pending_buf_addr,
+                            (unsigned long long)shm_phys,
+                            (unsigned long long)(shm_phys + shm_size));
+    }
+
+    ret = amba_dma_rpc_submit(achan->hw_channel, achan->pending_dir,
+                              buf_offset, achan->pending_buf_len,
+                              achan->last_cookie);
+
+    spin_lock_irqsave(&achan->lock, flags);
+    if (ret == 0) {
+        achan->chan.completed_cookie = achan->last_cookie;
+    } else {
+        pr_err("amba_dma: chan %u submit RPC failed: %d\n",
+               achan->hw_channel, ret);
+    }
+    cb = achan->tx_desc.callback;
+    cb_param = achan->tx_desc.callback_param;
+    spin_unlock_irqrestore(&achan->lock, flags);
+
+    if (cb)
+        cb(cb_param);
+}
+
 static struct dma_async_tx_descriptor *
 amba_dma_prep_slave_sg(struct dma_chan *chan,
                        struct scatterlist *sgl, unsigned int sg_len,
@@ -246,19 +305,19 @@ amba_dma_prep_slave_sg(struct dma_chan *chan,
         return NULL;
     }
 
-    /*
-     * For UART FIFO transfers, the scatterlist typically contains
-     * a single entry.  We validate and record it; actual submission
-     * happens in issue_pending().
-     *
-     * Multi-entry scatterlists would require chaining multiple DMA
-     * submit RPCs — deferred for initial implementation.
-     */
     if (sg_len != 1) {
         pr_err("amba_dma: multi-entry SG not supported (sg_len=%u)\n",
                sg_len);
         return NULL;
     }
+
+    achan->pending_buf_addr = sg_dma_address(sgl);
+    achan->pending_buf_len = sg_dma_len(sgl);
+    if (!achan->pending_buf_addr)
+        achan->pending_buf_addr = sg_phys(sgl);
+    if (!achan->pending_buf_len)
+        achan->pending_buf_len = sgl->length;
+    achan->pending_dir = achan->direction;
 
     dma_async_tx_descriptor_init(&achan->tx_desc, chan);
     achan->tx_desc.tx_submit = amba_dma_tx_submit;
@@ -270,16 +329,7 @@ static void amba_dma_issue_pending(struct dma_chan *chan)
     struct amba_dma_chan *achan =
         container_of(chan, struct amba_dma_chan, chan);
 
-    /*
-     * Issue the DMA transfer to the host broker.
-     *
-     * In the current stub implementation, buf_offset and buf_len
-     * would come from the scatterlist prepared in prep_slave_sg.
-     * Full implementation will map guest DMA addresses to ivshmem
-     * offsets via amba_virt_get_window().
-     */
-    pr_debug("amba_dma: issue_pending chan=%u cookie=%d\n",
-             achan->hw_channel, achan->last_cookie);
+    schedule_work(&achan->work);
 }
 
 static enum dma_status amba_dma_tx_status(struct dma_chan *chan,
@@ -297,6 +347,7 @@ static int amba_dma_terminate_all(struct dma_chan *chan)
     struct amba_dma_chan *achan =
         container_of(chan, struct amba_dma_chan, chan);
 
+    cancel_work_sync(&achan->work);
     return amba_dma_rpc_terminate(achan->hw_channel);
 }
 
@@ -339,8 +390,9 @@ static int amba_dma_probe(struct platform_device *pdev)
     for (i = 0; i < adev->nr_channels; i++) {
         struct amba_dma_chan *achan = &adev->channels[i];
 
-        achan->hw_channel = 11 + i;  /* Channels 11-14 */
+        achan->hw_channel = base_channel + i;  /* Channels base_channel .. +3 */
         spin_lock_init(&achan->lock);
+        INIT_WORK(&achan->work, amba_dma_chan_work);
         achan->chan.device = dma;
         list_add_tail(&achan->chan.device_node, &dma->channels);
     }
@@ -356,7 +408,7 @@ static int amba_dma_probe(struct platform_device *pdev)
 
     dev_info(&pdev->dev,
              "amba_dma: virtual peripheral DMA registered "
-             "(%d channels, 11-14)\n", adev->nr_channels);
+             "(%d channels, base %u)\n", adev->nr_channels, base_channel);
     return 0;
 }
 

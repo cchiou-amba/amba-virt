@@ -443,6 +443,8 @@ struct amba_virt_push_msg {
 #define AMBA_VIRT_IOC_EXPORT_DMABUF _IOR(AMBA_VIRT_IOC_MAGIC, 7, __s32)
 #define AMBA_VIRT_IOC_EXPORT_DMABUF_SLICE \
 	_IOWR(AMBA_VIRT_IOC_MAGIC, 8, struct amba_virt_dmabuf_slice)
+#define AMBA_VIRT_IOC_HOST_DMA_SLAVE \
+	_IOWR(AMBA_VIRT_IOC_MAGIC, 9, struct amba_virt_dma_slave_xfer)
 #define AMBA_VIRT_IOC_LIST_GUESTS \
 	_IOR(AMBA_VIRT_IOC_MAGIC, 0x20, struct amba_virt_guest_list)
 #define AMBA_VIRT_IOC_PUSH \
@@ -452,6 +454,17 @@ struct amba_virt_push_msg {
 
 #define AMBA_VIRT_DMA_DIR_MEM_TO_DEV	1u
 #define AMBA_VIRT_DMA_DIR_DEV_TO_MEM	2u
+
+/* Host-side peripheral slave DMA dispatch ioctl structure */
+struct amba_virt_dma_slave_xfer {
+	__u32 channel;       /* Physical channel (13=UART2 TX, 15=UART3 TX) */
+	__u32 direction;     /* AMBA_VIRT_DMA_DIR_MEM_TO_DEV (1) */
+	__u64 buf_phys;      /* Host physical address of ivshmem buffer */
+	__u32 buf_len;       /* Length in bytes */
+	__u32 timeout_ms;    /* Timeout in ms (e.g. 1000) */
+	__s32 status;        /* Response: 0 or -errno */
+	__u32 transferred;   /* Bytes transferred */
+};
 
 /* CID-to-DMA-Channel ACL entry */
 struct amba_virt_dma_channel_acl {

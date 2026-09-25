@@ -19,7 +19,9 @@
 #include <linux/slab.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pinctrl/consumer.h>
 
 #include "include/uapi/amba_virt_uart_uapi.h"
 
@@ -34,6 +36,7 @@ struct amba_virt_uart_port {
     int irq;
     struct clk *clk;
     struct miscdevice misc;
+    struct pinctrl *pinctrl;
     
     spinlock_t lock;
     struct eventfd_ctx *efd_ctx;
@@ -298,7 +301,6 @@ static int __init amba_virt_uart_init(void)
         np = of_find_node_by_path(dt_path);
         if (np) {
             port->irq = irq_of_parse_and_map(np, 0);
-            of_node_put(np);
             pr_info("amba_virt_uart: mapped DT node %s to Linux IRQ %d\n", dt_path, port->irq);
         }
 
@@ -324,7 +326,15 @@ static int __init amba_virt_uart_init(void)
         ret = misc_register(&port->misc);
         if (ret) {
             pr_err("amba_virt_uart: failed to register %s (ret=%d)\n", port->name, ret);
+            if (np)
+                of_node_put(np);
             while (--i >= 0) {
+                if (g_ports[i].pinctrl) {
+                    pinctrl_put(g_ports[i].pinctrl);
+                    g_ports[i].pinctrl = NULL;
+                }
+                if (g_ports[i].misc.this_device)
+                    g_ports[i].misc.this_device->of_node = NULL;
                 if (!IS_ERR_OR_NULL(g_ports[i].clk)) {
                     clk_disable_unprepare(g_ports[i].clk);
                     clk_put(g_ports[i].clk);
@@ -332,6 +342,19 @@ static int __init amba_virt_uart_init(void)
                 misc_deregister(&g_ports[i].misc);
             }
             return ret;
+        }
+
+        if (np && port->misc.this_device) {
+            port->misc.this_device->of_node = np;
+            port->pinctrl = pinctrl_get_select_default(port->misc.this_device);
+            if (IS_ERR(port->pinctrl)) {
+                pr_warn("amba_virt_uart: failed to select default pinctrl for %s: %ld\n",
+                        port->name, PTR_ERR(port->pinctrl));
+                port->pinctrl = NULL;
+            } else {
+                pr_info("amba_virt_uart: applied default pinctrl for %s\n", port->name);
+            }
+            of_node_put(np);
         }
 
         pr_info("amba_virt_uart: registered %s (phys=0x%llx, irq=%d, minor=%d)\n",
@@ -348,6 +371,13 @@ static void __exit amba_virt_uart_exit(void)
 
     for (i = 0; i < NUM_PORTS; i++) {
         struct amba_virt_uart_port *port = &g_ports[i];
+        if (port->pinctrl) {
+            pinctrl_put(port->pinctrl);
+            port->pinctrl = NULL;
+        }
+        if (port->misc.this_device) {
+            port->misc.this_device->of_node = NULL;
+        }
         if (!IS_ERR_OR_NULL(port->clk)) {
             clk_disable_unprepare(port->clk);
             clk_put(port->clk);

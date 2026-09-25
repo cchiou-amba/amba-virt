@@ -812,6 +812,23 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		return ret;
 	}
 
+	case AMBA_VIRT_IOC_HOST_DMA_SLAVE:
+	{
+		struct amba_virt_dma_slave_xfer xfer;
+
+		if (!dev->is_host)
+			return -EPERM;
+		if (!dev->dma_slave_xfer)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&xfer, (void __user *)arg, sizeof(xfer)))
+			return -EFAULT;
+		ret = dev->dma_slave_xfer(dev, &xfer);
+		xfer.status = ret;
+		if (copy_to_user((void __user *)arg, &xfer, sizeof(xfer)))
+			return -EFAULT;
+		return ret;
+	}
+
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
 	{
 		int dmabuf_fd = -1;

@@ -414,8 +414,11 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 		out->seq = in->seq;
 		d_resp = (struct amba_virt_dma_submit *)(tx->data + sizeof(*out));
 
-		virt_dma_handle_submit(rx->client_cid, info->shm_size,
-				      d_req, d_resp);
+		struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(rx->client_cid);
+		uint64_t tenant_phys = tenant ? tenant->phys_base : info->shm_phys;
+
+		virt_dma_handle_submit(rx->client_cid, fd, tenant_phys,
+				      info->shm_size, d_req, d_resp);
 		tx->len = sizeof(*out) + sizeof(*d_resp);
 	} else if (in->type == AMBA_VIRT_MSG_DMA_TERMINATE_REQ) {
 		struct amba_virt_dma_terminate *d_req;

@@ -61,6 +61,8 @@ int virt_dma_handle_slave_cfg(uint32_t cid,
  * Returns response payload size, or 0 on error.
  */
 int virt_dma_handle_submit(uint32_t cid,
+                           int host_fd,
+                           uint64_t tenant_phys_base,
                            size_t ivshmem_size,
                            const struct amba_virt_dma_submit *req,
                            struct amba_virt_dma_submit *resp);

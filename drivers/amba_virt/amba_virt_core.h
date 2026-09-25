@@ -16,6 +16,7 @@
 #include <linux/wait.h>
 
 struct amba_virt_gdma_copy;
+struct amba_virt_dma_slave_xfer;
 
 #define AMBA_VIRT_MAX_CONNS 8
 
@@ -49,6 +50,8 @@ struct amba_virt_dev {
 	struct mutex shm_lock;	/* serialises the lazy attach */
 	int (*gdma_copy)(struct amba_virt_dev *dev,
 			 struct amba_virt_gdma_copy *copy);
+	int (*dma_slave_xfer)(struct amba_virt_dev *dev,
+			      struct amba_virt_dma_slave_xfer *xfer);
 
 	struct socket *listen_sock;
 	struct amba_virt_conn conns[AMBA_VIRT_MAX_CONNS];

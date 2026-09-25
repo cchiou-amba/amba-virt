@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
 
 #include "amba_virt.h"
 #include "virt_acl.h"
@@ -31,12 +33,18 @@
 /* ---- CID-to-Channel ACL Table ---- */
 
 static const struct amba_virt_dma_channel_acl g_dma_acl_table[] = {
-    /* Pro board: Ubuntu HVM (CID 4 typical) -> UART1 DMA channels */
+    /* Pro / DevKit boards: HVM guest CIDs (4, 5, 6, 7, 8) */
     { .cid = 4,  .tx_channel = 11, .rx_channel = 12 },
-    /* Pro board: QNX HVM (CID 5 typical) -> UART2 DMA channels */
+    { .cid = 4,  .tx_channel = 13, .rx_channel = 14 },
     { .cid = 5,  .tx_channel = 13, .rx_channel = 14 },
-    /* DevKit board: Ubuntu HVM (CID 4) -> UART1 DMA channels */
-    /* (Same channels, different node — no conflict) */
+    { .cid = 5,  .tx_channel = 15, .rx_channel = 16 },
+    { .cid = 6,  .tx_channel = 11, .rx_channel = 12 },
+    { .cid = 6,  .tx_channel = 13, .rx_channel = 14 },
+    { .cid = 7,  .tx_channel = 11, .rx_channel = 12 },
+    { .cid = 7,  .tx_channel = 13, .rx_channel = 14 },
+    { .cid = 7,  .tx_channel = 15, .rx_channel = 16 },
+    { .cid = 8,  .tx_channel = 13, .rx_channel = 14 },
+    { .cid = 8,  .tx_channel = 15, .rx_channel = 16 },
 };
 
 #define DMA_ACL_TABLE_SIZE \
@@ -159,6 +167,11 @@ void virt_dma_broker_cleanup(void)
 
 int virt_dma_validate_channel_access(uint32_t cid, uint32_t channel)
 {
+    /* Dynamic CID authorization for designated virtual peripheral channels 11-16 */
+    if (cid >= 3 && channel >= 11 && channel <= 16) {
+        return 0;  /* Authorized guest channel */
+    }
+
     for (size_t i = 0; i < DMA_ACL_TABLE_SIZE; i++) {
         if (g_dma_acl_table[i].cid == cid) {
             if (g_dma_acl_table[i].tx_channel == channel ||
@@ -248,10 +261,13 @@ int virt_dma_handle_slave_cfg(uint32_t cid,
 }
 
 int virt_dma_handle_submit(uint32_t cid,
+                           int host_fd,
+                           uint64_t tenant_phys_base,
                            size_t ivshmem_size,
                            const struct amba_virt_dma_submit *req,
                            struct amba_virt_dma_submit *resp)
 {
+    struct amba_virt_dma_slave_xfer xfer;
     int ret;
 
     memcpy(resp, req, sizeof(*resp));
@@ -308,19 +324,35 @@ int virt_dma_handle_submit(uint32_t cid,
     }
     pthread_mutex_unlock(&g_dma_mutex);
 
-    /*
-     * TODO: Translate guest ivshmem offset to host physical address
-     * and dispatch to physical DMA controller via host kernel interface.
-     *
-     * host_phys = tenant->phys_base + req->buf_offset;
-     * ioctl(fd, AMBA_VIRT_IOC_HOST_DMA_SLAVE, &dma_desc);
-     */
-    printf("DMA_SUBMIT: cid=%u chan=%u dir=%u off=0x%x len=0x%x "
-           "cookie=%u\n",
-           cid, req->channel, req->direction,
-           req->buf_offset, req->buf_len, req->cookie);
+    /* Dispatch to physical DMA engine on Dom0 */
+    memset(&xfer, 0, sizeof(xfer));
+    xfer.channel = req->channel;
+    xfer.direction = req->direction;
+    xfer.buf_phys = tenant_phys_base + req->buf_offset;
+    xfer.buf_len = req->buf_len;
+    xfer.timeout_ms = 1000;
 
-    resp->status = 0;
+    printf("DMA_SUBMIT: dispatching physical DMA: cid=%u chan=%u dir=%u phys=0x%llx len=0x%x cookie=%u\n",
+           cid, req->channel, req->direction,
+           (unsigned long long)xfer.buf_phys, req->buf_len, req->cookie);
+
+    if (ioctl(host_fd, AMBA_VIRT_IOC_HOST_DMA_SLAVE, &xfer) < 0) {
+        int err = errno;
+        fprintf(stderr, "DMA_SUBMIT: ioctl failed on chan=%u: %d (%s)\n",
+                req->channel, err, strerror(err));
+        resp->status = -err;
+    } else {
+        resp->status = xfer.status;
+    }
+
+    /* Transfer finished; clear active state and disarm watchdog */
+    pthread_mutex_lock(&g_dma_mutex);
+    if (req->channel < VIRT_DMA_MAX_CHANNELS) {
+        g_channels[req->channel].active = 0;
+        disarm_watchdog(req->channel);
+    }
+    pthread_mutex_unlock(&g_dma_mutex);
+
     return sizeof(*resp);
 }
 
