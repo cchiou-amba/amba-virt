@@ -491,7 +491,80 @@ shell commands or configuration scripts over the serial console.
    - 0% packet loss on ping.
    - The ARP table associates `<node-ip>` with the provisioned `<mac-address>`.
 
-### 9.3 Post-Onboarding Remote Management Health Checks
+### 9.3 Configuring Dom0 SSH Access on Newly Provisioned Nodes
+
+By default on a newly provisioned edge node, inbound SSH to the Dom0 host (port 22)
+is blocked by EVE's firewall:
+```text
+ssh: connect to host <node-ip> port 22: Connection refused
+```
+
+#### 9.3.1 Architectural Mechanism in EVE OS
+
+1. **Firewall Reconciler (`dpcreconciler`)**: EVE OS dynamically manages the `INPUT-device`
+   iptables chain. Unless `types.SSHAuthorizedKeys` is non-empty, the reconciler
+   enforces:
+   ```text
+   -A INPUT-device -p tcp -m tcp --dport 22 -m comment --comment "SSH Rule" -j REJECT --reject-with tcp-reset
+   ```
+2. **GlobalConfig Requirement in `zedagent`**: During boot, EVE's configuration loader
+   (`loadGlobalConfigImpl`) checks for the existence of `/config/GlobalConfig/global.json`.
+   If `global.json` is missing, `zedagent` exits early without ingesting
+   `/config/authorized_keys`, leaving `types.SSHAuthorizedKeys` empty, zeroing
+   `/run/authorized_keys`, and leaving the firewall rule in `REJECT`.
+
+To enable SSH access persistently across reboots, `/config/GlobalConfig/global.json`
+and `/config/authorized_keys` must both reside on the `CONFIG` partition.
+
+#### 9.3.2 Persistent Setup via `CONFIG` Partition (`/dev/mmcblk0p4`)
+
+On the target node root console (or by mounting partition 4 before first boot):
+
+```bash
+# 1. Mount partition 4 (CONFIG, vfat)
+mkdir -p /tmp/cfg
+mount -t vfat /dev/mmcblk0p4 /tmp/cfg
+
+# 2. Create GlobalConfig directory and default configuration
+mkdir -p /tmp/cfg/GlobalConfig
+echo '{"GlobalSettings":{},"AgentSettings":{}}' > /tmp/cfg/GlobalConfig/global.json
+chmod 644 /tmp/cfg/GlobalConfig/global.json
+
+# 3. Install authorized SSH public key
+cat << 'EOF' > /tmp/cfg/authorized_keys
+<ssh-public-key-content>
+EOF
+chmod 644 /tmp/cfg/authorized_keys
+
+# 4. Sync and unmount
+sync
+umount /tmp/cfg
+```
+
+#### 9.3.3 Live Activation (Without Reboot)
+
+If the node is currently running and you need immediate SSH access without a reboot:
+
+```bash
+# 1. Populate live authorized keys for the debug container
+cat /config/authorized_keys > /run/authorized_keys
+chmod 600 /run/authorized_keys
+
+# 2. Add immediate firewall accept rule to INPUT-device
+eve exec debug iptables -I INPUT-device 1 -p tcp --dport 22 -j ACCEPT
+```
+
+#### 9.3.4 Verification from Administrative Workstation
+
+From your administrative workstation, verify non-interactive passwordless SSH:
+
+```bash
+ssh <node-ip> "uname -a && uptime && eve version"
+```
+
+---
+
+### 9.4 Post-Onboarding Remote Management Health Checks
 
 Once the node has been onboarded to a controller or when accessing the system via an
 authorized remote management shell, perform comprehensive system health verification:

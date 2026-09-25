@@ -90,13 +90,13 @@ be charged in full by `ivshmemVMMOverhead` or QEMU is OOM-killed.
 
 ## SSH port-forwards
 
-Same mapping the previous instances used. Convenient network access; `eve
-console` / `eve enter` still work. Password is **`ubuntu` / `ubuntu`**.
+Convenient network access; `eve console` / `eve enter` still work. Guest password is **`ubuntu` / `ubuntu`** (or authorized keys). Dom0 host access uses authorized public keys.
 
-| App | Host (edge node) | Guest | Command |
-|---|---|---|---|
-| HVM | TCP **2222** | 22 | `ssh ubuntu@<node-ip> -p 2222` |
-| NOHYPER | TCP **4222** | 22 | `ssh ubuntu@<node-ip> -p 4222` |
+| Role / App | Host (edge node) | Guest / Target | Access / Credentials | Setup Reference |
+|---|---|---|---|---|
+| **Dom0 Host (EVE)** | TCP **22** | 22 (debug container) | SSH Key (`authorized_keys`) | [EVE-Installation.md §9.3](EVE-Installation.md#93-configuring-dom0-ssh-access-on-newly-provisioned-nodes) |
+| **HVM Guest** | TCP **2222** | 22 | `ssh ubuntu@<node-ip> -p 2222` | [§1 Provisioning Recipes](#1-hvm-edge-app) |
+| **NOHYPER Container** | TCP **4222** | 22 | `ssh ubuntu@<node-ip> -p 4222` | [§2 Provisioning Recipes](#2-nohyper-edge-app) |
 
 `eth0` ACL `lport` / `portmapto.appPort` on the edge-app. ACLs are snapshotted
 into the instance at create; updating the bundle afterwards does not change a
