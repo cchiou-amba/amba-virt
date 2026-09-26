@@ -2,7 +2,7 @@
  * devc-seramb.c
  *
  * QNX Neutrino RTOS 8.0 Serial Driver for Ambarella UART Passthrough (/dev/ser3).
- * Operates in FIFO polling mode with interrupts disabled (IER = 0).
+ * Supports Stage-2 MMIO passthrough, native GIC interrupt handling, and FIFO polling.
  *
  * Copyright (C) 2026, Ambarella International LLC
  */
@@ -26,17 +26,13 @@
 #include <sys/procmgr.h>
 #include <hw/inout.h>
 
-#include <pci/pci.h>
-
 #define DRIVER_NAME		"devc-seramb"
 #define DEFAULT_DEV_NAME	"/dev/ser3"
 #define DEFAULT_CLK_HZ		24000000	/* 24 MHz */
 #define DEFAULT_BAUD		115200
-#define DEFAULT_UART3_PHYS	0xffe0019000ULL	/* AHB UART 2 / DT serial3 */
+#define DEFAULT_UART_PHYS	0x804020c000ULL	/* QEMU virt IVSHMEM BAR2 GPA */
+#define DEFAULT_UART_IRQ	0		/* 0: pure polling mode (QEMU FDT omits virtual IRQ routing) */
 #define UART_MAP_SIZE		0x1000		/* 4 KiB */
-
-#define IVSHMEM_VENDOR_ID	0x1af4
-#define IVSHMEM_DEVICE_ID	0x1110
 
 /* ========================================================================== */
 /* Ambarella DesignWare UART Register Offsets (32-bit MMIO)                   */
@@ -90,15 +86,18 @@ typedef struct dev_entry {
 	TTYDEV			tty;
 	uintptr_t		base;
 	uint64_t		phys;
+	int			irq;
+	int			intr_id;
 	unsigned int		clk;
 	unsigned int		baud;
 	bool			running;
+	pthread_t		intr_tid;
 	pthread_t		poll_tid;
 	char			devname[TTY_NAME_MAX];
 	bool			verbose;
 	bool			foreground;
 	bool			dma_enabled;
-	pci_devhdl_t		pci_hdl;
+	bool			use_interrupts;
 } DEV_ENTRY;
 
 static DEV_ENTRY g_amb_dev;
@@ -134,8 +133,12 @@ static void uart_hw_init(DEV_ENTRY *amb)
 		uart_write(amb, 0x02, UART_DMAE_OFFSET);
 	}
 
-	/* 3. Disable all interrupts (pure FIFO polling mode) */
-	uart_write(amb, 0x00, UART_IE_OFFSET);
+	/* 3. Configure Interrupts: enable RX available if interrupt mode enabled */
+	if (amb->use_interrupts) {
+		uart_write(amb, 0x01, UART_IE_OFFSET); /* ERBFI: Enable Received Data Available */
+	} else {
+		uart_write(amb, 0x00, UART_IE_OFFSET);
+	}
 
 	/* 4. Configure Baud Rate & 8N1 */
 	quot = amb->clk / (16 * amb->baud);
@@ -148,13 +151,17 @@ static void uart_hw_init(DEV_ENTRY *amb)
 	uart_write(amb, 0x03, UART_MC_OFFSET);
 
 	if (amb->verbose) {
-		printf("devc-seramb: HW Init complete (US=0x%08x, LS=0x%08x, divisor=%u, DMA=%s)\n",
+		printf("devc-seramb: HW Init complete (US=0x%08x, LS=0x%08x, divisor=%u, IRQ=%d (%s), DMA=%s)\n",
 		       uart_read(amb, UART_US_OFFSET),
 		       uart_read(amb, UART_LS_OFFSET),
 		       quot,
+		       amb->irq,
+		       amb->use_interrupts ? "active" : "polling-fallback",
 		       amb->dma_enabled ? "enabled" : "disabled");
 	}
 }
+
+static pthread_mutex_t g_tx_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int tto(TTYDEV *dev, int action, int arg)
 {
@@ -163,14 +170,20 @@ int tto(TTYDEV *dev, int action, int arg)
 
 	switch (action) {
 	case TTO_DATA:
+	case TTO_EVENT:
 		if (dev->flags & (OHW_PAGED | OSW_PAGED))
 			return 0;
 
+		pthread_mutex_lock(&g_tx_mutex);
+		dev_lock(dev);
 		while ((uart_read(amb, UART_US_OFFSET) & UART_US_TFNF) && (dev->obuf.cnt > 0)) {
 			unsigned char ch = tto_getchar(dev);
 			uart_write(amb, (uint32_t)ch, UART_TH_OFFSET);
 		}
-		return 0;
+		dev_unlock(dev);
+		int status = tto_checkclients(dev);
+		pthread_mutex_unlock(&g_tx_mutex);
+		return status;
 
 	case TTO_STTY:
 		if (dev->baud != amb->baud && dev->baud > 0) {
@@ -190,103 +203,71 @@ int tto(TTYDEV *dev, int action, int arg)
 	}
 }
 
+static void drain_rx_tx(DEV_ENTRY *amb)
+{
+	uint32_t ls = uart_read(amb, UART_LS_OFFSET);
+	uint32_t us = uart_read(amb, UART_US_OFFSET);
+	int events = 0;
+	int count = 0;
+
+	/* Bus float / unmapped guard */
+	if (ls == 0xffffffff || us == 0xffffffff) {
+		return;
+	}
+
+	/* 1. Drain RX FIFO */
+	dev_lock(&amb->tty);
+	while (((ls & UART_LS_DR) || (us & UART_US_RFNE)) && (++count < 256)) {
+		uint32_t ch = uart_read(amb, UART_RB_OFFSET);
+		events |= tti(&amb->tty, (unsigned char)(ch & 0xff));
+		ls = uart_read(amb, UART_LS_OFFSET);
+		us = uart_read(amb, UART_US_OFFSET);
+		if (ls == 0xffffffff || us == 0xffffffff) {
+			break;
+		}
+	}
+	dev_unlock(&amb->tty);
+
+	if (events) {
+		iochar_send_event(&amb->tty);
+	}
+
+	/* 2. Drain TX Buffer through unified thread-safe tto */
+	if (amb->tty.obuf.cnt > 0) {
+		if (tto(&amb->tty, TTO_DATA, 0)) {
+			iochar_send_event(&amb->tty);
+		}
+	}
+}
+
+static void *intr_thread(void *arg)
+{
+	DEV_ENTRY *amb = (DEV_ENTRY *)arg;
+
+	while (amb->running) {
+		int r = InterruptWait(0, NULL);
+		if (r == -1) {
+			delay(10);
+			continue;
+		}
+		drain_rx_tx(amb);
+		InterruptUnmask(amb->irq, amb->intr_id);
+	}
+
+	return NULL;
+}
+
 static void *poll_thread(void *arg)
 {
 	DEV_ENTRY *amb = (DEV_ENTRY *)arg;
 	struct timespec ts = { 0, 1000000 }; /* 1 ms poll interval */
 
 	while (amb->running) {
-		uint32_t ls = uart_read(amb, UART_LS_OFFSET);
-		int events = 0;
-
-		/* 1. Poll & Drain RX FIFO */
-		while (ls & UART_LS_DR) {
-			uint32_t ch = uart_read(amb, UART_RB_OFFSET);
-			dev_lock(&amb->tty);
-			events |= tti(&amb->tty, (unsigned char)(ch & 0xff));
-			dev_unlock(&amb->tty);
-			ls = uart_read(amb, UART_LS_OFFSET);
-		}
-
-		if (events) {
-			iochar_send_event(&amb->tty);
-		}
-
-		/* 2. Poll & Drain TX Buffer */
-		dev_lock(&amb->tty);
-		if (amb->tty.obuf.cnt > 0 && !(amb->tty.flags & (OHW_PAGED | OSW_PAGED))) {
-			while ((uart_read(amb, UART_US_OFFSET) & UART_US_TFNF) && (amb->tty.obuf.cnt > 0)) {
-				unsigned char ch = tto_getchar(&amb->tty);
-				uart_write(amb, (uint32_t)ch, UART_TH_OFFSET);
-			}
-		}
-		dev_unlock(&amb->tty);
-
+		drain_rx_tx(amb);
 		nanosleep(&ts, NULL);
 	}
 
 	return NULL;
-}
-
-static uint64_t discover_ivshmem_bar2(void)
-{
-	pci_bdf_t bdf;
-	int idx, bar;
-	uint32_t bar_val[6];
-	uint64_t target_bar = 0;
-	pci_bdf_t target_bdf = PCI_BDF_NONE;
-
-	for (idx = 0; ; idx++) {
-		bdf = pci_device_find(idx, IVSHMEM_VENDOR_ID, IVSHMEM_DEVICE_ID, PCI_CCODE_ANY);
-		if (bdf == PCI_BDF_NONE)
-			break;
-
-		for (bar = 0; bar < 6; bar++) {
-			bar_val[bar] = 0;
-			pci_device_cfg_rd32(bdf, 0x10 + bar * 4, &bar_val[bar]);
-		}
-
-		if (g_amb_dev.verbose) {
-			printf("devc-seramb: PCI dev idx %d (BDF 0x%x): BAR0=0x%08x BAR1=0x%08x BAR2=0x%08x BAR3=0x%08x\n",
-			       idx, bdf, bar_val[0], bar_val[1], bar_val[2], bar_val[3]);
-		}
-
-		/* The UART ivshmem device has Doorbell registers at BAR0 and MMIO at BAR2 */
-		if (idx == 1 || (bar_val[1] != 0 && bar_val[1] != 0xffffffff)) {
-			/* Check BAR 2 (64-bit BAR: BAR2 low + BAR3 high) */
-			uint64_t addr = ((uint64_t)bar_val[3] << 32) | (bar_val[2] & ~0xfULL);
-			if (addr == 0 && bar_val[2] != 0) {
-				addr = bar_val[2] & ~0xfULL;
-			}
-			if (addr != 0) {
-				target_bar = addr;
-				target_bdf = bdf;
-			}
-		}
-	}
-
-	if (target_bar != 0) {
-		pci_err_t err;
-		g_amb_dev.pci_hdl = pci_device_attach(target_bdf, pci_attachFlags_e_OWNER | pci_attachFlags_e_MULTI, &err);
-		if (!g_amb_dev.pci_hdl)
-			g_amb_dev.pci_hdl = pci_device_attach(target_bdf, pci_attachFlags_e_OWNER, &err);
-		if (g_amb_dev.pci_hdl) {
-			uint16_t cmd = 0;
-			pci_device_cfg_rd16(target_bdf, 0x04, &cmd);
-			cmd |= 0x06; /* Memory Space Enable | Bus Master */
-			pci_device_cfg_wr16(g_amb_dev.pci_hdl, 0x04, cmd, NULL);
-			if (g_amb_dev.verbose)
-				printf("devc-seramb: Enabled PCI Memory Space (CMD=0x%04x) on BDF 0x%x\n", cmd, target_bdf);
-		}
-
-		if (g_amb_dev.verbose) {
-			printf("devc-seramb: Matched UART3 ivshmem BAR at 0x%llx (BDF 0x%x)\n",
-			       (unsigned long long)target_bar, target_bdf);
-		}
-		return target_bar;
-	}
-
-	return 0;
 }
 
 static void print_usage(const char *prog)
@@ -296,7 +277,8 @@ static void print_usage(const char *prog)
 	printf("  -p, --port <name>     Device name to register (default: %s)\n", DEFAULT_DEV_NAME);
 	printf("  -b, --baud <rate>     Baud rate (default: %u)\n", DEFAULT_BAUD);
 	printf("  -c, --clk <hz>        UART reference clock in Hz (default: %u)\n", DEFAULT_CLK_HZ);
-	printf("  -a, --phys <hex>      Physical MMIO aperture address\n");
+	printf("  -a, --phys <hex>      Physical MMIO aperture address (default: 0x%08llx)\n", DEFAULT_UART_PHYS);
+	printf("  -i, --irq <num>       Interrupt vector (default: %d, 0 to disable)\n", DEFAULT_UART_IRQ);
 	printf("  -D, --no-dma          Disable DMA acceleration (use pure PIO)\n");
 	printf("  -f, --foreground      Run in foreground (do not daemonize)\n");
 	printf("  -v, --verbose         Enable verbose debugging output\n");
@@ -312,6 +294,7 @@ int main(int argc, char **argv)
 		{"baud",       required_argument, NULL, 'b'},
 		{"clk",        required_argument, NULL, 'c'},
 		{"phys",       required_argument, NULL, 'a'},
+		{"irq",        required_argument, NULL, 'i'},
 		{"no-dma",     no_argument,       NULL, 'D'},
 		{"foreground", no_argument,       NULL, 'f'},
 		{"verbose",    no_argument,       NULL, 'v'},
@@ -323,9 +306,12 @@ int main(int argc, char **argv)
 	strncpy(g_amb_dev.devname, DEFAULT_DEV_NAME, sizeof(g_amb_dev.devname) - 1);
 	g_amb_dev.clk = DEFAULT_CLK_HZ;
 	g_amb_dev.baud = DEFAULT_BAUD;
-	g_amb_dev.dma_enabled = true; /* Default: DMA acceleration enabled */
+	g_amb_dev.phys = DEFAULT_UART_PHYS;
+	g_amb_dev.irq = DEFAULT_UART_IRQ;
+	g_amb_dev.intr_id = -1;
+	g_amb_dev.dma_enabled = false; /* Default: PIO polling mode */
 
-	while ((opt = getopt_long(argc, argv, "p:b:c:a:Dfv?", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:b:c:a:i:Dfv?", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p':
 			strncpy(g_amb_dev.devname, optarg, sizeof(g_amb_dev.devname) - 1);
@@ -338,6 +324,9 @@ int main(int argc, char **argv)
 			break;
 		case 'a':
 			g_amb_dev.phys = strtoull(optarg, NULL, 0);
+			break;
+		case 'i':
+			g_amb_dev.irq = (int)strtol(optarg, NULL, 0);
 			break;
 		case 'D':
 			g_amb_dev.dma_enabled = false;
@@ -355,14 +344,10 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* 1. Resolve UART physical MMIO aperture */
-	if (g_amb_dev.phys == 0) {
-		uint64_t bar2_phys = discover_ivshmem_bar2();
-		if (bar2_phys != 0) {
-			g_amb_dev.phys = bar2_phys;
-		} else {
-			g_amb_dev.phys = DEFAULT_UART3_PHYS;
-		}
+	/* 1. Request I/O privileges for hardware MMIO and interrupt handling */
+	if (ThreadCtl(_NTO_TCTL_IO, 0) == -1) {
+		fprintf(stderr, "devc-seramb: Failed to obtain I/O privileges: %s\n", strerror(errno));
+		return EXIT_FAILURE;
 	}
 
 	/* 2. Map UART aperture into process virtual address space */
@@ -379,22 +364,41 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	/* 3. Initialize QNX io-char TTY controller */
+	/* 3. Attach hardware interrupt if requested */
+	g_amb_dev.use_interrupts = false;
+	if (g_amb_dev.irq > 0) {
+		struct sigevent event;
+		SIGEV_INTR_INIT(&event);
+		g_amb_dev.intr_id = InterruptAttachEvent(g_amb_dev.irq, &event, _NTO_INTR_FLAGS_TRK_MSK);
+		if (g_amb_dev.intr_id == -1) {
+			fprintf(stderr, "devc-seramb: Warning: InterruptAttachEvent(irq=%d) failed: %s; using polling fallback\n",
+				g_amb_dev.irq, strerror(errno));
+		} else {
+			g_amb_dev.use_interrupts = true;
+			if (g_amb_dev.verbose) {
+				printf("devc-seramb: Attached interrupt vector %d (intr_id=%d)\n",
+				       g_amb_dev.irq, g_amb_dev.intr_id);
+			}
+		}
+	}
+
+	/* 4. Initialize QNX io-char TTY controller */
 	ttyctrl.dpp = dispatch_create();
 	if (!ttyctrl.dpp) {
 		fprintf(stderr, "devc-seramb: dispatch_create failed: %s\n", strerror(errno));
 		return EXIT_FAILURE;
 	}
 	ttyctrl.max_devs = 16;
+	ttyctrl.perm = 0666;
 	if (g_amb_dev.foreground)
 		ttyctrl.flags |= NODAEMONIZE;
 
 	ttc(TTC_INIT_PROC, &ttyctrl, 0);
 
 	{
-		unsigned int isize = 2048;
-		unsigned int osize = 2048;
-		unsigned int csize = 256;
+		unsigned int isize = 4096;
+		unsigned int osize = 16384;
+		unsigned int csize = 1024;
 
 		g_amb_dev.tty.ibuf.buff = malloc(isize);
 		g_amb_dev.tty.ibuf.head = g_amb_dev.tty.ibuf.buff;
@@ -414,41 +418,53 @@ int main(int argc, char **argv)
 		g_amb_dev.tty.highwater = isize - 32;
 		g_amb_dev.tty.baud = g_amb_dev.baud;
 		g_amb_dev.tty.c_cflag = CS8 | CREAD | CLOCAL;
-		g_amb_dev.tty.c_iflag = ICRNL | IXON;
+		g_amb_dev.tty.c_iflag = ICRNL;
 		g_amb_dev.tty.c_lflag = ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN;
 		g_amb_dev.tty.c_oflag = OPOST | ONLCR;
 		g_amb_dev.tty.verbose = g_amb_dev.verbose ? 1 : 0;
-		snprintf(g_amb_dev.tty.name, sizeof(g_amb_dev.tty.name), "%s", g_amb_dev.devname);
+		int unit = 3;
+		char *p = strstr(g_amb_dev.devname, "ser");
+		if (p && *(p + 3) >= '0' && *(p + 3) <= '9') {
+			unit = atoi(p + 3);
+		}
+		snprintf(g_amb_dev.tty.name, sizeof(g_amb_dev.tty.name), "/dev/ser");
 
 		ttc(TTC_INIT_CC, &g_amb_dev.tty, 0);
-		ttc(TTC_INIT_EDIT, &g_amb_dev.tty, 0);
-		ttc(TTC_INIT_TTYNAME, &g_amb_dev.tty, USE_GENERIC_CLASS | NUMBER_DEV_FROM_USER);
+		ttc(TTC_INIT_TTYNAME, &g_amb_dev.tty, NUMBER_DEV_FROM_USER | SET_NAME_NUMBER(unit));
+		ttc(TTC_INIT_ATTACH, &g_amb_dev.tty, 0);
 	}
 
-	ttc(TTC_INIT_ATTACH, &g_amb_dev.tty, 0);
-
-	/* 4. Initialize hardware UART */
+	/* 5. Initialize hardware UART */
 	uart_hw_init(&g_amb_dev);
 
-	/* 5. Start background 1 ms FIFO poller thread */
+	/* 6. Start background worker threads */
 	g_amb_dev.running = true;
+	if (g_amb_dev.use_interrupts) {
+		if (pthread_create(&g_amb_dev.intr_tid, NULL, intr_thread, &g_amb_dev) != 0) {
+			fprintf(stderr, "devc-seramb: Failed to create interrupt thread: %s\n", strerror(errno));
+			return EXIT_FAILURE;
+		}
+	}
 	if (pthread_create(&g_amb_dev.poll_tid, NULL, poll_thread, &g_amb_dev) != 0) {
 		fprintf(stderr, "devc-seramb: Failed to create poll thread: %s\n", strerror(errno));
 		return EXIT_FAILURE;
 	}
 
-	printf("devc-seramb: Ambarella UART Passthrough registered at %s (MMIO 0x%llx, %u baud, polling 1ms)\n",
-	       g_amb_dev.devname, (unsigned long long)g_amb_dev.phys, g_amb_dev.baud);
+	printf("devc-seramb: Ambarella UART Passthrough registered at %s (MMIO 0x%llx, IRQ %d (%s), %u baud)\n",
+	       g_amb_dev.devname, (unsigned long long)g_amb_dev.phys, g_amb_dev.irq,
+	       g_amb_dev.use_interrupts ? "interrupt+poll" : "polling", g_amb_dev.baud);
 	fflush(stdout);
 
-	/* 6. Start io-char event loop */
+	/* 7. Start io-char event loop */
 	ttc(TTC_INIT_START, &ttyctrl, 0);
 
 	g_amb_dev.running = false;
+	if (g_amb_dev.use_interrupts && g_amb_dev.intr_id != -1) {
+		InterruptDetach(g_amb_dev.intr_id);
+		pthread_join(g_amb_dev.intr_tid, NULL);
+	}
 	pthread_join(g_amb_dev.poll_tid, NULL);
 	munmap_device_memory((void *)g_amb_dev.base, UART_MAP_SIZE);
-	if (g_amb_dev.pci_hdl)
-		pci_device_detach(g_amb_dev.pci_hdl);
 
 	return EXIT_SUCCESS;
 }

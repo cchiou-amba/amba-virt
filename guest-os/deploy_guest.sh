@@ -233,23 +233,22 @@ case "${DISTRO}" in
             done
             run_remote "cp /data/tmp/amba_staging/*.so* /system/lib/ 2>/dev/null || true"
             run_remote "cp /data/tmp/amba_staging/* /system/bin/ 2>/dev/null || true"
-            run_remote "chmod +x /system/bin/amba* /system/bin/cavalry* /system/bin/devc-ser* 2>/dev/null || true"
+            run_remote "chmod +x /system/bin/amba* /system/bin/cavalry* /system/bin/devc-ser* /system/bin/qnx* 2>/dev/null || true"
         fi
-
 
         # 3. Reload QNX resource managers if requested
         if [ "${RELOAD}" -eq 1 ]; then
             log_step "Restarting QNX resource managers on ${TARGET_NODE}..."
             run_remote "slay -f qnx-getty qnx-serial-console.sh amba-virt-resmgr amba-cavalry-resmgr devc-ser8250 devc-seramb 2>/dev/null || true"
             run_remote "if [ -x /system/bin/amba-virt-resmgr ]; then /system/bin/amba-virt-resmgr >/dev/null 2>&1 & fi"
-            run_remote "if [ -x /system/bin/devc-seramb ]; then /system/bin/devc-seramb -p /dev/ser3 >/dev/null 2>&1 & elif [ -x /system/bin/devc-ser8250 ]; then /system/bin/devc-ser8250 -e -F -b115200 0xffe0019000 >/dev/null 2>&1 & fi"
+            run_remote "if [ -x /system/bin/devc-seramb ]; then /system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144 >/dev/null 2>&1 & elif [ -x /system/bin/devc-ser8250 ]; then /system/bin/devc-ser8250 -e -b115200 -c24000000/16 -u3 0x0c000000^2,144 >/dev/null 2>&1 & fi"
         fi
 
         # 4. Enable QNX interactive login console if requested
         if [ "${ENABLE_SERIAL}" -eq 1 ]; then
             log_step "Configuring QNX interactive console on /dev/ser3 (with auto-respawn)..."
             run_remote "slay -f qnx-getty qnx-serial-console.sh 2>/dev/null || true"
-            run_remote "if [ -x /system/bin/qnx-getty ]; then /system/bin/qnx-getty /dev/ser3 >/dev/null 2>&1 & echo 'Interactive auto-respawn getty daemon active on /dev/ser3'; elif [ -x /system/bin/qnx-serial-console.sh ]; then /system/bin/qnx-serial-console.sh /dev/ser3 >/dev/null 2>&1 & echo 'Interactive auto-respawn console supervisor active on /dev/ser3'; fi"
+            run_remote "if [ -x /system/bin/qnx-serial-console.sh ]; then /system/bin/qnx-serial-console.sh /dev/ser3 >/dev/null 2>&1 & echo 'Interactive auto-respawn console supervisor active on /dev/ser3'; elif [ -x /system/bin/qnx-getty ]; then /system/bin/qnx-getty /dev/ser3 >/dev/null 2>&1 & echo 'Interactive auto-respawn getty daemon active on /dev/ser3'; fi"
         fi
 
 

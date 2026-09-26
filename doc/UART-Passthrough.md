@@ -99,19 +99,30 @@ Cross-referenced against the CV3-AD655 Hardware Programming Reference Manual, Da
 
 ## 5. QNX Neutrino 8.0 Guest Subsystem
 
-### 5.1 Serial Driver (`devc-seramb`)
+### 5.1 Stage-2 Hardware Virtualization Mapping
+Under QEMU `virt` platform-bus virtualization with host `vfio-platform` / IVSHMEM-doorbell device assignment:
+- **Host Physical Device:** `ffe0019000.uart` (UART3, 4 KiB, GIC SPI 116 / INTID 148, SMIO 5..8 pinmux).
+- **Guest Stage-2 GPA Aperture:** `0x804020c000 - 0x804020cfff` (4 KiB page-aligned MMIO aperture assigned via IVSHMEM BAR2 on PCI Bus 0 Dev 7 Fn 0).
+- **Interrupt Routing (vGIC Status):** In QEMU FDT mode, platform-bus devices lack child interrupt bindings, and virtual IRQ 144 (SPI 112) is unrouted. Interrupt-driven drivers (`devc-ser8250`) cannot receive RX events.
+- **Physical Serial Wire:** Routes to CH9344 Port 2 (`ttyCH9344USB10` on Devkit / `ttyCH9344USB2` on Pro), exposed via terminal server **`rhino:6072`**.
+
+### 5.2 Serial Driver (`devc-seramb`)
 - **Location:** [`guest-os/qnx/amba-uart/devc-seramb.c`](../guest-os/qnx/amba-uart/devc-seramb.c)
 - **Framework:** Native QNX `io-char` character device library (`libio-char.a`, `<sys/io-char.h>`).
-- **MMIO Aperture Discovery:** Maps the 4 KiB UART register aperture (`0x0c001000` / `0x804020c000`) into guest virtual space using `mmap_device_memory()`.
-- **FIFO Polling Thread:** 1 ms thread polling `UART_LS_DR` / `UART_RFL` for RX (feeding `tti()` and signaling `iochar_send_event()`) and draining `tty.obuf` into `UART_TH_OFFSET` when `UART_US_TFNF` is asserted.
-- **Line Discipline & Newline Translation:** Configures POSIX termios flags (`c_oflag = OPOST | ONLCR`, `c_iflag = ICRNL | IXON`, `c_lflag = ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN`) and calls `ttc(TTC_INIT_EDIT)` to eliminate terminal staircasing.
-- **Namespace Registration:** Registers device node `/dev/ser3`.
+- **MMIO Aperture Discovery:** Maps Stage-2 GPA `0x804020c000` via `mmap_device_memory(0x804020c000, 0x1000, PROT_READ|PROT_WRITE|PROT_NOCACHE)`.
+- **Autonomous Polling Engine:** Operates via a dedicated 1 ms `poll_thread()` that continuously drains the DesignWare RX FIFO (`UART_RBR`) into `tti()` and transmits TX characters (`UART_THR`), completely decoupled from unrouted virtual interrupts (`-i 0` default). Includes bus-float checks (`0xffffffff`) and iteration bounds to prevent CPU starvation.
+- **Resource Manager Registration (`io-char`):**
+  - Sets `ttyctrl.perm = 0666;` prior to `ttc(TTC_INIT_PROC)` for full user permissions.
+  - Registers device name and unit via `ttc(TTC_INIT_TTYNAME, &dev->tty, NUMBER_DEV_FROM_USER | SET_NAME_NUMBER(unit))` for `/dev/ser3`.
+  - **Negative Constraint:** Calling `ttc(TTC_INIT_EDIT)` is strictly avoided—in QNX 8.0 `io-char`, `TTC_INIT_EDIT` treats the argument as an edit-options buffer, overwriting `iofunc_attr_t` flags at offset `0x20` and triggering `EINVAL` on `stat()`/`open()`.
+- **CLI Options:** Supports `-p <device>`, `-a <phys_addr>`, `-i <irq>`, `-b <baud>`, `-c <clk>`, `-v` (verbose).
 
-### 5.2 Getty & Session Supervisor (`qnx-getty`)
+### 5.3 Getty Supervisor (`qnx-getty`)
 - **Location:** [`guest-os/qnx/amba-uart/qnx-getty.c`](../guest-os/qnx/amba-uart/qnx-getty.c)
-- **Session Leadership:** Implements `fork()` + `setsid()` so `/dev/ser3` is acquired as the true controlling terminal (`/dev/tty`).
-- **Job Control:** Establishes a valid process group with full job control (`Ctrl-C`, `Ctrl-Z`, `fg`, `bg`) without warnings.
-- **Auto-Respawn:** Launches `/system/bin/login -f root` and automatically catches session termination (`waitpid()`), immediately presenting a fresh prompt upon `# exit` or logout.
+- **Single Supervisor Ownership:** Strictly replaces competing while-true shell scripts and default `/system/bin/login` (which deadlocks in raw non-echoing mode).
+- **Line Discipline:** Configures POSIX termios flags: `CS8 | CREAD | CLOCAL`, `ICRNL | IXON`, `OPOST | ONLCR`, `ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN` at 115,200 baud.
+- **Session Leadership & Controlling TTY:** Calls `setsid()` to establish a clean session leader and acquires `/dev/ser3` as the controlling terminal (`/dev/tty`), ensuring full POSIX job control.
+- **Welcome Banner & Auto-Respawn:** Emits a welcome banner and spawns `/proc/boot/sh -l`. Monitors child exit via `waitpid()` and immediately auto-respawns a fresh session upon logout.
 
 ---
 
@@ -163,13 +174,15 @@ sudo cat /proc/tty/driver/amba_uart
 
 #### On QNX HVM:
 ```bash
-# Check running driver and getty processes:
-pidin -p devc-seramb
-pidin -p qnx-getty
+# Check running serial driver and login supervisor:
+pidin | grep -E "devc-ser|login|sh|qnx"
+
+# Check interrupt vector 144 (0x90):
+pidin irqs | grep 0x90
 
 # Check registered serial device:
-ls -l /dev/ser*
-# Expected: /dev/ser1, /dev/ser3
+ls -la /dev/ser*
+# Expected: /dev/ser1, /dev/ser3 (crw-rw-rw-)
 ```
 
 ---
@@ -179,17 +192,22 @@ ls -l /dev/ser*
 1. **Host vfio-platform Device Contention (`-EBUSY` on Domain Start):**
    - If QEMU fails to bind `vfio-platform` with `-EBUSY`, ensure no host driver is bound to the target UART device node in Dom0:
      ```bash
-     # Unbind from host serial driver and bind to vfio-platform:
+     # For UART2 (0xffe0018000, Ubuntu HVM):
      echo ffe0018000.uart > /sys/bus/platform/drivers/amba-uart/unbind 2>/dev/null || true
      echo vfio-platform > /sys/bus/platform/devices/ffe0018000.uart/driver_override
      echo ffe0018000.uart > /sys/bus/platform/drivers/vfio-platform/bind
+
+     # For UART3 (0xffe0019000, QNX HVM):
+     echo ffe0019000.uart > /sys/bus/platform/drivers/amba-uart/unbind 2>/dev/null || true
+     echo vfio-platform > /sys/bus/platform/devices/ffe0019000.uart/driver_override
+     echo ffe0019000.uart > /sys/bus/platform/drivers/vfio-platform/bind
      ```
 2. **Duplicate Readers on QNX Console:**
-   - Slay all old instances before starting a new getty:
+   - Slay all old instances before starting a new driver or console supervisor:
      ```bash
-     slay -f qnx-getty qnx-serial-console.sh devc-seramb
-     /system/bin/devc-seramb -p /dev/ser3 &
-     /system/bin/qnx-getty /dev/ser3 &
+     slay -f qnx-getty qnx-serial-console.sh devc-ser8250 devc-seramb 2>/dev/null || true
+     /system/bin/devc-ser8250 -e -b115200 -c24000000/16 -u3 0x0c000000^2,144 &
+     /system/bin/qnx-serial-console.sh /dev/ser3 &
      ```
 
 ---

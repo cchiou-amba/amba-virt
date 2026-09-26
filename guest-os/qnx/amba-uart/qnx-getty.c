@@ -47,19 +47,34 @@ int main(int argc, char **argv)
 				close(fd);
 			}
 
+			/* Acquire controlling terminal for this session */
+			tcsetsid(STDIN_FILENO, getpid());
+			tcsetpgrp(STDIN_FILENO, getpid());
+
 			/* Configure standard interactive termios */
 			struct termios tio;
 			if (tcgetattr(STDIN_FILENO, &tio) == 0) {
+				tio.c_cflag &= ~(IHFLOW | OHFLOW | CSIZE | PARENB | PARODD | CSTOPB);
 				tio.c_cflag |= (CS8 | CREAD | CLOCAL);
-				tio.c_iflag |= (ICRNL | IXON);
+				tio.c_iflag |= ICRNL;
+				tio.c_iflag &= ~(IXON | IXOFF);
 				tio.c_oflag |= (OPOST | ONLCR);
 				tio.c_lflag |= (ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN);
 				tcsetattr(STDIN_FILENO, TCSANOW, &tio);
 			}
 
-			/* Launch login session */
+			/* Set environment */
+			setenv("TERM", "qansi", 1);
+			setenv("HOME", "/root", 1);
+			setenv("USER", "root", 1);
+			setenv("SHELL", "/proc/boot/sh", 1);
+
+			/* Print welcome banner to console */
+			dprintf(STDOUT_FILENO, "\r\nQNX Neutrino RTOS 8.0 (Ambarella CV3-AD655)\r\nTerminal: %s\r\n\r\n", dev);
+
+			/* Launch interactive root login shell directly */
+			execl("/proc/boot/sh", "sh", "-l", (char *)NULL);
 			execl("/system/bin/login", "login", "-f", "root", (char *)NULL);
-			execl("/proc/boot/sh", "sh", "-i", (char *)NULL);
 			_exit(1);
 		} else if (pid > 0) {
 			/* Parent supervisor: wait for session to exit */

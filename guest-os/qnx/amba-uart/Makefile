@@ -8,7 +8,7 @@
 
 CC = qcc -Vgcc_ntoaarch64le
 CFLAGS = -O2 -Wall -Wextra -D_QNX_SOURCE -I.
-LDFLAGS = -lio-char -lsecpol -lsmmu -lpci -lsocket
+LDFLAGS = -lio-char -lsecpol -lsmmu -lsocket
 
 TARGETS = devc-seramb qnx-getty
 
