@@ -102,8 +102,7 @@ Cross-referenced against the CV3-AD655 Hardware Programming Reference Manual, Da
 ### 5.1 Serial Driver (`devc-seramb`)
 - **Location:** [`guest-os/qnx/amba-uart/devc-seramb.c`](../guest-os/qnx/amba-uart/devc-seramb.c)
 - **Framework:** Native QNX `io-char` character device library (`libio-char.a`, `<sys/io-char.h>`).
-- **PCI Discovery:** Scans the PCI hierarchy using `pci_device_cfg_rd32`, matches `UART3-dev` (BDF `0x38`) by verifying Doorbell BAR 0 and MMIO BAR 2 (GPA `0x804020c000`), enables PCI Memory Space decoding (`cmd |= 0x06`), and retains the `pci_devhdl_t` handle.
-- **MMIO Mapping:** Maps the 4 KiB register aperture using `mmap_device_memory()`.
+- **MMIO Aperture Discovery:** Maps the 4 KiB UART register aperture (`0x0c001000` / `0x804020c000`) into guest virtual space using `mmap_device_memory()`.
 - **FIFO Polling Thread:** 1 ms thread polling `UART_LS_DR` / `UART_RFL` for RX (feeding `tti()` and signaling `iochar_send_event()`) and draining `tty.obuf` into `UART_TH_OFFSET` when `UART_US_TFNF` is asserted.
 - **Line Discipline & Newline Translation:** Configures POSIX termios flags (`c_oflag = OPOST | ONLCR`, `c_iflag = ICRNL | IXON`, `c_lflag = ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN`) and calls `ttc(TTC_INIT_EDIT)` to eliminate terminal staircasing.
 - **Namespace Registration:** Registers device node `/dev/ser3`.
@@ -177,13 +176,13 @@ ls -l /dev/ser*
 
 ## 8. Troubleshooting
 
-1. **Host Port In Use (`-EBUSY` on server restart):**
-   - If `amba_virt_uart_server` fails with `-EBUSY`, QEMU is still holding the character device descriptor.
-   - Stop the domain before restarting the server:
+1. **Host vfio-platform Device Contention (`-EBUSY` on Domain Start):**
+   - If QEMU fails to bind `vfio-platform` with `-EBUSY`, ensure no host driver is bound to the target UART device node in Dom0:
      ```bash
-     ./scripts/restart_instance.sh <domain-name> --stop
-     setsid ./amba_virt_uart_server -u all -f </dev/null >uart_server.log 2>&1 &
-     ./scripts/restart_instance.sh <domain-name> --start
+     # Unbind from host serial driver and bind to vfio-platform:
+     echo ffe0018000.uart > /sys/bus/platform/drivers/amba-uart/unbind 2>/dev/null || true
+     echo vfio-platform > /sys/bus/platform/devices/ffe0018000.uart/driver_override
+     echo ffe0018000.uart > /sys/bus/platform/drivers/vfio-platform/bind
      ```
 2. **Duplicate Readers on QNX Console:**
    - Slay all old instances before starting a new getty:
@@ -246,13 +245,12 @@ The hardware passthrough architecture minimizes virtualization overhead by elimi
 
 | Transit Stage | Path / Mechanism | Analytical Estimate | Model Rationale |
 |---|---|---|---|
-| **1. MMIO Register Access** | PCI BAR 2 Direct Passthrough | **0.00 µs (0 traps)** | Direct KVM Stage-2 1:1 physical page mapping into guest address space. Direct read/write to physical DesignWare registers without VM exit. |
+| **1. MMIO Register Access** | Stage-2 `vfio-platform` Direct Passthrough | **0.00 µs (0 traps)** | Direct KVM Stage-2 1:1 physical page mapping into guest address space. Direct read/write to physical DesignWare registers without VM exit. |
 | **2. Physical RX Interrupt** | UART RX FIFO Threshold $\rightarrow$ Host GIC SPI 115 | ~1.20 µs | Physical hardware interrupt propagation from UART peripheral into ARM Cortex-A76 core. |
-| **3. Host Dom0 ISR** | `amba_virt_uart.ko` Mask & Notify | ~2.50 µs | Dom0 ISR masks SPI 115 in GIC and writes to kernel eventfd (`eventfd_signal`). |
-| **4. QEMU irqfd Routing** | `ivshmem-doorbell` $\rightarrow$ KVM GICv2m GSI | ~3.80 µs | In-kernel QEMU `ivshmem` irqfd bypass injects MSI-X message via KVM GICv2m without userspace QEMU process context switch. |
-| **5. Guest vGIC Injection** | vGIC List Register $\rightarrow$ Guest vCPU | ~1.50 µs | ARM virtual CPU interface asserts virtual IRQ 70 into guest execution context. |
-| **Model IRQ Transit Total** | **Physical Pin $\rightarrow$ Guest ISR Entry** | **~9.00 µs** | Analytical propagation budget, well within the 86.8 µs per-character transmission window at 115,200 baud. |
-| **6. Reverse Doorbell ACK** | Guest BAR 0 Write (`0x00010000`) $\rightarrow$ Host Unmask | ~5.90 µs | Guest ISR writes ACK token to BAR 0 offset `0x0c`. QEMU unmasks physical SPI 115 via `AMBA_VIRT_UART_IOC_ACK_IRQ`. |
+| **3. Host VFIO & KVM Routing** | `vfio-platform` $\rightarrow$ KVM `irqfd` | ~1.50 µs | Kernel VFIO eventfd notification triggers KVM irqfd directly in kernel space without hypervisor context switch. |
+| **4. Level IRQ Resampling** | GICv2 `resamplefd` in-kernel bypass | ~0.80 µs | Level-sensitive line deassertion automatically managed by KVM irqchip on guest EOI, eliminating userspace ACK round trips. |
+| **5. Guest vGIC Injection** | vGIC List Register $\rightarrow$ Guest vCPU | ~1.00 µs | ARM virtual CPU interface asserts virtual IRQ (GSI 144 / vIRQ 50) into guest execution context. |
+| **Model IRQ Transit Total** | **Physical Pin $\rightarrow$ Guest ISR Entry** | **~4.50 µs** | Analytical propagation budget, well within the 86.8 µs per-character transmission window at 115,200 baud. |
 
 ---
 

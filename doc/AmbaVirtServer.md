@@ -140,16 +140,17 @@ Rather than provisioning separate PCI apertures for each virtualized peripheral,
 
 The server architecture distinguishes between two UART modes:
 
-1. **True MMIO Passthrough (Target Architecture)**:
+1. **True MMIO Passthrough (Production Standard)**:
    - UART MMIO and physical IRQs bypass `amba-virt-server` and NOHYPER completely.
    - Assigned directly via `vfio-platform` to the guest Stage-2 page table.
    - Physical GIC SPI 115 is handled via in-kernel KVM `irqfd` and `resamplefd`,
      eliminating userspace doorbell ACK round-trips and eventfd proxy latency.
 
-2. **IVSHMEM-Doorbell Emulated Proxy (Legacy Baseline)**:
-   - Dom0 `amba_virt_uart.ko` and `amba_virt_uart_server` provide an emulated
-     `ivshmem-doorbell` device for initial bringup and rollback qualification.
-   - Retained as a verification baseline until all physical passthrough gates pass.
+2. **IVSHMEM-Doorbell Emulated Proxy (Retired & Deleted)**:
+   - The legacy userspace proxy (`amba_virt_uart_server`) and `amba_virt_uart.ko`
+     have been permanently retired and deleted following successful silicon qualification.
+   - Rollback standard is strictly image-level and package-level; no dual-server
+     runtime path is maintained.
 
 ### 2.4 Split Peripheral DMA Architecture (Dual Windows)
 

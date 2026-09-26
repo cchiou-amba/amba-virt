@@ -17,10 +17,11 @@ delivered Pillar implementation in `eve/pkg/pillar/hypervisor/kvm.go`.
 `estimatedVMMOverhead` accounts for the full window. The corresponding tests
 are in `kvm_ivshmem_test.go`.
 
-UART register MMIO and interrupts are handled independently: the target architecture
-assigns physical UART2 (`0xffe0018000`) directly via `vfio-platform` with KVM
-in-kernel GICv2 level IRQ resampling, while the legacy `ivshmem-doorbell` proxy is
-retained as a qualification and rollback baseline. See [UART-Passthrough.md](UART-Passthrough.md).
+UART register MMIO and interrupts are handled independently: production deployments
+assign physical UART2 (`ffe0018000.uart`) directly via QEMU `vfio-platform` with KVM
+in-kernel GICv2 level IRQ resampling (`resamplefd`) and dynamic ACPI DSDT generation,
+while the legacy userspace proxy (`amba_virt_uart_server`) has been permanently retired.
+See [UART-Passthrough.md](UART-Passthrough.md).
 
 ---
 
@@ -203,45 +204,21 @@ One caveat: `vmmOverhead` consults `VMMMaxMem` and the global `memory.vmm.limit.
 
    So the module is loaded at boot from `/etc/init.d/000-mod-params` and no longer requires its backing file at load time. It registers the character device immediately and attaches the window on first use, re-reading the size each time. That also means a window grown by a model change is picked up on the next open rather than needing a module reload.
 
-### 3.6 Planned UART MMIO and vGIC Extension
+### 3.6 Hardware UART MMIO and vfio-platform Passthrough
 
-The existing bulk window remains `ivshmem-plain`. UART virtualization must not
-silently change its semantics or add UART registers inside the shared DRAM
-allocator.
-
-The planned UART adapter bundle uses `IO_TYPE_OTHER`, empty EVE resource fields,
-exclusive `assigngrp`, and UART-specific `cbattr`. It is not an inert marker:
-it designates a real physical UART through those attributes.
-
-Two parser rules are mandatory:
-
-1. A UART bundle must not also match `ivshmemWindowFromBundle`. Today that
-   function accepts any `IoOther` bundle with empty resource fields and falls
-   back to a 16 MiB `/dev/shm/<logicallabel>` window.
-2. A bulk `amba_shm` marker must not match the UART parser. The parsers must be
-   mutually exclusive on `cbattr` keys and reject a bundle carrying both key
-   sets.
-
-The planned interrupt path is:
+The IVSHMEM architecture is reserved exclusively for shared memory windows:
+the bulk 1 GiB DRAM window (`ivshmem-plain` #1) and the low-DMA32 16 MiB Normal-NC carveout (`ivshmem-plain` #2).
+UART virtualization does not use `ivshmem-doorbell`. Instead, production deployments pass the native peripheral aperture directly via QEMU `vfio-platform`:
 
 ```text
-physical UART IRQ -> Dom0 stub -> eventfd -> ivshmem-doorbell
-                  -> MSI-X -> KVM -> guest vGIC
-guest ISR -> doorbell ACK -> Dom0 stub unmasks physical IRQ
+Host DT node:  ffe0018000.uart (bound to Dom0 vfio-platform)
+QEMU device:   -device vfio-platform,host=ffe0018000.uart
+MMIO mapping:  Direct Stage-2 translation at GPA 0x0c000000 (zero-trap)
+Interrupts:    GIC SPI 115 -> KVM irqfd -> GSI 144 / vIRQ 50 with level resamplefd
+Enumeration:   Dynamic ACPI DSDT generation in virt-acpi-build.c (Device URTx, HID AMBA0001)
 ```
 
-Because the physical IRQ is level-high, the stub masks it before signalling
-and re-enables it only after an owner-validated guest ACK. The stub must not
-read UART cause or data registers.
-
-The doorbell server/socket must be supervised before QEMU starts. The server
-passes the MMIO backing FD and eventfds using the ivshmem server protocol.
-A missing socket, backing, or eventfd must fail domain creation; there is no
-fallback to QEMU `pci-serial`.
-
-Before implementation proceeds, verify on the delivered arm64 KVM that a
-restricted character-device mapping of a UART PFN can back the guest BAR.
-Shared-DRAM ivshmem success does not prove device-MMIO mapping.
+This clean architectural separation ensures IVSHMEM remains focused on high-bandwidth zero-copy DMA buffers, while low-speed register peripherals leverage native ARM64 sysbus virtualization without userspace doorbell proxies.
 
 ---
 
@@ -507,6 +484,6 @@ The bulk `ivshmem-plain` implementation is delivered. Remaining work is:
 
 1. Keep the production model, Pillar tests, and this document synchronized.
 2. Re-run the verification matrix after any EVE/QEMU or model change.
-3. Implement the UART MMIO/doorbell extension in Section 3.6 only after its
-   device-PFN and vGIC feasibility hardstops pass.
+3. Hardware UART passthrough is fully implemented and qualified via native QEMU
+   `vfio-platform` with in-kernel `resamplefd` and dynamic ACPI DSDT generation.
 4. Do not reinterpret the historical 16 MiB PoC output as UART qualification.

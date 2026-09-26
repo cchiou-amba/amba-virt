@@ -40,16 +40,13 @@ Do not attach VisORC to the HVM. `amba_shm` is an `IO_TYPE_OTHER` window
 marker (empty `phyaddrs`); assigning it is what makes `kvm.go` emit
 `ivshmem-plain`. `amba_virt` is `Ifname=/dev/amba_virt` on the host.
 
-Planned UART1/UART2 assignment will add an `IO_TYPE_OTHER` UART adapter bundle
-to the HVM at instance creation. It is distinct from `amba_shm`: the UART
-bundle has empty EVE resource fields but its `cbattr` designates real hardware,
-and Pillar emits an MMIO/doorbell device rather than a bulk DRAM window.
-Current `COM2`/`COM3` entries with `Serial=/dev/ttyS*` produce QEMU
-`pci-serial` and are not that path.
-
-The UART model schema and Pillar implementation are not delivered yet, so the
-commands below intentionally assign only `amba_shm`. Do not add speculative
-UART adapter names or attributes to this operational runbook.
+Production UART hardware passthrough assigns the physical controller via an
+`IO_TYPE_OTHER` adapter bundle (e.g. `{"uart": "2"}`) under `AssignableAdapters`.
+It is distinct from `amba_shm`: the UART adapter designates physical silicon
+(`ffe0018000.uart`) mapped directly into the guest via QEMU `vfio-platform`
+with dynamic ACPI DSDT table generation (`AMBA0001`), rather than a bulk DRAM window.
+Legacy `COM2`/`COM3` entries with `Serial=/dev/ttyS*` produce QEMU `pci-serial`
+and are completely bypassed by hardware passthrough.
 
 **`--adapter=INTF:NAME` takes `logicallabel`, not `assigngrp`.** GPIO is
 `gpio0:gpio0`. Passing group `gpio` is rejected (`model does not have adapter`).
@@ -70,11 +67,9 @@ Control stays on vsock (CID 2, port **5555**, never 2000). Bulk is the BAR.
 A later host allocator hands out non-overlapping slices; Cavalry takes most of
 the pool by quota.
 
-The planned UART register BAR and `ivshmem-doorbell` notification function are
-not allocations from this 1 GiB bulk pool. They carry physical register
-semantics and virtual interrupt delivery, respectively. Do not place UART
-registers inside the bulk allocator or count the notification function as a
-second `amba_shm` data window.
+Physical UART registers are passed via direct Stage-2 `vfio-platform` mapping
+and are completely independent from the 1 GiB bulk DRAM pool and 16 MiB low-DMA32
+carveout. Do not place UART registers inside the shared DRAM allocator.
 
 **16M is PoC-only.** It cannot hold Cavalry tensors or DVI. Host
 `cavalry_reserved` is **12 GB AMA**; the VP DMA-reads those HPAs. ivshmem is

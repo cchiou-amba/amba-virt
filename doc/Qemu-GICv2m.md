@@ -5,6 +5,11 @@
 
 ---
 
+> [!NOTE]
+> **Architectural & Production Context**:
+> This document details the technical root-cause analysis and resolution for PCI MSI-X interrupt delivery under ARM GICv2m for virtual PCIe devices (`ivshmem-doorbell`).
+> In production Ambarella CV3-AD655 deployments, physical UART passthrough has been standardized on direct sysbus `vfio-platform` mapping paired with GICv2 level-sensitive KVM `irqfd`/`resamplefd` (GSI 144 / vIRQ 50) and dynamic ACPI DSDT generation (`AMBA0001`), bypassing PCI and MSI-X translation entirely. This document remains preserved as an authoritative reference for PCIe MSI-X virtualization.
+
 ## 1. Overview & Problem Statement
 
 During physical UART passthrough validation on ARM64 platforms (such as the
