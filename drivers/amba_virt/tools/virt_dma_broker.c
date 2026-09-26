@@ -24,6 +24,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 
 #include "amba_virt.h"
@@ -405,6 +406,156 @@ int virt_dma_handle_terminate(uint32_t cid,
     return sizeof(*resp);
 }
 
+/* ---- Unified Split DMA Forwarding via Lease Devices ---- */
+
+struct cid_lease_binding {
+    uint32_t cid;
+    uint32_t lease_id;
+    int fd;
+    uint64_t last_token_ns;
+    uint32_t op_tokens;
+    uint32_t byte_tokens;
+};
+
+#define MAX_CID_BINDINGS 16
+#define TOKEN_BUCKET_RATE_OPS 2000u
+#define TOKEN_BUCKET_BURST_OPS 64u
+#define TOKEN_BUCKET_RATE_BYTES (50u * 1024u * 1024u)
+#define TOKEN_BUCKET_BURST_BYTES (2u * 1024u * 1024u)
+
+static struct cid_lease_binding g_cid_leases[MAX_CID_BINDINGS];
+static pthread_mutex_t g_cid_lease_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t get_time_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id)
+{
+    int i;
+    pthread_mutex_lock(&g_cid_lease_mutex);
+    for (i = 0; i < MAX_CID_BINDINGS; i++) {
+        if (g_cid_leases[i].cid == cid || g_cid_leases[i].cid == 0) {
+            g_cid_leases[i].cid = cid;
+            g_cid_leases[i].lease_id = lease_id;
+            if (g_cid_leases[i].fd >= 0) {
+                close(g_cid_leases[i].fd);
+                g_cid_leases[i].fd = -1;
+            }
+            g_cid_leases[i].last_token_ns = get_time_ns();
+            g_cid_leases[i].op_tokens = TOKEN_BUCKET_BURST_OPS;
+            g_cid_leases[i].byte_tokens = TOKEN_BUCKET_BURST_BYTES;
+            pthread_mutex_unlock(&g_cid_lease_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_cid_lease_mutex);
+    return -ENOSPC;
+}
+
+static struct cid_lease_binding *get_or_create_cid_binding(uint32_t cid)
+{
+    int i;
+    for (i = 0; i < MAX_CID_BINDINGS; i++) {
+        if (g_cid_leases[i].cid == cid)
+            return &g_cid_leases[i];
+    }
+    /* Auto-bind default lease based on CID: CID 4 -> Lease 0, CID 5 -> Lease 1, etc. */
+    uint32_t default_lease = (cid >= 4 && cid <= 7) ? (cid - 4) : 0;
+    virt_dma_bind_cid_lease(cid, default_lease);
+    for (i = 0; i < MAX_CID_BINDINGS; i++) {
+        if (g_cid_leases[i].cid == cid)
+            return &g_cid_leases[i];
+    }
+    return NULL;
+}
+
+int virt_dma_handle_request(uint32_t cid,
+                            const struct amba_virt_dma_request *req,
+                            struct amba_virt_dma_response *resp)
+{
+    struct cid_lease_binding *b;
+    uint64_t now_ns, elapsed_ns;
+    uint64_t added_ops, added_bytes;
+    char path[64];
+    int ret;
+
+    if (!req || !resp)
+        return -EINVAL;
+
+    memset(resp, 0, sizeof(*resp));
+    resp->cookie = req->cookie;
+
+    pthread_mutex_lock(&g_cid_lease_mutex);
+    b = get_or_create_cid_binding(cid);
+    if (!b) {
+        pthread_mutex_unlock(&g_cid_lease_mutex);
+        resp->status = -ENODEV;
+        return sizeof(*resp);
+    }
+
+    /* Token-bucket replenishment */
+    now_ns = get_time_ns();
+    elapsed_ns = now_ns - b->last_token_ns;
+    b->last_token_ns = now_ns;
+
+    added_ops = (elapsed_ns * TOKEN_BUCKET_RATE_OPS) / 1000000000ULL;
+    if (added_ops > 0) {
+        b->op_tokens += added_ops;
+        if (b->op_tokens > TOKEN_BUCKET_BURST_OPS)
+            b->op_tokens = TOKEN_BUCKET_BURST_OPS;
+    }
+
+    added_bytes = (elapsed_ns * TOKEN_BUCKET_RATE_BYTES) / 1000000000ULL;
+    if (added_bytes > 0) {
+        b->byte_tokens += added_bytes;
+        if (b->byte_tokens > TOKEN_BUCKET_BURST_BYTES)
+            b->byte_tokens = TOKEN_BUCKET_BURST_BYTES;
+    }
+
+    /* Rate limit admission check */
+    if (b->op_tokens < 1 || b->byte_tokens < req->length) {
+        pthread_mutex_unlock(&g_cid_lease_mutex);
+        fprintf(stderr, "EVT-094: DMA rate quota exceeded (cid=%u, op_tokens=%u, byte_tokens=%u)\n",
+                cid, b->op_tokens, b->byte_tokens);
+        resp->status = -EDQUOT;
+        return sizeof(*resp);
+    }
+
+    b->op_tokens -= 1;
+    b->byte_tokens -= req->length;
+
+    /* Open lease FD if not already cached */
+    if (b->fd < 0) {
+        snprintf(path, sizeof(path), "/dev/amba_dma_lease%u", b->lease_id);
+        b->fd = open(path, O_RDWR);
+        if (b->fd < 0) {
+            int err = -errno;
+            pthread_mutex_unlock(&g_cid_lease_mutex);
+            fprintf(stderr, "EVT-095: Failed to open %s: %s\n", path, strerror(-err));
+            resp->status = err;
+            return sizeof(*resp);
+        }
+    }
+
+    /* Forward request through lease-scoped kernel control FD */
+    struct amba_virt_dma_request kernel_req = *req;
+    ret = ioctl(b->fd, AMBA_DMA_IOC_REQUEST, &kernel_req);
+    if (ret < 0) {
+        resp->status = -errno;
+        resp->transferred = 0;
+    } else {
+        resp->status = 0;
+        resp->transferred = req->length;
+    }
+
+    pthread_mutex_unlock(&g_cid_lease_mutex);
+    return sizeof(*resp);
+}
+
 /*
  * Local variables:
  * mode: C
@@ -414,3 +565,4 @@ int virt_dma_handle_terminate(uint32_t cid,
  * indent-tabs-mode: nil
  * End:
  */
+

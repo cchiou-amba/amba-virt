@@ -257,18 +257,24 @@ static void amba_dma_chan_work(struct work_struct *work)
     unsigned long flags;
     int ret;
 
-    /* Determine ivshmem offset */
-    ret = amba_virt_get_window(&shm_phys, &shm_iomem, &shm_size);
+    /* Determine ivshmem offset (prefer DMA32 lease slice, fallback to bulk) */
+    ret = amba_virt_get_dma32_window(&shm_phys, &shm_iomem, &shm_size);
     if (ret == 0 && achan->pending_buf_addr >= shm_phys &&
         achan->pending_buf_addr < shm_phys + shm_size) {
         buf_offset = (u32)(achan->pending_buf_addr - shm_phys);
     } else {
-        buf_offset = (u32)achan->pending_buf_addr;
-        pr_warn_ratelimited("amba_dma: chan %u buffer 0x%llx not in ivshmem window [0x%llx..0x%llx]\n",
-                            achan->hw_channel,
-                            (unsigned long long)achan->pending_buf_addr,
-                            (unsigned long long)shm_phys,
-                            (unsigned long long)(shm_phys + shm_size));
+        ret = amba_virt_get_window(&shm_phys, &shm_iomem, &shm_size);
+        if (ret == 0 && achan->pending_buf_addr >= shm_phys &&
+            achan->pending_buf_addr < shm_phys + shm_size) {
+            buf_offset = (u32)(achan->pending_buf_addr - shm_phys);
+        } else {
+            buf_offset = (u32)achan->pending_buf_addr;
+            pr_warn_ratelimited("amba_dma: chan %u buffer 0x%llx not in ivshmem window [0x%llx..0x%llx]\n",
+                                achan->hw_channel,
+                                (unsigned long long)achan->pending_buf_addr,
+                                (unsigned long long)shm_phys,
+                                (unsigned long long)(shm_phys + shm_size));
+        }
     }
 
     ret = amba_dma_rpc_submit(achan->hw_channel, achan->pending_dir,

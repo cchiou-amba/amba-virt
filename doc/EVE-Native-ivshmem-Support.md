@@ -5,7 +5,10 @@
 The Ambarella virtualization architecture relies on two complementary transport mechanisms between the guest domain (Ubuntu HVM at EL1) and the host container (NOHYPER at EL2):
 
 1. **`virtio-vsock` (Control Plane)**: Low-latency, connection-oriented point-to-point RPC and control messaging (CID 2, port 5555).
-2. **`ivshmem` (Data Plane)**: Zero-copy shared DRAM window (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2) mapped through the model-selected backing. Current production models use `/dev/amba_virt_shm` (and `/dev/amba_virt_shm1` for a second pair); the original PoC used `/dev/shm/amba-virt`. Size comes from model `cbattr.shmsize`. **Production is 1 GiB** (shared by Cavalry, DMA, SD/eMMC, and later frontends). **16 MiB was the PoC / verification run** on n1-655-devkit. Do not add a second bulk window per driver. See [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+2. **`ivshmem` (Data Plane)**: Zero-copy shared DRAM windows (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2). The architecture uses a **Dual-Window model**:
+   - **Bulk 1 GiB High-DRAM Window**: Mapped through `/dev/amba_virt_shm` (or `/dev/amba_virt_shm1`), shared by Cavalry NPU and 2D GDMA frontends.
+   - **DMA32 16 MiB Low-DRAM Window**: Dedicated 16 MiB window backed by a 16 MiB slice of the 64 MiB `no-map` pool at `0x6c000000`, providing sub-4 GiB physical addresses required by Generic-DMA1 32-bit descriptors.
+   - Guests classify windows by exact BAR size and `GET_INFO` role rather than PCI BDF or probe order. See [Architecture.md](Architecture.md) and [AmbaVirtDMA.md](AmbaVirtDMA.md).
 
 Stock upstream EVE does not provide this device, but this repository now has a
 delivered Pillar implementation in `eve/pkg/pillar/hypervisor/kvm.go`.
@@ -14,10 +17,10 @@ delivered Pillar implementation in `eve/pkg/pillar/hypervisor/kvm.go`.
 `estimatedVMMOverhead` accounts for the full window. The corresponding tests
 are in `kvm_ivshmem_test.go`.
 
-UART virtualization is a separate planned extension. It reuses this
-controller-facing convention but adds device-MMIO backing and
-`ivshmem-doorbell`/eventfd interrupts. Those UART extensions are not delivered
-yet; see [UART-Passthrough.md](UART-Passthrough.md).
+UART register MMIO and interrupts are handled independently: the target architecture
+assigns physical UART2 (`0xffe0018000`) directly via `vfio-platform` with KVM
+in-kernel GICv2 level IRQ resampling, while the legacy `ivshmem-doorbell` proxy is
+retained as a qualification and rollback baseline. See [UART-Passthrough.md](UART-Passthrough.md).
 
 ---
 

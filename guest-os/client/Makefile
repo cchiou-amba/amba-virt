@@ -25,7 +25,7 @@ else
 CXX ?= g++
 endif
 
-HAVE_CPPUTEST := $(shell if printf '%b\n' '\043include <CppUTest/CommandLineTestRunner.h>' | $(CXX) $(INCLUDES) -E -x c++ - >/dev/null 2>&1; then echo 1; else echo 0; fi)
+HAVE_CPPUTEST := $(shell if printf 'int main(){}\n' | $(CXX) -x c++ - -lCppUTest -lCppUTestExt -o /dev/null >/dev/null 2>&1; then echo 1; else echo 0; fi)
 
 ifeq ($(HAVE_CPPUTEST),1)
 LDFLAGS += -lCppUTest -lCppUTestExt

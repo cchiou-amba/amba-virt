@@ -15,6 +15,10 @@
 
 int amba_virt_get_window(phys_addr_t *phys, void __iomem **iomem,
 			 size_t *size);
+int amba_virt_get_bulk_window(phys_addr_t *phys, void __iomem **iomem,
+			      size_t *size);
+int amba_virt_get_dma32_window(phys_addr_t *phys, void __iomem **iomem,
+			       size_t *size);
 int amba_virt_rpc(const void *request, u32 request_len, void *response,
 		  u32 *response_len, unsigned int timeout_ms);
 

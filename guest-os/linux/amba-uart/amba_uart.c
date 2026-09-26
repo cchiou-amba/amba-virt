@@ -1,7 +1,7 @@
 /*
  * amba_uart.c
  *
- * Ambarella HVM UART Serial Passthrough Driver (ivshmem-doorbell PCI & Platform)
+ * Ambarella HVM UART Serial Passthrough Driver (Direct Zero-Copy Platform MMIO)
  *
  * Copyright (C) 2026, Ambarella International LLC
  */
@@ -23,6 +23,8 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
+#include <linux/property.h>
+#include <linux/irqdomain.h>
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <linux/dmaengine.h>
@@ -84,13 +86,10 @@ ATTRIBUTE_GROUPS(amba_uart_driver);
 
 struct amba_uart_port {
 	struct uart_port	port;
-	struct pci_dev		*pdev;
 	struct platform_device	*plat_dev;
-	void __iomem		*doorbell_base;
 	struct hrtimer		poll_timer;
 	ktime_t			poll_interval;
 	unsigned int		id;
-	bool			is_pci;
 	bool			tx_fifo_fix;
 	bool			running;
 
@@ -118,17 +117,12 @@ static inline void amba_uart_write(struct uart_port *port, u32 val, unsigned int
 	writel_relaxed(val, port->membase + offset);
 }
 
-static void amba_uart_doorbell_ack(struct amba_uart_port *amb_port)
-{
-	if (amb_port && amb_port->doorbell_base) {
-		/* Write to Doorbell register: Peer 1 (Host Server), Vector 0 */
-		writel((1U << 16) | 0U, amb_port->doorbell_base + 0x0c);
-	}
-}
 
 static void amba_uart_stop_tx(struct uart_port *port)
 {
-	(void)port;
+	u32 ie = amba_uart_read(port, UART_IE_OFFSET);
+	if (ie & UART_IE_ETBEI)
+		amba_uart_write(port, ie & ~UART_IE_ETBEI, UART_IE_OFFSET);
 }
 
 static void amba_uart_transmit_chars(struct uart_port *port)
@@ -144,6 +138,7 @@ static void amba_uart_transmit_chars(struct uart_port *port)
 	}
 
 	if (uart_tx_stopped(port) || uart_circ_empty(xmit)) {
+		amba_uart_stop_tx(port);
 		return;
 	}
 
@@ -158,6 +153,9 @@ static void amba_uart_transmit_chars(struct uart_port *port)
 			break;
 		}
 	}
+
+	if (uart_circ_empty(xmit))
+		amba_uart_stop_tx(port);
 
 	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
@@ -219,7 +217,10 @@ static void amba_uart_start_tx_dma(struct amba_uart_port *amb_port)
 	if (c > UART_XMIT_SIZE)
 		c = UART_XMIT_SIZE;
 
-	memcpy(amb_port->tx_dma_buf, &xmit->buf[tail], c);
+	if (amb_port->tx_dma_is_shm)
+		memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[tail], c);
+	else
+		memcpy(amb_port->tx_dma_buf, &xmit->buf[tail], c);
 	wmb();
 	amb_port->tx_dma_len = c;
 	amb_port->tx_dma_in_progress = true;
@@ -259,8 +260,10 @@ static void amba_uart_start_tx(struct uart_port *port)
 		return;
 	}
 
-	if (uart_tx_stopped(port) || uart_circ_empty(xmit))
+	if (uart_tx_stopped(port) || uart_circ_empty(xmit)) {
+		amba_uart_stop_tx(port);
 		return;
+	}
 
 	/* Offload bursts >= 16 bytes via DMA when active */
 	if (amb_port->dma_enabled && amb_port->tx_dma_chan && !amb_port->tx_dma_in_progress) {
@@ -270,7 +273,13 @@ static void amba_uart_start_tx(struct uart_port *port)
 		}
 	}
 
-	/* Short burst or DMA busy: use PIO FIFO transfer */
+	/* Short burst or DMA busy: arm THRE interrupt and transmit chars */
+	{
+		u32 ie = amba_uart_read(port, UART_IE_OFFSET);
+		if (!(ie & UART_IE_ETBEI))
+			amba_uart_write(port, ie | UART_IE_ETBEI, UART_IE_OFFSET);
+	}
+
 	amba_uart_transmit_chars(port);
 }
 
@@ -417,26 +426,44 @@ static void amba_uart_break_ctl(struct uart_port *port, int break_state)
 static irqreturn_t amba_uart_interrupt(int irq, void *dev_id)
 {
 	struct uart_port *port = dev_id;
-	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
 	u32 iir;
 	unsigned long flags;
+	int handled = 0;
+	int max_iter = 256;
 
-	iir = amba_uart_read(port, UART_II_OFFSET);
-	if (iir & UART_II_NO_INT_PENDING) {
-		amba_uart_doorbell_ack(amb_port);
-		return IRQ_NONE;
-	}
+	(void)irq;
 
 	spin_lock_irqsave(&port->lock, flags);
-	amba_uart_receive_chars(port);
-	if (!uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
-		amba_uart_transmit_chars(port);
+
+	while (max_iter-- > 0) {
+		iir = amba_uart_read(port, UART_II_OFFSET);
+		if (iir & UART_II_NO_INT_PENDING)
+			break;
+
+		handled = 1;
+		switch (iir & 0x0f) {
+		case UART_II_CHAR_TIMEOUT:
+		case UART_II_CHAR_TIMEOUT_FIFO_EMPTY:
+		case UART_II_RCV_DATA_AVAIL:
+		case UART_II_RCV_STATUS:
+			amba_uart_receive_chars(port);
+			break;
+		case UART_II_THR_EMPTY:
+			if (!uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
+				amba_uart_transmit_chars(port);
+			else
+				amba_uart_stop_tx(port);
+			break;
+		default:
+			amba_uart_read(port, UART_LS_OFFSET);
+			amba_uart_read(port, UART_MS_OFFSET);
+			break;
+		}
+	}
+
 	spin_unlock_irqrestore(&port->lock, flags);
 
-	/* Ring ivshmem doorbell to unmask host physical IRQ */
-	amba_uart_doorbell_ack(amb_port);
-
-	return IRQ_HANDLED;
+	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
 
 static bool amba_uart_dma_filter(struct dma_chan *chan, void *param)
@@ -498,7 +525,9 @@ static void amba_uart_init_dma(struct amba_uart_port *amb_port)
 	 */
 	{
 		int (*get_win_fn)(phys_addr_t *, void __iomem **, size_t *) =
-			__symbol_get("amba_virt_get_window");
+			__symbol_get("amba_virt_get_dma32_window");
+		if (!get_win_fn)
+			get_win_fn = __symbol_get("amba_virt_get_window");
 		if (get_win_fn) {
 			ret = get_win_fn(&shm_phys, &shm_iomem, &shm_size);
 			symbol_put_addr((void *)get_win_fn);
@@ -561,8 +590,8 @@ static void amba_uart_hw_init(struct uart_port *port)
 	udelay(100);
 	amba_uart_write(port, 0x00, UART_SRR_OFFSET);
 
-	/* Enable FIFOs with 1-character RX threshold and clear FIFOs */
-	amba_uart_write(port, UART_FC_FIFOE | UART_FC_RX_ONECHAR |
+	/* Enable FIFOs with quarter-full (16 chars) RX threshold and clear FIFOs */
+	amba_uart_write(port, UART_FC_FIFOE | UART_FC_RX_QUARTER_FULL |
 			UART_FC_TX_EMPTY | UART_FC_XMITR | UART_FC_RCVRR,
 			UART_FC_OFFSET);
 
@@ -594,20 +623,20 @@ static int amba_uart_startup(struct uart_port *port)
 	amba_uart_set_mctrl(port, port->mctrl);
 	amba_uart_write(port, AMBA_UART_DEFAULT_IER, UART_IE_OFFSET);
 
-	/* Unmask host physical IRQ upon startup */
-	amba_uart_doorbell_ack(amb_port);
-
 	if (port->irq > 0 && !force_poll) {
 		ret = request_irq(port->irq, amba_uart_interrupt, IRQF_SHARED, DRIVER_NAME, port);
 		if (ret) {
-			dev_err(port->dev, "Failed to request IRQ %d: %d\n", port->irq, ret);
-			amba_uart_release_dma(amb_port);
-			return ret;
+			dev_warn(port->dev, "Failed to request IRQ %d: %d, falling back to polling\n",
+				 port->irq, ret);
+			port->irq = 0;
+		} else {
+			dev_info(port->dev, "Ambarella UART%d running in interrupt-driven mode (IRQ %d, DMA %s)\n",
+				 amb_port->id, port->irq, amb_port->dma_enabled ? "enabled" : "disabled");
 		}
-		dev_info(port->dev, "Ambarella UART%d running in interrupt-driven mode (IRQ %d, DMA %s)\n",
-			 amb_port->id, port->irq, amb_port->dma_enabled ? "enabled" : "disabled");
-	} else {
-		/* Fallback to hrtimer polling if no IRQ allocated */
+	}
+
+	if (port->irq == 0 || force_poll) {
+		/* Fallback to hrtimer polling if no IRQ allocated or request_irq failed */
 		amb_port->running = true;
 		amb_port->poll_interval = ms_to_ktime(1);
 		hrtimer_init(&amb_port->poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -782,173 +811,7 @@ static struct uart_driver amba_uart_driver = {
 };
 
 /* ========================================================================== */
-/* PCI Driver for ivshmem-doorbell UART Passthrough                           */
-/* ========================================================================== */
-
-static int amba_uart_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
-{
-	struct amba_uart_port *amb_port;
-	void __iomem *doorbell_base = NULL;
-	void __iomem *uart_base = NULL;
-	int ret, irq, id;
-
-	(void)ent;
-
-	ret = pci_enable_device(pdev);
-	if (ret) {
-		dev_err(&pdev->dev, "pci_enable_device failed: %d\n", ret);
-		return ret;
-	}
-
-	/* Ensure device is a UART ivshmem-doorbell aperture (BAR2 == 4 KiB), not shared memory */
-	if (pci_resource_len(pdev, 2) != 0x1000) {
-		pci_disable_device(pdev);
-		return -ENODEV;
-	}
-
-	ret = pci_request_regions(pdev, DRIVER_NAME);
-	if (ret) {
-		dev_err(&pdev->dev, "pci_request_regions failed: %d\n", ret);
-		goto err_disable_pci;
-	}
-
-	/* Map BAR 0 (Doorbell control register, 256B) */
-	doorbell_base = pci_iomap(pdev, 0, 0);
-	if (!doorbell_base) {
-		dev_warn(&pdev->dev, "Could not map BAR 0 (Doorbell)\n");
-	}
-
-	/* Map BAR 2 (Physical UART MMIO aperture, 4 KiB) */
-	uart_base = pci_iomap(pdev, 2, 0);
-	if (!uart_base) {
-		dev_err(&pdev->dev, "Failed to map BAR 2 (UART MMIO)\n");
-		ret = -ENOMEM;
-		goto err_unmap_doorbell;
-	}
-
-	/* Allocate MSI-X / MSI vector */
-	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSIX | PCI_IRQ_MSI | PCI_IRQ_LEGACY);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "Failed to allocate IRQ vectors: %d\n", ret);
-		goto err_unmap_uart;
-	}
-
-	irq = pci_irq_vector(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "Failed to get PCI IRQ vector: %d\n", irq);
-		ret = irq;
-		goto err_free_irq_vectors;
-	}
-
-	pci_set_master(pdev);
-	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
-
-	mutex_lock(&amba_port_mutex);
-	for (id = 0; id < AMBA_UART_MAX_PORTS; id++) {
-		if (!amba_ports[id])
-			break;
-	}
-	if (id >= AMBA_UART_MAX_PORTS) {
-		mutex_unlock(&amba_port_mutex);
-		dev_err(&pdev->dev, "Maximum number of UART ports (%d) exceeded\n",
-			AMBA_UART_MAX_PORTS);
-		ret = -EBUSY;
-		goto err_free_irq_vectors;
-	}
-
-	amb_port = devm_kzalloc(&pdev->dev, sizeof(*amb_port), GFP_KERNEL);
-	if (!amb_port) {
-		mutex_unlock(&amba_port_mutex);
-		ret = -ENOMEM;
-		goto err_free_irq_vectors;
-	}
-
-	amb_port->pdev = pdev;
-	amb_port->is_pci = true;
-	amb_port->doorbell_base = doorbell_base;
-	amb_port->id = id;
-	amb_port->port.dev = &pdev->dev;
-	amb_port->port.type = PORT_8250;
-	amb_port->port.iotype = UPIO_MEM32;
-	amb_port->port.membase = uart_base;
-	amb_port->port.mapbase = pci_resource_start(pdev, 2);
-	amb_port->port.irq = irq;
-	amb_port->port.fifosize = AMBA_UART_FIFO_SIZE;
-	amb_port->port.ops = &amba_uart_ops;
-	amb_port->port.flags = UPF_BOOT_AUTOCONF | UPF_SHARE_IRQ;
-	amb_port->port.line = id;
-	amb_port->port.uartclk = clk_hz;
-	amb_port->port.mctrl = TIOCM_DTR | TIOCM_RTS | TIOCM_OUT2;
-	spin_lock_init(&amb_port->port.lock);
-
-	amba_ports[id] = amb_port;
-	pci_set_drvdata(pdev, amb_port);
-
-	ret = uart_add_one_port(&amba_uart_driver, &amb_port->port);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to add UART port %d: %d\n", id, ret);
-		amba_ports[id] = NULL;
-		mutex_unlock(&amba_port_mutex);
-		goto err_free_irq_vectors;
-	}
-
-	mutex_unlock(&amba_port_mutex);
-
-	dev_info(&pdev->dev, "Ambarella Virtual UART%d at PCI BAR2 0x%llx (IRQ %d, clk %u Hz) registered as %s%d\n",
-		 id, (unsigned long long)pci_resource_start(pdev, 2), irq, clk_hz, DEV_NAME, id);
-
-	return 0;
-
-err_free_irq_vectors:
-	pci_free_irq_vectors(pdev);
-err_unmap_uart:
-	if (uart_base) pci_iounmap(pdev, uart_base);
-err_unmap_doorbell:
-	if (doorbell_base) pci_iounmap(pdev, doorbell_base);
-	pci_release_regions(pdev);
-err_disable_pci:
-	pci_disable_device(pdev);
-	return ret;
-}
-
-static void amba_uart_pci_remove(struct pci_dev *pdev)
-{
-	struct amba_uart_port *amb_port = pci_get_drvdata(pdev);
-
-	if (amb_port) {
-		mutex_lock(&amba_port_mutex);
-		uart_remove_one_port(&amba_uart_driver, &amb_port->port);
-		amba_ports[amb_port->id] = NULL;
-		mutex_unlock(&amba_port_mutex);
-
-		pci_free_irq_vectors(pdev);
-		if (amb_port->port.membase)
-			pci_iounmap(pdev, amb_port->port.membase);
-		if (amb_port->doorbell_base)
-			pci_iounmap(pdev, amb_port->doorbell_base);
-		pci_release_regions(pdev);
-		pci_disable_device(pdev);
-	}
-}
-
-static const struct pci_device_id amba_uart_pci_ids[] = {
-	{ PCI_DEVICE(0x1af4, 0x1110) }, /* Red Hat ivshmem device */
-	{ 0, }
-};
-MODULE_DEVICE_TABLE(pci, amba_uart_pci_ids);
-
-static struct pci_driver amba_uart_pci_driver = {
-	.name		= DRIVER_NAME,
-	.id_table	= amba_uart_pci_ids,
-	.probe		= amba_uart_pci_probe,
-	.remove		= amba_uart_pci_remove,
-	.driver		= {
-		.groups	= amba_uart_driver_groups,
-	},
-};
-
-/* ========================================================================== */
-/* Platform Driver for Fallback / Legacy Discovery                           */
+/* Platform Driver for Direct Hardware Passthrough                           */
 /* ========================================================================== */
 
 static int amba_uart_platform_probe(struct platform_device *pdev)
@@ -957,10 +820,24 @@ static int amba_uart_platform_probe(struct platform_device *pdev)
 	struct resource *res;
 	void __iomem *base;
 	int irq, id, ret;
+	u32 clk_prop = 0;
+	u32 io_width = 4;
+
+	if (!device_property_read_u32(&pdev->dev, "reg-io-width", &io_width)) {
+		if (io_width != 4) {
+			dev_err(&pdev->dev, "Unsupported reg-io-width: %u (expected 4)\n", io_width);
+			return -EINVAL;
+		}
+	}
+
+	if (!device_property_read_u32(&pdev->dev, "clock-frequency", &clk_prop) && clk_prop > 0)
+		clk_hz = clk_prop;
+	else
+		clk_hz = AMBA_UART_DEFAULT_CLK;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
-		dev_err(&pdev->dev, "No memory resource found in DTB\n");
+		dev_err(&pdev->dev, "No memory resource found\n");
 		return -ENODEV;
 	}
 
@@ -970,7 +847,7 @@ static int amba_uart_platform_probe(struct platform_device *pdev)
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
-		dev_err(&pdev->dev, "No IRQ resource found in DTB: %d\n", irq);
+		dev_err(&pdev->dev, "No IRQ resource found: %d\n", irq);
 		return irq;
 	}
 
@@ -993,7 +870,6 @@ static int amba_uart_platform_probe(struct platform_device *pdev)
 	}
 
 	amb_port->plat_dev = pdev;
-	amb_port->is_pci = false;
 	amb_port->id = id;
 	amb_port->port.dev = &pdev->dev;
 	amb_port->port.type = PORT_8250;
@@ -1049,12 +925,19 @@ static const struct of_device_id amba_uart_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, amba_uart_of_match);
 
+static const struct acpi_device_id amba_uart_acpi_match[] = {
+	{ "AMBA0001", 0 },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(acpi, amba_uart_acpi_match);
+
 static struct platform_driver amba_uart_platform_driver = {
 	.probe		= amba_uart_platform_probe,
 	.remove		= amba_uart_platform_remove,
 	.driver		= {
 		.name		= DRIVER_NAME,
 		.of_match_table	= amba_uart_of_match,
+		.acpi_match_table = ACPI_PTR(amba_uart_acpi_match),
 		.groups		= amba_uart_driver_groups,
 	},
 };
@@ -1069,14 +952,11 @@ static int __init amba_uart_init(void)
 		return ret;
 	}
 
-	ret = pci_register_driver(&amba_uart_pci_driver);
-	if (ret) {
-		pr_warn("amba_uart: Failed to register PCI driver: %d\n", ret);
-	}
-
 	ret = platform_driver_register(&amba_uart_platform_driver);
 	if (ret) {
-		pr_warn("amba_uart: Failed to register platform driver: %d\n", ret);
+		pr_err("amba_uart: Failed to register platform driver: %d\n", ret);
+		uart_unregister_driver(&amba_uart_driver);
+		return ret;
 	}
 
 	pr_info("amba_uart: Ambarella HVM UART passthrough driver loaded (default clk: %u Hz)\n",
@@ -1087,7 +967,6 @@ static int __init amba_uart_init(void)
 static void __exit amba_uart_exit(void)
 {
 	platform_driver_unregister(&amba_uart_platform_driver);
-	pci_unregister_driver(&amba_uart_pci_driver);
 	uart_unregister_driver(&amba_uart_driver);
 	pr_info("amba_uart: Ambarella HVM UART passthrough driver unloaded\n");
 }

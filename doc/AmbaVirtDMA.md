@@ -24,10 +24,20 @@ DMA transfers; those paths remain TODOs in
 `drivers/amba_virt/tools/virt_dma_broker.c`. This document specifies the target
 architecture and must not be read as hardware qualification.
 
-UART register access and UART interrupts are also separate from this DMA data
-path. The guest reaches UART registers through its planned ivshmem-backed MMIO
-BAR and receives a virtual MSI-X interrupt through the vGIC. Physical UART SPI
-114/115 never enters the guest.
+UART register access and UART interrupts are strictly decoupled from this DMA data
+path. Under the True MMIO Passthrough architecture, the guest reaches UART registers
+directly through a 4 KiB Stage-2 aperture assigned via `vfio-platform` and receives
+level interrupts via in-kernel GICv2 `irqfd` resampling. Physical Generic-DMA1 registers
+(`0xffe0021000`) never enter the guest.
+
+For DMA data transfers, the architecture uses a **Dual-Window model**:
+- **Bulk 1 GiB Window**: High-memory DRAM IVSHMEM window for Cavalry/GDMA bulk buffers.
+- **DMA32 16 MiB Window**: Low-memory 32-bit IVSHMEM window backed by a dedicated 16 MiB
+  slice of the 64 MiB `no-map` pool (`0x6c000000`), required for Generic-DMA1 32-bit descriptors.
+- **Split Authority**: Untrusted guest frontends submit offset-only requests over vsock
+  RPC to the per-VM NOHYPER transport broker; the trusted Dom0 kernel authority
+  (`amba_virt_dma.ko`) enforces bounds, channel policy, 32-bit DMA masks, single-flight
+  execution, and synchronous timeouts.
 
 ---
 

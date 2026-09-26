@@ -136,37 +136,45 @@ Rather than provisioning separate PCI apertures for each virtualized peripheral,
   - Provides zero-copy shared DRAM mapping between guest user space and host physical memory.
   - Payloads (image frames, neural network weight tensors, activation maps) reside directly in shared memory; only 32-bit offsets and size descriptors traverse the vsock control channel.
 
-### 2.3 Planned UART IRQ Relay
+### 2.3 UART Virtualization: True MMIO Passthrough vs. Legacy Proxy
 
-UART uses a third mechanism for interrupt notification. It does not turn UART
-register accesses or FIFO bytes into vsock RPC:
+The server architecture distinguishes between two UART modes:
 
-1. An EVE-managed ivshmem server supplies the UART MMIO backing FD and eventfds
-   before QEMU starts.
-2. `amba-virt-server` connects as the host peer and registers the guest-bound
-   eventfd with the Dom0 UART stub.
-3. The physical UART IRQ is masked and signals that eventfd.
-4. `ivshmem-doorbell` raises MSI-X; KVM injects it through the guest vGIC.
-5. After servicing the UART registers, the guest sends an ACK doorbell.
-6. The server validates ownership and tells the stub to unmask the physical
-   IRQ.
+1. **True MMIO Passthrough (Target Architecture)**:
+   - UART MMIO and physical IRQs bypass `amba-virt-server` and NOHYPER completely.
+   - Assigned directly via `vfio-platform` to the guest Stage-2 page table.
+   - Physical GIC SPI 115 is handled via in-kernel KVM `irqfd` and `resamplefd`,
+     eliminating userspace doorbell ACK round-trips and eventfd proxy latency.
 
-The physical IRQ remains masked after timeout, guest death, or stale ACK.
-The stub must not read IIR/RBR or consume any guest-visible UART state.
+2. **IVSHMEM-Doorbell Emulated Proxy (Legacy Baseline)**:
+   - Dom0 `amba_virt_uart.ko` and `amba_virt_uart_server` provide an emulated
+     `ivshmem-doorbell` device for initial bringup and rollback qualification.
+   - Retained as a verification baseline until all physical passthrough gates pass.
 
-This is planned work. Current code has no UART eventfd registration or
-ivshmem-server peer path.
+### 2.4 Split Peripheral DMA Architecture (Dual Windows)
 
-### 2.4 Planned Peripheral DMA
+Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
 
-Physical Generic-DMA remains in Dom0. The guest submits channel, direction,
-offset, and length over vsock; payload stays in the existing shared DRAM BAR.
-The server validates the caller's assigned UART, permitted channel pair, and
-window bounds before using the host dmaengine API.
+- **Dual-Window Data Plane**:
+  - **Bulk 1 GiB Window**: High-memory DRAM `ivshmem-plain` window for Cavalry NPU
+    and GDMA transfers.
+  - **DMA32 16 MiB Window**: Low-memory 32-bit `ivshmem-plain` window backed by an
+    exclusive 16 MiB slice of the 64 MiB `no-map` pool at `0x6c000000`, satisfying
+    Generic-DMA1 32-bit addressing constraints.
 
-The delivered `virt_dma_broker.c` contains policy and watchdog scaffolding but
-does not yet execute or abort physical DMA. Do not report DMA mode as working
-until that path and bit-exact external UART I/O have been verified.
+- **Split Authority & Reference Monitor**:
+  - **Per-VM NOHYPER Transport (Untrusted)**:
+    - Derives caller CID directly from the vsock socket (never from payload).
+    - Applies bounded token-bucket rate limiting and queues.
+    - Forwards offset-only requests through a lease-scoped device node
+      (`/dev/amba_dma_lease<N>`).
+    - Holds zero address, FIFO, or Generic-DMA1 channel policy.
+  - **Dom0 Kernel Reference Monitor (`amba_virt_dma.ko`, Trusted)**:
+    - Exclusively owns Generic-DMA1 execution channels and endpoint policies.
+    - Resolves slice offsets to valid 32-bit DMA addresses.
+    - Programs and executes hardware DMA descriptors.
+    - Enforces synchronous watchdogs, mapping invalidation, and slice sanitization
+      (`memset_io(0)`) on teardown.
 
 ### 2.3 Compilation Matrix
 

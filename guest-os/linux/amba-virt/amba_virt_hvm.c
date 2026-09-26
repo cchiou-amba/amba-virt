@@ -16,21 +16,56 @@
 #define IVSHMEM_VENDOR	0x1af4
 #define IVSHMEM_DEVICE	0x1110
 
-static int shm_bar = 0;
+#define AMBA_VIRT_DMA32_WINDOW_SIZE	0x1000000ULL /* 16 MiB */
+
+struct amba_virt_pci_window {
+	struct pci_dev		*pdev;
+	int			bar;
+	phys_addr_t		phys;
+	void __iomem		*iomem;
+	size_t			size;
+};
+
+static struct amba_virt_pci_window bulk_win;
+static struct amba_virt_pci_window dma32_win;
 static struct amba_virt_dev gdev;
+
+int amba_virt_get_bulk_window(phys_addr_t *phys, void __iomem **iomem,
+			      size_t *size)
+{
+	if (!phys || !iomem || !size)
+		return -EINVAL;
+	if (!bulk_win.phys || !bulk_win.iomem || !bulk_win.size)
+		return -ENODEV;
+
+	*phys = bulk_win.phys;
+	*iomem = bulk_win.iomem;
+	*size = bulk_win.size;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(amba_virt_get_bulk_window);
+
+int amba_virt_get_dma32_window(phys_addr_t *phys, void __iomem **iomem,
+			       size_t *size)
+{
+	if (!phys || !iomem || !size)
+		return -EINVAL;
+	if (!dma32_win.phys || !dma32_win.iomem || !dma32_win.size)
+		return -ENODEV;
+
+	*phys = dma32_win.phys;
+	*iomem = dma32_win.iomem;
+	*size = dma32_win.size;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(amba_virt_get_dma32_window);
 
 int amba_virt_get_window(phys_addr_t *phys, void __iomem **iomem,
 			 size_t *size)
 {
-	if (!phys || !iomem || !size)
-		return -EINVAL;
-	if (!gdev.shm_phys || !gdev.shm_iomem || !gdev.shm_size)
-		return -ENODEV;
-
-	*phys = gdev.shm_phys;
-	*iomem = gdev.shm_iomem;
-	*size = gdev.shm_size;
-	return 0;
+	if (bulk_win.phys)
+		return amba_virt_get_bulk_window(phys, iomem, size);
+	return amba_virt_get_dma32_window(phys, iomem, size);
 }
 EXPORT_SYMBOL_GPL(amba_virt_get_window);
 
@@ -47,6 +82,7 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 {
 	resource_size_t start, len = 0;
 	int bar = 0, ret, i;
+	bool is_dma32 = false;
 
 	ret = pci_enable_device(pdev);
 	if (ret)
@@ -69,59 +105,111 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 		return -ENODEV;
 	}
 
-	/* Only bind to shared memory window (>= 16 MiB), ignore aperture devices (e.g. UART) */
-	if (gdev.shm_phys != 0 || len < 0x1000000) {
+	/* Classify window role by BAR size */
+	if (len == AMBA_VIRT_DMA32_WINDOW_SIZE) {
+		if (dma32_win.phys != 0) {
+			dev_warn(&pdev->dev, "duplicate DMA32 window ignored\n");
+			pci_disable_device(pdev);
+			return -EBUSY;
+		}
+		is_dma32 = true;
+	} else if (len > AMBA_VIRT_DMA32_WINDOW_SIZE) {
+		if (bulk_win.phys != 0) {
+			dev_warn(&pdev->dev, "duplicate bulk window ignored\n");
+			pci_disable_device(pdev);
+			return -EBUSY;
+		}
+		is_dma32 = false;
+	} else {
+		/* Aperture or unrecognized size */
 		pci_disable_device(pdev);
 		return -ENODEV;
 	}
 
-	ret = pci_request_region(pdev, bar, "amba_virt");
+	ret = pci_request_region(pdev, bar, is_dma32 ? "amba_dma32" : "amba_virt");
 	if (ret) {
 		dev_err(&pdev->dev, "cannot request ivshmem BAR%d\n", bar);
 		pci_disable_device(pdev);
 		return ret;
 	}
 
-	memset(&gdev, 0, sizeof(gdev));
-	gdev.shm_phys = start;
-	gdev.shm_size = (size_t)len;
-	gdev.shm_iomem = ioremap_wc(start, len);
-	if (!gdev.shm_iomem) {
-		dev_err(&pdev->dev, "cannot map ivshmem BAR%d\n", bar);
+	if (is_dma32) {
+		dma32_win.pdev = pdev;
+		dma32_win.bar = bar;
+		dma32_win.phys = start;
+		dma32_win.size = (size_t)len;
+		dma32_win.iomem = ioremap_wc(start, len);
+		if (!dma32_win.iomem) {
+			dev_err(&pdev->dev, "cannot map DMA32 BAR%d\n", bar);
+			pci_release_region(pdev, bar);
+			pci_disable_device(pdev);
+			memset(&dma32_win, 0, sizeof(dma32_win));
+			return -ENOMEM;
+		}
+		pci_set_drvdata(pdev, &dma32_win);
+		dev_info(&pdev->dev, "amba_virt guest: DMA32 lease window BAR%d phys 0x%llx size %zu\n",
+			 bar, (unsigned long long)start, (size_t)len);
+		return 0;
+	}
+
+	/* Bulk window */
+	bulk_win.pdev = pdev;
+	bulk_win.bar = bar;
+	bulk_win.phys = start;
+	bulk_win.size = (size_t)len;
+	bulk_win.iomem = ioremap_wc(start, len);
+	if (!bulk_win.iomem) {
+		dev_err(&pdev->dev, "cannot map bulk BAR%d\n", bar);
 		pci_release_region(pdev, bar);
 		pci_disable_device(pdev);
+		memset(&bulk_win, 0, sizeof(bulk_win));
 		return -ENOMEM;
 	}
 
+	memset(&gdev, 0, sizeof(gdev));
+	gdev.shm_phys = start;
+	gdev.shm_size = (size_t)len;
+	gdev.shm_iomem = bulk_win.iomem;
+
 	ret = amba_virt_core_init(&gdev, false);
 	if (ret) {
-		iounmap(gdev.shm_iomem);
-		gdev.shm_iomem = NULL;
+		iounmap(bulk_win.iomem);
+		bulk_win.iomem = NULL;
 		pci_release_region(pdev, bar);
 		pci_disable_device(pdev);
+		memset(&bulk_win, 0, sizeof(bulk_win));
 		return ret;
 	}
 
-	shm_bar = bar;
-	pci_set_drvdata(pdev, &gdev);
-	dev_info(&pdev->dev, "amba_virt guest: BAR%d shm phys 0x%llx size %zu\n",
+	pci_set_drvdata(pdev, &bulk_win);
+	dev_info(&pdev->dev, "amba_virt guest: bulk window BAR%d phys 0x%llx size %zu\n",
 		 bar, (unsigned long long)start, (size_t)len);
 	return 0;
 }
 
 static void amba_virt_pci_remove(struct pci_dev *pdev)
 {
-	if (pci_get_drvdata(pdev) != &gdev)
-		return;
+	void *drvdata = pci_get_drvdata(pdev);
 
-	amba_virt_core_exit(&gdev);
-	if (gdev.shm_iomem) {
-		iounmap(gdev.shm_iomem);
-		gdev.shm_iomem = NULL;
+	if (drvdata == &dma32_win) {
+		if (dma32_win.iomem) {
+			iounmap(dma32_win.iomem);
+			dma32_win.iomem = NULL;
+		}
+		pci_release_region(pdev, dma32_win.bar);
+		pci_disable_device(pdev);
+		memset(&dma32_win, 0, sizeof(dma32_win));
+	} else if (drvdata == &bulk_win) {
+		amba_virt_core_exit(&gdev);
+		if (bulk_win.iomem) {
+			iounmap(bulk_win.iomem);
+			bulk_win.iomem = NULL;
+		}
+		pci_release_region(pdev, bulk_win.bar);
+		pci_disable_device(pdev);
+		memset(&bulk_win, 0, sizeof(bulk_win));
+		memset(&gdev, 0, sizeof(gdev));
 	}
-	pci_release_region(pdev, shm_bar);
-	pci_disable_device(pdev);
-	memset(&gdev, 0, sizeof(gdev));
 }
 
 static const struct pci_device_id amba_virt_pci_ids[] = {
@@ -148,7 +236,6 @@ static int __init amba_virt_guest_init(void)
 static void __exit amba_virt_guest_exit(void)
 {
 	pci_unregister_driver(&amba_virt_pci_driver);
-	amba_virt_core_exit(&gdev);
 }
 
 module_init(amba_virt_guest_init);

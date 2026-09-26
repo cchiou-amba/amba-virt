@@ -183,26 +183,34 @@ Do not copy bulk data over vsock.
 
 ### UART and Peripheral DMA
 
-UART virtualization follows the same controller-facing adapter convention but
-does not put UART register state into the bulk shared-memory allocator:
+UART virtualization separates register access from peripheral DMA authority:
 
-- ZEDEDA assigns an `IO_TYPE_OTHER` UART adapter bundle with empty EVE resource
-  fields, exclusive `assigngrp`, and UART-specific `cbattr`.
-- EVE maps the selected physical UART register aperture into a guest PCI BAR.
-- A Dom0 stub owns the physical level IRQ and relays it through eventfd and
-  `ivshmem-doorbell`; KVM injects MSI-X through the guest vGIC.
-- The guest services the real UART registers and sends a doorbell ACK before
-  the host unmasks the physical IRQ.
-- Generic-DMA remains in Dom0. Guest DMA requests use vsock control messages
-  and offsets into the existing bulk ivshmem DRAM window.
+- **Register Aperture (True MMIO Passthrough)**:
+  - Narrow, non-bus-master peripheral controllers (specifically SoC UART2 at
+    `0xffe0018000`, 4 KiB, GIC SPI 115) are passed through directly via
+    `vfio-platform` into the guest Stage-2 page tables.
+  - The guest accesses real hardware registers directly without QEMU emulation
+    or userspace proxy loops.
+  - Level-sensitive physical interrupts are forwarded via KVM `irqfd` and
+    in-kernel EOI resampling (`resamplefd`), eliminating userspace doorbell ACK
+    round-trips.
+  - **Negative Constraint**: Do not use VFIO for bus-mastering peripherals without
+    an IOMMU/SMMU. Unrestricted VFIO assignment and guest access to Generic-DMA1
+    MMIO registers remain strictly forbidden.
 
-The UART adapter is not an inert window marker. Its `cbattr` selects real
-hardware. The UART and bulk-window parsers must therefore be mutually
-exclusive on their attribute keys.
+- **Peripheral DMA (Split Authority & Dual Windows)**:
+  - Generic-DMA1 (`0xffe0021000`) remains strictly under trusted Dom0 kernel
+    authority (`amba_virt_dma.ko`).
+  - High-memory DRAM bulk transfers continue using the 1 GiB `ivshmem-plain` window.
+  - Low-memory 32-bit DMA transfers use a dedicated, carveout-backed 16 MiB
+    DMA32 `ivshmem-plain` window (from a 64 MiB `no-map` reservation at `0x6c000000`).
+  - The guest frontend (`amba_dma`) allocates data buffers within its 16 MiB
+    DMA32 slice and submits offset-only, capability-checked DMA requests over
+    vsock RPC to the per-VM NOHYPER broker.
+  - The Dom0 kernel reference monitor validates bounds, maps addresses to
+    channel-safe 32-bit DMA addresses, and programs Generic-DMA1 descriptors.
 
-Do not use VFIO, SMMU, direct physical SPI assignment, raw Generic-DMA MMIO, or
-QEMU `pci-serial` for this path. The implementation and qualification status
-are tracked in [UART-Passthrough.md](UART-Passthrough.md).
+The implementation and qualification status are tracked in [UART-Passthrough.md](UART-Passthrough.md).
 
 Both ends of the transport compile a matching kernel module (`amba_virt.ko`) that
 exposes `/dev/amba_virt` (mmap of the shared region + framed vsock send/recv).

@@ -85,13 +85,16 @@ int virt_dma_handle_terminate(uint32_t cid,
 int virt_dma_validate_channel_access(uint32_t cid, uint32_t channel);
 
 /*
- * Validate buffer bounds within ivshmem window.
- *
- * Returns 0 if valid, -ERANGE if out of bounds (EVT-091),
- * -EINVAL if length is 0.
+ * Unified split DMA request handler.
+ * Validates token-bucket rate limits, forwards request to lease-scoped
+ * kernel device node (/dev/amba_dma_lease<N>), and populates response.
  */
-int virt_dma_validate_buffer_bounds(uint64_t offset, uint64_t length,
-                                    uint64_t window_size);
+int virt_dma_handle_request(uint32_t cid,
+                            const struct amba_virt_dma_request *req,
+                            struct amba_virt_dma_response *resp);
+
+/* Bind CID to paired lease device */
+int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id);
 
 #endif /* _VIRT_DMA_BROKER_H_ */
 

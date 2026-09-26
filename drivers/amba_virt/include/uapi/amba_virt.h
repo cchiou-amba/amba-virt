@@ -108,6 +108,8 @@ struct amba_virt_dmabuf_slice {
 #define AMBA_VIRT_MSG_DMA_TERMINATE_REQ		54u
 #define AMBA_VIRT_MSG_DMA_TERMINATE_RESP		55u
 #define AMBA_VIRT_MSG_DMA_COMPLETE_EVENT		56u
+#define AMBA_VIRT_MSG_DMA_REQUEST_REQ		57u
+#define AMBA_VIRT_MSG_DMA_REQUEST_RESP		58u
 
 enum vcav_opcode {
 	VCAV_OP_GET_VERSION	= 1,
@@ -510,5 +512,97 @@ struct amba_virt_dma_complete {
 	__s32 status;		/* 0 = success, -ETIMEDOUT = watchdog */
 };
 
+/* ---- Mediated Low-DMA32 and Lease-Control UAPI ---- */
+
+#define AMBA_VIRT_DMA32_POOL_BASE       0x6c000000ULL
+#define AMBA_VIRT_DMA32_POOL_SIZE       0x04000000ULL /* 64 MiB */
+#define AMBA_VIRT_DMA32_NUM_SLICES      4
+#define AMBA_VIRT_DMA32_SLICE_SIZE      0x01000000ULL /* 16 MiB */
+
+/* Lease lifecycle states */
+#define AMBA_DMA_LEASE_FREE             0
+#define AMBA_DMA_LEASE_STARTING         1
+#define AMBA_DMA_LEASE_ACTIVE           2
+#define AMBA_DMA_LEASE_DRAINING         3
+#define AMBA_DMA_LEASE_SANITIZING       4
+#define AMBA_DMA_LEASE_QUARANTINED      5
+
+/* Endpoint IDs (controller-neutral reference monitor policies) */
+#define AMBA_DMA_ENDPOINT_NONE          0
+#define AMBA_DMA_ENDPOINT_UART2         1
+
+/* Operations */
+#define AMBA_DMA_OP_MEM_TO_DEV          1
+#define AMBA_DMA_OP_DEV_TO_MEM          2
+
+/* Lease ioctl commands */
+#define AMBA_DMA_LEASE_CMD_DRAIN              1
+#define AMBA_DMA_LEASE_CMD_FORCE_DRAIN        2
+#define AMBA_DMA_LEASE_CMD_RELEASE            3
+#define AMBA_DMA_LEASE_CMD_QUARANTINE_RELEASE 4
+
+/* Guest / Broker DMA Request */
+struct amba_virt_dma_request {
+	__u64 capability;
+	__u64 epoch;
+	__u64 cookie;
+	__u32 endpoint_id;
+	__u32 operation;
+	__u64 offset;
+	__u32 length;
+	__u32 flags;
+};
+
+/* Guest / Broker DMA Response */
+struct amba_virt_dma_response {
+	__u64 cookie;
+	__s32 status;
+	__u32 transferred;
+	__u32 reserved;
+};
+
+/* Pillar lease allocation */
+struct amba_dma_lease_alloc {
+	__u8  vm_uuid[16];
+	__u32 boot_generation;
+	__u32 vsock_cid;
+	__u32 lease_id;   /* Output: 0..3 */
+	__u64 capability; /* Output: 64-bit secret capability token */
+	__u64 epoch;      /* Output: initial 64-bit epoch */
+};
+
+/* Pillar lease control */
+struct amba_dma_lease_control {
+	__u32 lease_id;
+	__u32 command;
+	__u64 epoch;
+	__s32 status;
+	__u32 reserved;
+};
+
+/* Lease stats/telemetry */
+struct amba_dma_lease_stats {
+	__u32 lease_id;
+	__u32 state;
+	__u64 epoch;
+	__u64 rx_requests_total;
+	__u64 rx_bytes_total;
+	__u64 err_invalid_capability;
+	__u64 err_invalid_bounds;
+	__u64 err_invalid_epoch;
+	__u64 err_rate_limit;
+	__u64 err_dma_watchdog;
+	__u64 err_irq_storm;
+	__u32 teardown_drain_ms;
+	__u32 sanitize_duration_us;
+};
+
+/* Ioctl codes for lease device (/dev/amba_dma_lease<N>) and master (/dev/amba_dma_ctl) */
+#define AMBA_DMA_IOC_REQUEST       _IOWR(AMBA_VIRT_IOC_MAGIC, 0x30, struct amba_virt_dma_request)
+#define AMBA_DMA_IOC_LEASE_ALLOC   _IOWR(AMBA_VIRT_IOC_MAGIC, 0x31, struct amba_dma_lease_alloc)
+#define AMBA_DMA_IOC_LEASE_CTRL    _IOWR(AMBA_VIRT_IOC_MAGIC, 0x32, struct amba_dma_lease_control)
+#define AMBA_DMA_IOC_LEASE_STATS   _IOWR(AMBA_VIRT_IOC_MAGIC, 0x33, struct amba_dma_lease_stats)
+
 #endif /* _UAPI_AMBA_VIRT_H */
+
 

@@ -437,6 +437,24 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 
 		virt_dma_handle_terminate(rx->client_cid, d_req, d_resp);
 		tx->len = sizeof(*out) + sizeof(*d_resp);
+	} else if (in->type == AMBA_VIRT_MSG_DMA_REQUEST_REQ) {
+		struct amba_virt_dma_request *d_req;
+		struct amba_virt_dma_response *d_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*d_req)) {
+			fprintf(stderr, "short DMA request req %u (expected >= %zu)\n",
+				rx->len, sizeof(*in) + sizeof(*d_req));
+			return;
+		}
+		d_req = (struct amba_virt_dma_request *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_DMA_REQUEST_RESP;
+		out->seq = in->seq;
+		d_resp = (struct amba_virt_dma_response *)(tx->data + sizeof(*out));
+
+		virt_dma_handle_request(rx->client_cid, d_req, d_resp);
+		tx->len = sizeof(*out) + sizeof(*d_resp);
 	} else {
 		fprintf(stderr, "unknown type %u\n", in->type);
 	}
@@ -564,6 +582,7 @@ static void usage(const char *prog)
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "  -b, --enforce-path-b        Reject legacy Path A (VCAV_OP_RUN_DAGS) with -EPERM\n");
 	fprintf(stderr, "  -t, --tenant <cid>:<idx>    Pre-register tenant slice for vsock CID to index\n");
+	fprintf(stderr, "  -l, --lease <cid>:<lease>   Bind vsock CID to DMA32 lease index (0..3)\n");
 	fprintf(stderr, "  -h, --help                  Show this help message\n");
 }
 
@@ -662,6 +681,7 @@ int main(int argc, char **argv)
 	static struct option long_options[] = {
 		{"enforce-path-b", no_argument,       0, 'b'},
 		{"tenant",         required_argument, 0, 't'},
+		{"lease",          required_argument, 0, 'l'},
 		{"help",           no_argument,       0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -670,7 +690,7 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
-	while ((opt = getopt_long(argc, argv, "bt:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "bt:l:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'b':
 			enforce_path_b = 1;
@@ -688,6 +708,17 @@ int main(int argc, char **argv)
 				}
 			} else {
 				fprintf(stderr, "Invalid tenant format '%s' (expected <cid>:<tenant_idx>)\n", optarg);
+				return 1;
+			}
+			break;
+		}
+		case 'l': {
+			uint32_t cid = 0, lease_id = 0;
+			if (sscanf(optarg, "%u:%u", &cid, &lease_id) == 2 ||
+			    sscanf(optarg, "%u=%u", &cid, &lease_id) == 2) {
+				virt_dma_bind_cid_lease(cid, lease_id);
+			} else {
+				fprintf(stderr, "Invalid lease format '%s' (expected <cid>:<lease_id>)\n", optarg);
 				return 1;
 			}
 			break;
