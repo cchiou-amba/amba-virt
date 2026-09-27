@@ -45,6 +45,7 @@ ENABLE_CAVALRY=${ENABLE_CAVALRY:-1}
 ARGS_CAVALRY=${ARGS_CAVALRY:-"virt_user_window_mb=2048"}
 ENABLE_AMBA_VIRT=${ENABLE_AMBA_VIRT:-1}
 ARGS_AMBA_VIRT=${ARGS_AMBA_VIRT:-"shm_phys=0x100000000 shm_size=0x80000000"}
+ENABLE_AMBA_VIRT_DMA=${ENABLE_AMBA_VIRT_DMA:-1}
 #ENABLE_AMBA_PCI_PLATFORM=${ENABLE_AMBA_PCI_PLATFORM:-1}
 #ENABLE_PVRSRVKM=${ENABLE_PVRSRVKM:-1}
 
@@ -118,6 +119,7 @@ if [ "$STATUS" -eq 1 ]; then
     check_status "os08a10_mipi_brg"  "$ENABLE_OS08A10_MIPI_BRG"  "$ARGS_OS08A10_MIPI_BRG"
     check_status "cavalry"           "$ENABLE_CAVALRY"           "$ARGS_CAVALRY"
     check_status "amba_virt"         "$ENABLE_AMBA_VIRT"         "$ARGS_AMBA_VIRT"
+    check_status "amba_virt_dma"     "$ENABLE_AMBA_VIRT_DMA"     ""
     check_status "amba_pci_platform" "$ENABLE_AMBA_PCI_PLATFORM" ""
     check_status "pvrsrvkm"          "$ENABLE_PVRSRVKM"          ""
     check_status "testGDMA"          "$ENABLE_TEST_GDMA"         ""
@@ -179,6 +181,7 @@ if [ "$RELOAD" -eq 1 ]; then
     unload_mod "testGDMA"
     unload_mod "pvrsrvkm"
     unload_mod "amba_pci_platform"
+    unload_mod "amba_virt_dma"
     unload_mod "amba_virt"
     unload_mod "cavalry"
     unload_mod "os08a10_mipi_brg"
@@ -224,6 +227,7 @@ if [ -d "$MODULES_DIR" ]; then
     load_mod "os08a10_mipi_brg"  "$ENABLE_OS08A10_MIPI_BRG"  "$ARGS_OS08A10_MIPI_BRG"
     load_mod "cavalry"           "$ENABLE_CAVALRY"           "$ARGS_CAVALRY"
     load_mod "amba_virt"         "$ENABLE_AMBA_VIRT"         "$ARGS_AMBA_VIRT"
+    load_mod "amba_virt_dma"     "$ENABLE_AMBA_VIRT_DMA"
     load_mod "amba_pci_platform" "$ENABLE_AMBA_PCI_PLATFORM"
     load_mod "pvrsrvkm"          "$ENABLE_PVRSRVKM"
     load_mod "testGDMA"          "$ENABLE_TEST_GDMA"
@@ -241,7 +245,56 @@ OTP_MAJOR=$(awk '$2=="amba_otp" {print $1}' /proc/devices 2>/dev/null || true)
 [ -n "$CAV_MAJOR" ] && rm -f /dev/cavalry && mknod /dev/cavalry c "$CAV_MAJOR" 0 && chmod 666 /dev/cavalry
 [ -n "$OTP_MAJOR" ] && rm -f /dev/amba_otp && mknod /dev/amba_otp c "$OTP_MAJOR" 0 && chmod 600 /dev/amba_otp
 
-# 5. Start amba-virt-backend background supervisor if binary present
+# 5. Configure VFIO platform and bind UART platform devices if present
+load_mod "vfio"              "1" "enable_unsafe_noiommu_mode=1"
+load_mod "vfio_virqfd"       "1"
+load_mod "vfio_iommu_type1"  "1"
+load_mod "vfio-platform-base" "1"
+load_mod "vfio-platform"     "1" "reset_required=0"
+if [ -w /sys/module/vfio/parameters/enable_unsafe_noiommu_mode ]; then
+    echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode 2>/dev/null || true
+fi
+if [ -w /sys/module/vfio_platform/parameters/reset_required ]; then
+    echo 0 > /sys/module/vfio_platform/parameters/reset_required 2>/dev/null || true
+fi
+
+for udev in ffe0018000.uart ffe0019000.uart; do
+    if [ -d "/sys/bus/platform/devices/$udev" ]; then
+        if [ -e "/sys/bus/platform/devices/$udev/driver" ]; then
+            drv=$(basename "$(readlink "/sys/bus/platform/devices/$udev/driver")")
+            if [ "$drv" != "vfio-platform" ]; then
+                echo "$udev" > "/sys/bus/platform/devices/$udev/driver/unbind" 2>/dev/null || true
+            fi
+        fi
+        echo "vfio-platform" > "/sys/bus/platform/devices/$udev/driver_override" 2>/dev/null || true
+        echo "$udev" > "/sys/bus/platform/drivers/vfio-platform/bind" 2>/dev/null || true
+    fi
+done
+
+# 6. Start amba-virt-server supervisor if binary present
+SERVER_BIN=""
+if [ -x "$PERSIST_DIR/bin/amba-virt-server" ]; then
+    SERVER_BIN="$PERSIST_DIR/bin/amba-virt-server"
+elif [ -x "/usr/local/bin/amba-virt-server" ]; then
+    SERVER_BIN="/usr/local/bin/amba-virt-server"
+fi
+
+if [ -n "$SERVER_BIN" ]; then
+    mkdir -p "$PERSIST_DIR/log"
+    if ! pidof amba-virt-server >/dev/null 2>&1; then
+        echo "Starting amba-virt-server supervisor..."
+        (
+            while true; do
+                if [ -x "$SERVER_BIN" ]; then
+                    "$SERVER_BIN" >> "$PERSIST_DIR/log/amba-virt-server.log" 2>&1 || true
+                fi
+                sleep 2
+            done
+        ) >/dev/null 2>&1 < /dev/null &
+    fi
+fi
+
+# 7. Start amba-virt-backend background supervisor if binary present
 BACKEND_BIN=""
 if [ -x "$PERSIST_DIR/bin/amba-virt-backend" ]; then
     BACKEND_BIN="$PERSIST_DIR/bin/amba-virt-backend"
@@ -283,7 +336,7 @@ if [ -n "$BACKEND_BIN" ]; then
                     sleep 5
                 fi
             done
-        ) &
+        ) >/dev/null 2>&1 < /dev/null &
     fi
 fi
 
