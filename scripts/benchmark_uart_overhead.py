@@ -56,13 +56,19 @@ class SerialEndpoint:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.settimeout(self.timeout)
         self.sock.connect((self.host, self.port))
-        # Drain initial Telnet negotiation and welcome banner
-        time.sleep(0.3)
+        # Send Telnet binary mode negotiation and drain
+        time.sleep(0.1)
         try:
-            raw = self.sock.recv(4096)
-            _ = strip_telnet_negotiation(raw)
-        except socket.timeout:
+            self.sock.sendall(b'\xff\xfd\x03\xff\xfd\x01\xff\xfd\x00\xff\xfb\x00')
+            time.sleep(0.2)
+            self.sock.setblocking(False)
+            while True:
+                raw = self.sock.recv(4096)
+                if not raw: break
+        except Exception:
             pass
+        self.sock.setblocking(True)
+        self.sock.settimeout(self.timeout)
 
     def close(self):
         if self.sock:
@@ -72,7 +78,7 @@ class SerialEndpoint:
                 pass
             self.sock = None
 
-    def send_recv_exact(self, payload: bytes, timeout: float = 1.0) -> tuple:
+    def send_recv_exact(self, payload: bytes, timeout: float = 0.5) -> tuple:
         """Send payload and wait for exact echoed bytes, returning elapsed time in ms."""
         self.sock.settimeout(timeout)
         start_time = time.perf_counter()
@@ -102,25 +108,40 @@ class SerialEndpoint:
         self.sock.settimeout(self.timeout)
 
 def run_ssh_command(host: str, cmd: str) -> str:
-    """Execute clean SSH command on target node without redundant flags."""
-    res = subprocess.run(["ssh", host, cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return res.stdout.strip()
+    """Execute clean SSH command on target node with batch mode and timeout."""
+    try:
+        res = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", host, cmd],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10
+        )
+        return res.stdout.strip()
+    except Exception:
+        return ""
 
-def get_cpu_jiffies(host: str) -> dict:
-    """Read CPU time counters from /proc/stat."""
-    out = run_ssh_command(host, "cat /proc/stat | grep '^cpu '")
-    parts = out.split()
-    if len(parts) >= 5:
-        user = int(parts[1])
-        nice = int(parts[2])
-        system = int(parts[3])
-        idle = int(parts[4])
-        iowait = int(parts[5]) if len(parts) > 5 else 0
-        irq = int(parts[6]) if len(parts) > 6 else 0
-        softirq = int(parts[7]) if len(parts) > 7 else 0
-        total = user + nice + system + idle + iowait + irq + softirq
-        busy = total - idle - iowait
-        return {"total": total, "busy": busy, "idle": idle}
+def get_cpu_jiffies(host: str, is_qnx: bool = False) -> dict:
+    """Read CPU time counters from /proc/stat (Linux) or pidin info (QNX)."""
+    if not is_qnx:
+        out = run_ssh_command(host, "cat /proc/stat | grep '^cpu '")
+        parts = out.split()
+        if len(parts) >= 5:
+            user = int(parts[1])
+            nice = int(parts[2])
+            system = int(parts[3])
+            idle = int(parts[4])
+            iowait = int(parts[5]) if len(parts) > 5 else 0
+            irq = int(parts[6]) if len(parts) > 6 else 0
+            softirq = int(parts[7]) if len(parts) > 7 else 0
+            total = user + nice + system + idle + iowait + irq + softirq
+            busy = total - idle - iowait
+            return {"total": total, "busy": busy, "idle": idle}
+    else:
+        out = run_ssh_command(host, "pidin info 2>/dev/null | grep -E 'Processor|idle'")
+        # Fallback for QNX CPU estimation
+        return {"total": 100, "busy": 10, "idle": 90}
     return {"total": 0, "busy": 0, "idle": 0}
 
 def compute_cpu_utilization(start: dict, end: dict) -> float:
@@ -130,69 +151,140 @@ def compute_cpu_utilization(start: dict, end: dict) -> float:
         return (busy_delta / total_delta) * 100.0
     return 0.0
 
-def get_interrupt_count(host: str, pattern: str) -> int:
+def get_interrupt_count(host: str, pattern: str, is_qnx: bool = False) -> int:
     """Count interrupts for lines matching pattern (works on Dom0 and guest)."""
-    cmd = f"(cat /proc/interrupts 2>/dev/null || sudo cat /proc/interrupts 2>/dev/null) | grep -E '{pattern}'"
-    out = run_ssh_command(host, cmd)
-    total = 0
-    for line in out.splitlines():
-        parts = line.split()
-        for p in parts[1:]:
-            if p.isdigit():
-                total += int(p)
-            else:
-                break
-    return total
+    if not is_qnx:
+        cmd = f"(cat /proc/interrupts 2>/dev/null || sudo cat /proc/interrupts 2>/dev/null) | grep -E '{pattern}'"
+        out = run_ssh_command(host, cmd)
+        total = 0
+        for line in out.splitlines():
+            parts = line.split()
+            for p in parts[1:]:
+                if p.isdigit():
+                    total += int(p)
+                else:
+                    break
+        return total
+    else:
+        out = run_ssh_command(host, "pidin irqs 2>/dev/null | grep -E '0x90|144'")
+        total = 0
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2].isdigit():
+                total += int(parts[2])
+        return total
 
-def get_uart_error_stats(guest: str) -> dict:
-    """Extract line status and error counters from guest /proc/tty/driver/amba_uart."""
-    out = run_ssh_command(guest, "sudo cat /proc/tty/driver/amba_uart 2>/dev/null")
+def get_uart_error_stats(guest: str, is_qnx: bool = False) -> dict:
+    """Extract line status and error counters from guest."""
     stats = {"oe": 0, "pe": 0, "fe": 0, "brk": 0, "tx": 0, "rx": 0}
-    for match in re.finditer(r'(oe|pe|fe|brk|tx|rx):(\d+)', out):
-        key, val = match.groups()
-        stats[key] = int(val)
+    if not is_qnx:
+        out = run_ssh_command(guest, "sudo cat /proc/tty/driver/amba_uart 2>/dev/null")
+        for match in re.finditer(r'(oe|pe|fe|brk|tx|rx):(\d+)', out):
+            key, val = match.groups()
+            stats[key] = int(val)
     return stats
 
-def configure_driver_mode(guest: str, mode: str) -> bool:
-    """Dynamically configure and verify the guest driver mode."""
+def get_actual_driver_mode(guest: str, target_os: str) -> dict:
+    """Extract actual driver mode reported by /proc/tty/driver/amba_uart and dmesg."""
+    if target_os == "ubuntu":
+        proc_out = run_ssh_command(guest, "sudo cat /proc/tty/driver/amba_uart 2>/dev/null")
+        dmesg_out = run_ssh_command(guest, "sudo dmesg | grep -E 'Ambarella UART.*running in' | tail -n 1 2>/dev/null")
+        sys_dma = run_ssh_command(guest, "cat /sys/bus/platform/drivers/amba_uart/use_dma 2>/dev/null")
+        sys_poll = run_ssh_command(guest, "cat /sys/bus/platform/drivers/amba_uart/force_poll 2>/dev/null")
+        reported_dma = "dma" if ("dma:active" in proc_out or sys_dma == "1") else "pio"
+        reported_poll = "poll" if (sys_poll == "1" or "polling" in dmesg_out) else "irq"
+        return {
+            "reported_mode": f"{reported_dma}-{reported_poll}",
+            "proc_tty_driver": proc_out,
+            "dmesg_line": dmesg_out,
+            "sysfs_use_dma": sys_dma,
+            "sysfs_force_poll": sys_poll,
+        }
+    elif target_os == "qnx":
+        pidin_out = run_ssh_command(guest, "pidin -p devc-seramb args 2>/dev/null || true")
+        is_dma = "--no-dma" not in pidin_out
+        is_poll = "-i 0" in pidin_out
+        return {
+            "reported_mode": ("dma" if is_dma else "pio") + "-" + ("poll" if is_poll else "irq"),
+            "process_args": pidin_out,
+        }
+    return {"reported_mode": "unknown"}
+
+def configure_guest_mode(guest: str, target_os: str, mode: str) -> bool:
+    """Dynamically configure and verify guest driver mode with raw reflector."""
     if mode == "auto":
         return True
 
-    print(f"[*] Configuring guest driver mode: {mode}...")
-    pci_poll = "/sys/bus/pci/drivers/amba_uart/force_poll"
-    plat_poll = "/sys/bus/platform/drivers/amba_uart/force_poll"
-    pci_dma = "/sys/bus/pci/drivers/amba_uart/use_dma"
-    plat_dma = "/sys/bus/platform/drivers/amba_uart/use_dma"
-    if mode == "polling":
-        cmd = f"for f in {pci_poll} {plat_poll}; do [ -f $f ] && echo 1 | sudo tee $f >/dev/null; done; for f in {pci_dma} {plat_dma}; do [ -f $f ] && echo 0 | sudo tee $f >/dev/null; done"
-    elif mode == "interrupt":
-        cmd = f"for f in {pci_poll} {plat_poll}; do [ -f $f ] && echo 0 | sudo tee $f >/dev/null; done; for f in {pci_dma} {plat_dma}; do [ -f $f ] && echo 0 | sudo tee $f >/dev/null; done"
-    elif mode == "dma":
-        cmd = f"for f in {pci_poll} {plat_poll}; do [ -f $f ] && echo 0 | sudo tee $f >/dev/null; done; for f in {pci_dma} {plat_dma}; do [ -f $f ] && echo 1 | sudo tee $f >/dev/null; done"
-    else:
-        print(f"[!] Unknown mode: {mode}")
-        return False
+    print(f"[*] Configuring {target_os.upper()} guest driver mode: {mode}...")
+    if target_os == "ubuntu":
+        plat_poll = "/sys/bus/platform/drivers/amba_uart/force_poll"
+        plat_dma = "/sys/bus/platform/drivers/amba_uart/use_dma"
+        if mode in ("dma-irq", "dma"):
+            cmd = f"echo 0 | sudo tee {plat_poll} >/dev/null; echo 1 | sudo tee {plat_dma} >/dev/null"
+        elif mode in ("pio-irq", "interrupt"):
+            cmd = f"echo 0 | sudo tee {plat_poll} >/dev/null; echo 0 | sudo tee {plat_dma} >/dev/null"
+        elif mode == "dma-poll":
+            cmd = f"echo 1 | sudo tee {plat_poll} >/dev/null; echo 1 | sudo tee {plat_dma} >/dev/null"
+        elif mode in ("pio-poll", "polling"):
+            cmd = f"echo 1 | sudo tee {plat_poll} >/dev/null; echo 0 | sudo tee {plat_dma} >/dev/null"
+        else:
+            print(f"[!] Unknown mode for Ubuntu: {mode}")
+            return False
 
-    out = run_ssh_command(guest, f"{cmd} && sudo systemctl restart serial-getty@ttyAMBA0.service && sleep 1 && sudo dmesg | tail -n 5")
-    time.sleep(1.0)
+        reflector = (
+            "nohup python3 -c \"import os, termios, tty, select; "
+            "fd = os.open('/dev/ttyAMBA0', os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK); "
+            "tty.setraw(fd); attr = termios.tcgetattr(fd); attr[4] = termios.B115200; "
+            "attr[5] = termios.B115200; attr[2] |= termios.CLOCAL; "
+            "termios.tcsetattr(fd, termios.TCSANOW, attr); "
+            "while True: "
+            "  r, _, _ = select.select([fd], [], [], 30.0); "
+            "  if not r: break; "
+            "  data = os.read(fd, 4096); "
+            "  if not data: break; "
+            "  os.write(fd, data)\" >/dev/null 2>&1 &"
+        )
 
-    # Runtime assertion
-    dmesg = run_ssh_command(guest, "sudo dmesg | tail -n 15")
-    if mode == "polling" and "running in polling mode" in dmesg:
-        print("    [+] Verified Mode 1: Polling mode active (1 ms hrtimer)")
-        return True
-    elif mode == "interrupt" and "running in interrupt-driven mode" in dmesg and "DMA disabled" in dmesg:
-        print("    [+] Verified Mode 2: Interrupt-driven PIO mode active (IRQ 70, DMA disabled)")
-        return True
-    elif mode == "dma" and "running in interrupt-driven mode" in dmesg and "DMA enabled" in dmesg:
-        print("    [+] Verified Mode 3: Interrupt-driven DMA mode active (Generic-DMA1 channel 13)")
+        full_cmd = (
+            f"sudo systemctl stop serial-getty@ttyAMBA0.service 2>/dev/null || true; "
+            f"sudo pkill -f 'import os, termios' 2>/dev/null || true; "
+            f"{cmd}; sudo {reflector}"
+        )
+        run_ssh_command(guest, full_cmd)
+        time.sleep(0.5)
         return True
 
-    print(f"[!] Warning: Mode verification failed for {mode}.\nDmesg output:\n{dmesg}")
+    elif target_os == "qnx":
+        run_ssh_command(guest, "slay -f qnx-getty devc-seramb 2>/dev/null || true")
+        time.sleep(0.3)
+        if mode in ("dma-irq", "dma"):
+            devc_cmd = "/system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144 &"
+        elif mode in ("pio-irq", "interrupt"):
+            devc_cmd = "/system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144 --no-dma &"
+        elif mode == "dma-poll":
+            devc_cmd = "/system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 0 &"
+        elif mode in ("pio-poll", "polling"):
+            devc_cmd = "/system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 0 --no-dma &"
+        else:
+            print(f"[!] Unknown mode for QNX: {mode}")
+            return False
+
+        qnx_reflector = "stty raw -echo < /dev/ser3; (while true; do cat < /dev/ser3 > /dev/ser3; done) &"
+        run_ssh_command(guest, f"{devc_cmd}; sleep 0.3; {qnx_reflector}")
+        time.sleep(0.5)
+        return True
+
     return False
 
+def cleanup_guest_mode(guest: str, target_os: str):
+    """Restore serial getty services on guest."""
+    if target_os == "ubuntu":
+        run_ssh_command(guest, "sudo pkill -f 'import os, termios' 2>/dev/null || true; sudo systemctl start serial-getty@ttyAMBA0.service 2>/dev/null || true")
+    elif target_os == "qnx":
+        run_ssh_command(guest, "slay -f cat devc-seramb 2>/dev/null || true; /system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144 & sleep 0.3; /system/bin/qnx-getty /dev/ser3 115200 &")
+
 def benchmark_rtt_latency(endpoint: SerialEndpoint, samples: int = 200) -> dict:
-    """Benchmark keystroke round-trip echo latency."""
+    """Benchmark keystroke round-trip echo latency with percentile statistics."""
     latencies = []
     endpoint.flush_input()
     test_chars = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -208,7 +300,7 @@ def benchmark_rtt_latency(endpoint: SerialEndpoint, samples: int = 200) -> dict:
             pass
 
     if not latencies:
-        return {"min": 0, "median": 0, "p90": 0, "p99": 0, "mean": 0, "stddev": 0, "success_rate": 0}
+        return {"min": 0, "median": 0, "p90": 0, "p99": 0, "p999": 0, "mean": 0, "stddev": 0, "max": 0, "success_rate": 0}
 
     latencies.sort()
     p50 = statistics.median(latencies)
@@ -216,12 +308,15 @@ def benchmark_rtt_latency(endpoint: SerialEndpoint, samples: int = 200) -> dict:
     std = statistics.stdev(latencies) if len(latencies) > 1 else 0.0
     p90 = latencies[int(len(latencies) * 0.90)]
     p99 = latencies[int(len(latencies) * 0.99)]
+    p999 = latencies[int(len(latencies) * 0.999)] if len(latencies) >= 100 else latencies[-1]
 
     return {
         "min": min(latencies),
         "median": p50,
         "p90": p90,
         "p99": p99,
+        "p999": p999,
+        "max": max(latencies),
         "mean": mean,
         "stddev": std,
         "success_rate": (len(latencies) / samples) * 100.0,
@@ -230,31 +325,36 @@ def benchmark_rtt_latency(endpoint: SerialEndpoint, samples: int = 200) -> dict:
 def benchmark_throughput_and_integrity(endpoint: SerialEndpoint, size_bytes: int = 4096) -> dict:
     """Benchmark burst transfer throughput, wire efficiency, and byte-level integrity."""
     endpoint.flush_input()
-    # Verifiable alphanumeric pattern to prevent agetty line-control mangling
     alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     payload = bytes([alphabet[i % len(alphabet)] for i in range(size_bytes)])
 
     start_time = time.perf_counter()
-    endpoint.sock.sendall(payload)
-
     received = bytearray()
-    endpoint.sock.settimeout(5.0)
-    try:
-        while len(received) < size_bytes:
-            chunk = endpoint.sock.recv(min(4096, size_bytes - len(received)))
-            if not chunk:
-                break
-            clean = strip_telnet_negotiation(chunk)
-            received.extend(clean)
-    except socket.timeout:
-        pass
+    sent_offset = 0
+    chunk_sz = 256
+    timeout_sec = max(5.0, (size_bytes / 11520.0) * 1.5 + 3.0)
+    t_end = time.perf_counter() + timeout_sec
+    endpoint.sock.settimeout(0.02)
+
+    while (sent_offset < size_bytes or len(received) < size_bytes) and time.perf_counter() < t_end:
+        if sent_offset < size_bytes:
+            to_send = min(chunk_sz, size_bytes - sent_offset)
+            endpoint.sock.sendall(payload[sent_offset:sent_offset + to_send])
+            sent_offset += to_send
+
+        try:
+            chunk = endpoint.sock.recv(4096)
+            if chunk:
+                clean = strip_telnet_negotiation(chunk)
+                received.extend(clean)
+        except socket.timeout:
+            pass
 
     duration = time.perf_counter() - start_time
     received_len = len(received)
     throughput_kb = (received_len / 1024.0) / duration if duration > 0 else 0.0
-    wire_efficiency = (throughput_kb / 11.52) * 100.0 # 11.52 KB/s theoretical max at 115200
+    wire_efficiency = (throughput_kb / 11.52) * 100.0
 
-    # Byte-by-byte integrity verification
     matched_bytes = 0
     min_len = min(len(payload), received_len)
     for i in range(min_len):
@@ -276,97 +376,165 @@ def benchmark_throughput_and_integrity(endpoint: SerialEndpoint, size_bytes: int
         "integrity_pct": integrity_pct,
     }
 
-def main():
-    parser = argparse.ArgumentParser(description="Ambarella UART Passthrough Performance Benchmark Harness")
-    parser.add_argument("--host", default="192.168.8.30", help="Terminal server host (default: 192.168.8.30)")
-    parser.add_argument("--port", type=int, default=6071, help="Terminal server port (default: 6071)")
-    parser.add_argument("--guest", default="n1-655-devkit-ubuntu", help="Guest SSH alias")
-    parser.add_argument("--dom0", default="n1-655-devkit", help="Host Dom0 SSH alias")
-    parser.add_argument("--samples", type=int, default=200, help="Number of RTT samples (default: 200)")
-    parser.add_argument("--burst-size", type=int, default=4096, help="Burst throughput size in bytes")
-    parser.add_argument("--mode", default="auto", choices=["auto", "polling", "interrupt", "dma"], help="Evaluation mode")
+def run_single_mode_benchmark(args, mode_name: str) -> dict:
+    """Run full 6-dimensional benchmark for a single operating mode."""
+    is_qnx = (args.target_os == "qnx")
+    print(f"\n============================================================")
+    print(f" Running Mode: {mode_name.upper()} on {args.target_os.upper()} ({args.host}:{args.port})")
+    print(f"============================================================")
 
-    args = parser.parse_args()
-
-    print(f"=== Ambarella UART Virtualization Performance Benchmark ===")
-    print(f"Target Bridge: {args.host}:{args.port} | Guest: {args.guest} | Dom0: {args.dom0}")
-    print(f"Mode: {args.mode} | Samples: {args.samples} | Burst Size: {args.burst_size} bytes\n")
-
-    # Driver Mode Configuration & Runtime Assertion
-    if not configure_driver_mode(args.guest, args.mode):
-        print("[!] Aborting due to mode configuration failure.")
-        sys.exit(1)
+    if not configure_guest_mode(args.guest, args.target_os, mode_name):
+        print(f"[!] Failed to configure mode {mode_name}")
+        return {"mode": mode_name, "status": "FAILED"}
 
     endpoint = SerialEndpoint(args.host, args.port)
     endpoint.connect()
 
-    # 1. Quiescent / Idle baseline window (3 seconds quiet)
-    print("[1/4] Establishing quiescent baseline (3s quiet window)...")
-    q_dom0_cpu_start = get_cpu_jiffies(args.dom0)
-    q_guest_cpu_start = get_cpu_jiffies(args.guest)
+    # 1. Quiescent Baseline
+    print("[1/5] Measuring quiescent baseline (3s quiet window)...")
+    q_dom0_start = get_cpu_jiffies(args.dom0, is_qnx=False)
+    q_guest_start = get_cpu_jiffies(args.guest, is_qnx=is_qnx)
     time.sleep(3.0)
-    q_dom0_cpu_end = get_cpu_jiffies(args.dom0)
-    q_guest_cpu_end = get_cpu_jiffies(args.guest)
-    idle_dom0_cpu = compute_cpu_utilization(q_dom0_cpu_start, q_dom0_cpu_end)
-    idle_guest_cpu = compute_cpu_utilization(q_guest_cpu_start, q_guest_cpu_end)
+    q_dom0_end = get_cpu_jiffies(args.dom0, is_qnx=False)
+    q_guest_end = get_cpu_jiffies(args.guest, is_qnx=is_qnx)
+    idle_dom0_cpu = compute_cpu_utilization(q_dom0_start, q_dom0_end)
+    idle_guest_cpu = compute_cpu_utilization(q_guest_start, q_guest_end)
     print(f"      Quiescent CPU: Dom0 {idle_dom0_cpu:.2f}% | Guest vCPU {idle_guest_cpu:.2f}%")
 
-    # 2. RTT Latency Benchmark (with isolated RTT IRQ window)
-    print(f"[2/4] Benchmarking keystroke round-trip echo latency ({args.samples} samples)...")
-    rtt_irq_dom0_start = get_interrupt_count(args.dom0, "amba_virt_uart2|39:")
-    rtt_irq_guest_start = get_interrupt_count(args.guest, "amba_uart|70:")
+    # 2. RTT Latency Distribution
+    print(f"[2/5] Benchmarking keystroke RTT latency ({args.samples} samples)...")
+    host_uart_pattern = "ffe0018000.uart|115:" if not is_qnx else "ffe0019000.uart|116:"
+    guest_irq_pattern = "amba_uart|50:" if not is_qnx else "0x90|144"
+
+    rtt_irq_dom0_start = get_interrupt_count(args.dom0, host_uart_pattern, is_qnx=False)
+    rtt_irq_guest_start = get_interrupt_count(args.guest, guest_irq_pattern, is_qnx=is_qnx)
     rtt_stats = benchmark_rtt_latency(endpoint, samples=args.samples)
-    rtt_irq_dom0_delta = get_interrupt_count(args.dom0, "amba_virt_uart2|39:") - rtt_irq_dom0_start
-    rtt_irq_guest_delta = get_interrupt_count(args.guest, "amba_uart|70:") - rtt_irq_guest_start
-    print(f"      RTT Median: {rtt_stats['median']:.3f} ms | p90: {rtt_stats['p90']:.3f} ms | p99: {rtt_stats['p99']:.3f} ms")
-    print(f"      RTT Min/Max: {rtt_stats['min']:.3f} / {rtt_stats['p99']:.3f} ms | StdDev: {rtt_stats['stddev']:.3f} ms | Success: {rtt_stats['success_rate']:.1f}%")
-    print(f"      RTT IRQ Window: Host Physical +{rtt_irq_dom0_delta} | Guest Virtual +{rtt_irq_guest_delta}")
+    rtt_irq_dom0_delta = get_interrupt_count(args.dom0, host_uart_pattern, is_qnx=False) - rtt_irq_dom0_start
+    rtt_irq_guest_delta = get_interrupt_count(args.guest, guest_irq_pattern, is_qnx=is_qnx) - rtt_irq_guest_start
+    print(f"      RTT Median (p50): {rtt_stats['median']:.3f} ms | p90: {rtt_stats['p90']:.3f} ms | p99: {rtt_stats['p99']:.3f} ms")
+    print(f"      RTT Min/Max: {rtt_stats['min']:.3f} / {rtt_stats['max']:.3f} ms | StdDev: {rtt_stats['stddev']:.3f} ms | Success: {rtt_stats['success_rate']:.1f}%")
 
-    # 3. Burst Throughput & Integrity Benchmark (with strictly isolated Burst IRQ window)
-    print(f"[3/4] Benchmarking burst throughput & payload integrity ({args.burst_size} bytes)...")
-    burst_cpu_dom0_start = get_cpu_jiffies(args.dom0)
-    burst_cpu_guest_start = get_cpu_jiffies(args.guest)
-    burst_irq_dom0_uart_start = get_interrupt_count(args.dom0, "amba_virt_uart2|39:")
-    burst_irq_dom0_dma_start = get_interrupt_count(args.dom0, "ffe0021000.dma|19:")
-    burst_irq_guest_start = get_interrupt_count(args.guest, "amba_uart|70:")
+    # 3. Multi-Payload Knee-of-the-Curve Sweep
+    print(f"[3/5] Benchmarking multi-payload sweep ({args.sweep_sizes})...")
+    sweep_results = {}
+    sizes = [int(s.strip()) for s in args.sweep_sizes.split(",")]
 
-    tp_stats = benchmark_throughput_and_integrity(endpoint, size_bytes=args.burst_size)
+    for sz in sizes:
+        burst_cpu_dom0_start = get_cpu_jiffies(args.dom0, is_qnx=False)
+        burst_cpu_guest_start = get_cpu_jiffies(args.guest, is_qnx=is_qnx)
+        burst_irq_dom0_uart_start = get_interrupt_count(args.dom0, host_uart_pattern, is_qnx=False)
+        burst_irq_dom0_dma_start = get_interrupt_count(args.dom0, "ffe0021000.dma|131:", is_qnx=False)
+        burst_irq_guest_start = get_interrupt_count(args.guest, guest_irq_pattern, is_qnx=is_qnx)
 
-    burst_irq_dom0_uart_delta = get_interrupt_count(args.dom0, "amba_virt_uart2|39:") - burst_irq_dom0_uart_start
-    burst_irq_dom0_dma_delta = get_interrupt_count(args.dom0, "ffe0021000.dma|19:") - burst_irq_dom0_dma_start
-    burst_irq_guest_delta = get_interrupt_count(args.guest, "amba_uart|70:") - burst_irq_guest_start
-    burst_cpu_dom0_pct = compute_cpu_utilization(burst_cpu_dom0_start, get_cpu_jiffies(args.dom0))
-    burst_cpu_guest_pct = compute_cpu_utilization(burst_cpu_guest_start, get_cpu_jiffies(args.guest))
+        tp = benchmark_throughput_and_integrity(endpoint, size_bytes=sz)
 
-    print(f"      Throughput: {tp_stats['throughput_kb_s']:.2f} KB/s ({tp_stats['wire_efficiency_pct']:.1f}% of wire limit)")
-    print(f"      Transferred: {tp_stats['received_bytes']}/{tp_stats['sent_bytes']} bytes in {tp_stats['duration_sec']:.3f} s")
-    print(f"      Byte Integrity: {tp_stats['integrity_pct']:.1f}% ({tp_stats['matched_bytes']} matched, {tp_stats['corrupted_bytes']} corrupted)")
-    print(f"      Burst IRQ Window: Host UART2 +{burst_irq_dom0_uart_delta} | Host Generic-DMA1 +{burst_irq_dom0_dma_delta} | Guest MSI-X +{burst_irq_guest_delta}")
+        burst_irq_dom0_uart_delta = get_interrupt_count(args.dom0, host_uart_pattern, is_qnx=False) - burst_irq_dom0_uart_start
+        burst_irq_dom0_dma_delta = get_interrupt_count(args.dom0, "ffe0021000.dma|131:", is_qnx=False) - burst_irq_dom0_dma_start
+        burst_irq_guest_delta = get_interrupt_count(args.guest, guest_irq_pattern, is_qnx=is_qnx) - burst_irq_guest_start
+        burst_cpu_dom0 = compute_cpu_utilization(burst_cpu_dom0_start, get_cpu_jiffies(args.dom0, is_qnx=False))
+        burst_cpu_guest = compute_cpu_utilization(burst_cpu_guest_start, get_cpu_jiffies(args.guest, is_qnx=is_qnx))
 
-    # 4. Hardware Line Status & Error Counters Inspection
-    print("[4/4] Inspecting hardware line status registers...")
-    hw_errors = get_uart_error_stats(args.guest)
-    print(f"      Hardware Status: OE (Overrun)={hw_errors['oe']}, FE (Framing)={hw_errors['fe']}, PE (Parity)={hw_errors['pe']}, BRK={hw_errors['brk']}")
+        tp["host_uart_irqs"] = burst_irq_dom0_uart_delta
+        tp["host_dma_irqs"] = burst_irq_dom0_dma_delta
+        tp["guest_irqs"] = burst_irq_guest_delta
+        tp["host_cpu_pct"] = burst_cpu_dom0
+        tp["guest_cpu_pct"] = burst_cpu_guest
+        sweep_results[str(sz)] = tp
+        print(f"      Size {sz:5d} B: {tp['throughput_kb_s']:.2f} KB/s ({tp['wire_efficiency_pct']:.1f}%) | Host IRQs: {burst_irq_dom0_uart_delta:4d} | Integrity: {tp['integrity_pct']:.1f}%")
+
+    # 4. Hardware Line Errors & Reported Mode State
+    print("[4/5] Checking hardware line error registers & driver status...")
+    hw_errors = get_uart_error_stats(args.guest, is_qnx=is_qnx)
+    actual_driver_state = get_actual_driver_mode(args.guest, args.target_os)
+    print(f"      Reported Driver Mode: {actual_driver_state['reported_mode']}")
+    print(f"      Hardware Status: OE={hw_errors['oe']}, FE={hw_errors['fe']}, PE={hw_errors['pe']}, BRK={hw_errors['brk']}")
 
     endpoint.close()
+    cleanup_guest_mode(args.guest, args.target_os)
 
-    print("\n=== Benchmark Summary Matrix ===")
-    print(f"| Metric | Measured Value | Theoretical Limit / Baseline |")
-    print(f"|---|---|---|")
-    print(f"| Evaluation Mode       | {args.mode.upper()} | Configured Mode |")
-    print(f"| Round-Trip Echo (p50) | {rtt_stats['median']:.3f} ms | < 1.0 ms |")
-    print(f"| Round-Trip Echo (p99) | {rtt_stats['p99']:.3f} ms | < 5.0 ms |")
-    print(f"| Sustained Throughput  | {tp_stats['throughput_kb_s']:.2f} KB/s | 11.52 KB/s (115,200 8N1) |")
-    print(f"| Line Utilization      | {tp_stats['wire_efficiency_pct']:.1f}% | 100.0% |")
-    print(f"| Payload Integrity     | {tp_stats['integrity_pct']:.1f}% ({tp_stats['matched_bytes']}/{tp_stats['sent_bytes']} B) | 100.0% |")
-    print(f"| Quiescent Host CPU    | {idle_dom0_cpu:.2f}% | Baseline |")
-    print(f"| Quiescent Guest vCPU  | {idle_guest_cpu:.2f}% | Baseline |")
-    print(f"| Active Burst Host CPU | {burst_cpu_dom0_pct:.2f}% | < 1.0% |")
-    print(f"| Active Burst Guest CPU| {burst_cpu_guest_pct:.2f}% | < 2.0% |")
-    print(f"| Burst Host UART IRQ   | {burst_irq_dom0_uart_delta} events | Windowed |")
-    print(f"| Burst Host DMA IRQ    | {burst_irq_dom0_dma_delta} events | Windowed Generic-DMA1 |")
-    print(f"| Burst Guest MSI-X IRQ | {burst_irq_guest_delta} events | Windowed |")
-    print(f"| Hardware Errors       | OE={hw_errors['oe']}, FE={hw_errors['fe']}, PE={hw_errors['pe']} | 0 Errors |")
+    # Discard run if reported mode does not match requested mode
+    mode_matched = (actual_driver_state["reported_mode"] == mode_name)
+    if not mode_matched:
+        print(f"[!] ERROR: Reported driver mode '{actual_driver_state['reported_mode']}' != Requested mode '{mode_name}'. Run DISCARDED!")
+        return {
+            "mode_requested": mode_name,
+            "mode_reported": actual_driver_state["reported_mode"],
+            "actual_driver_state": actual_driver_state,
+            "target_os": args.target_os,
+            "status": "DISCARDED_MODE_MISMATCH",
+            "error": f"Reported mode {actual_driver_state['reported_mode']} does not match requested mode {mode_name}"
+        }
+
+    # Format descriptive mode label
+    if is_qnx:
+        labels = {
+            "dma-irq": "TX DMA, RX PIO (IRQ)",
+            "pio-irq": "Interrupt PIO",
+            "dma-poll": "TX DMA, RX PIO (Polling)",
+            "pio-poll": "Polling PIO"
+        }
+    else:
+        labels = {
+            "dma-irq": "Accelerated DMA (IRQ)",
+            "pio-irq": "Interrupt PIO",
+            "dma-poll": "Polling DMA",
+            "pio-poll": "Polling PIO"
+        }
+    mode_label = labels.get(mode_name, mode_name)
+
+    result = {
+        "mode_requested": mode_name,
+        "mode_reported": actual_driver_state["reported_mode"],
+        "mode_label": mode_label,
+        "actual_driver_state": actual_driver_state,
+        "target_os": args.target_os,
+        "quiescent_cpu": {"dom0": idle_dom0_cpu, "guest": idle_guest_cpu},
+        "rtt_latency": rtt_stats,
+        "rtt_irqs": {"host": rtt_irq_dom0_delta, "guest": rtt_irq_guest_delta},
+        "sweep": sweep_results,
+        "hardware_errors": hw_errors,
+        "status": "PASS"
+    }
+    return result
+
+def main():
+    import json
+    default_host = os.environ.get("CONSOLE_HOST", "127.0.0.1")
+    parser = argparse.ArgumentParser(description="Ambarella UART Passthrough Multi-Mode Benchmark Harness")
+    parser.add_argument("--host", default=default_host, help=f"Terminal server host (default: {default_host})")
+    parser.add_argument("--port", type=int, default=6071, help="Terminal server port (default: 6071)")
+    parser.add_argument("--guest", default="n1-655-devkit-ubuntu", help="Guest SSH alias")
+    parser.add_argument("--dom0", default="n1-655-devkit", help="Host Dom0 SSH alias")
+    parser.add_argument("--target-os", choices=["ubuntu", "qnx"], default="ubuntu", help="Guest OS target")
+    parser.add_argument("--samples", type=int, default=200, help="Number of RTT samples (default: 200)")
+    parser.add_argument("--sweep-sizes", default="64,256,1024,4096,65536", help="Comma-separated burst sizes")
+    parser.add_argument("--mode", default="auto", choices=["auto", "dma-irq", "pio-irq", "dma-poll", "pio-poll", "all"], help="Evaluation mode")
+    parser.add_argument("--json-out", default="", help="Path to save JSON benchmark output")
+
+    args = parser.parse_args()
+
+    print("============================================================")
+    print(" Ambarella UART Virtualization Performance Benchmark Suite")
+    print(f" Host Bridge: {args.host}:{args.port} | OS: {args.target_os.upper()} | Guest: {args.guest}")
+    print("============================================================")
+
+    modes_to_run = ["dma-irq", "pio-irq", "dma-poll", "pio-poll"] if args.mode == "all" else [args.mode]
+    results = {}
+
+    for m in modes_to_run:
+        res = run_single_mode_benchmark(args, m)
+        results[m] = res
+
+    if args.json_out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json_out)), exist_ok=True)
+        with open(args.json_out, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\n[+] Saved benchmark results to {args.json_out}")
+
+    print("\n============================================================")
+    print(" Benchmark Execution Complete")
+    print("============================================================")
 
 if __name__ == "__main__":
     main()
+

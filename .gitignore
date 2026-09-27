@@ -18,9 +18,31 @@ plan/
 Module.symvers
 modules.order
 
-# Built binaries
+# Built binaries and tools
 drivers/amba_virt/tools/amba-virt-ctl
+drivers/amba_virt/tools/dma_diag
+drivers/amba_virt/tools/send_qmp
+drivers/amba_virt/tools/test_*
 tools/host_mkimage/host_mkimage
+tools/bringup/uart_bench_agent
+tools/bringup/set_debug_chip_id
+
+# QNX compiled binaries
+guest-os/qnx/amba-uart/devc-seramb
+guest-os/qnx/amba-uart/qnx-getty
+guest-os/qnx/amba-uart/qnx_read_exact
+guest-os/qnx/amba-virt/test_client
+guest-os/qnx/diag_qnx_uart
+guest-os/qnx/scan_irqs
+guest-os/qnx/test_hw_irq
+guest-os/qnx/test_irq144
+guest-os/qnx/check_device
+guest-os/qnx/dump_fdt
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
 
 # Generated certificates
 apps/*.cert.pem
