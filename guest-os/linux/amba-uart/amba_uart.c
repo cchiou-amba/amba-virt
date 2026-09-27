@@ -703,16 +703,41 @@ static void amba_uart_hw_init(struct uart_port *port)
 	amba_uart_write(port, AMBA_UART_DEFAULT_IER, UART_IE_OFFSET);
 }
 
+static enum hrtimer_restart amba_uart_poll_timer(struct hrtimer *t)
+{
+	struct amba_uart_port *amb_port = container_of(t, struct amba_uart_port, poll_timer);
+	struct uart_port *port = &amb_port->port;
+	unsigned long flags;
+
+	if (!amb_port->running)
+		return HRTIMER_NORESTART;
+
+	spin_lock_irqsave(&port->lock, flags);
+	if (!amb_port->rx_dma_in_progress)
+		amba_uart_receive_chars(port);
+	if (!amb_port->tx_dma_in_progress && !uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
+		amba_uart_transmit_chars(port);
+	spin_unlock_irqrestore(&port->lock, flags);
+
+	hrtimer_forward_now(t, amb_port->poll_interval);
+	return HRTIMER_RESTART;
+}
+
 static int amba_uart_startup(struct uart_port *port)
 {
 	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
 	int ret = 0;
 
-	/* Initialize DMA. If DMA setup fails, port startup MUST FAIL. No PIO fallback. */
-	ret = amba_uart_init_dma(amb_port);
-	if (ret) {
-		dev_err(port->dev, "DMA setup failed (%d); aborting port startup\n", ret);
-		return ret;
+	if (use_dma) {
+		/* Default / explicit use_dma=1: DMA setup failure aborts startup without fallback */
+		ret = amba_uart_init_dma(amb_port);
+		if (ret) {
+			dev_err(port->dev, "DMA setup failed (%d); aborting port startup\n", ret);
+			return ret;
+		}
+	} else {
+		/* Explicit use_dma=0: PIO profiling mode allowed */
+		amb_port->dma_enabled = false;
 	}
 
 	amba_uart_hw_init(port);
@@ -721,19 +746,29 @@ static int amba_uart_startup(struct uart_port *port)
 	amba_uart_set_mctrl(port, port->mctrl);
 	amba_uart_write(port, AMBA_UART_DEFAULT_IER, UART_IE_OFFSET);
 
+	amb_port->running = true;
+
 	if (port->irq > 0 && !force_poll) {
 		ret = request_irq(port->irq, amba_uart_interrupt, IRQF_SHARED, DRIVER_NAME, port);
 		if (ret) {
 			dev_err(port->dev, "Failed to request IRQ %d: %d\n",
 				port->irq, ret);
 			amba_uart_release_dma(amb_port);
+			amb_port->running = false;
 			return ret;
 		}
-		dev_info(port->dev, "Ambarella UART%d running in interrupt-driven mode (IRQ %d, DMA active)\n",
-			 amb_port->id, port->irq);
+		dev_info(port->dev, "Ambarella UART%d running in interrupt-driven mode (IRQ %d, DMA %s)\n",
+			 amb_port->id, port->irq, amb_port->dma_enabled ? "active" : "disabled");
+	} else if (force_poll) {
+		/* Explicit force_poll=1: polling profiling mode allowed */
+		hrtimer_start(&amb_port->poll_timer, amb_port->poll_interval, HRTIMER_MODE_REL);
+		dev_info(port->dev, "Ambarella UART%d running in polling mode (1 ms hrtimer, DMA %s)\n",
+			 amb_port->id, amb_port->dma_enabled ? "active" : "disabled");
 	} else {
+		/* Default: missing IRQ without force_poll=1 must return -ENODEV */
 		dev_err(port->dev, "No valid IRQ for UART%d; polling mode forbidden\n", amb_port->id);
 		amba_uart_release_dma(amb_port);
+		amb_port->running = false;
 		return -ENODEV;
 	}
 
@@ -981,6 +1016,9 @@ static int amba_uart_platform_probe(struct platform_device *pdev)
 	amb_port->port.uartclk = clk_hz;
 	amb_port->port.mctrl = TIOCM_DTR | TIOCM_RTS | TIOCM_OUT2;
 	spin_lock_init(&amb_port->port.lock);
+	amb_port->poll_interval = ktime_set(0, 1000000); /* 1 ms */
+	hrtimer_init(&amb_port->poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	amb_port->poll_timer.function = amba_uart_poll_timer;
 
 	amba_ports[id] = amb_port;
 	platform_set_drvdata(pdev, amb_port);

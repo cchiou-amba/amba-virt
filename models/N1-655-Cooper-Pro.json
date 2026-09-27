@@ -13,127 +13,6 @@
   "ioMemberList": [
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "UART0",
-      "phyaddrs": {},
-      "logicallabel": "UART0",
-      "assigngrp": "",
-      "usage": "ADAPTER_USAGE_MANAGEMENT",
-      "cbattr": {
-        "uart": "0"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "UART1",
-      "phyaddrs": {},
-      "logicallabel": "UART1",
-      "assigngrp": "uart1",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {
-        "uart": "1"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "UART4",
-      "phyaddrs": {},
-      "logicallabel": "UART4",
-      "assigngrp": "uart4",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {
-        "uart": "4"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "cavalry",
-      "phyaddrs": {
-        "Ifname": "/dev/cavalry"
-      },
-      "logicallabel": "cavalry",
-      "assigngrp": "cavalry",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "amba_shm1",
-      "phyaddrs": {},
-      "logicallabel": "amba_shm1",
-      "assigngrp": "amba_shm1",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {
-        "shmpath": "/dev/amba_virt_shm1",
-        "shmsize": "1G"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "amba_virt",
-      "phyaddrs": {
-        "Ifname": "/dev/amba_virt"
-      },
-      "logicallabel": "amba_virt",
-      "assigngrp": "amba_virt",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "UART2",
-      "phyaddrs": {},
-      "logicallabel": "UART2",
-      "assigngrp": "uart2",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {
-        "uart": "2"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "UART3",
-      "phyaddrs": {},
-      "logicallabel": "UART3",
-      "assigngrp": "uart3",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {
-        "uart": "3"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
       "phylabel": "gpio0",
       "phyaddrs": {
         "Ifname": "/dev/gpiochip0"
@@ -164,15 +43,75 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "amba_shm",
+      "phylabel": "cavalry",
+      "phyaddrs": {
+        "Ifname": "/dev/cavalry"
+      },
+      "logicallabel": "cavalry",
+      "assigngrp": "cavalry",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "UART0",
       "phyaddrs": {},
-      "logicallabel": "amba_shm",
-      "assigngrp": "amba_shm",
+      "logicallabel": "UART0",
+      "assigngrp": "",
+      "usage": "ADAPTER_USAGE_MANAGEMENT",
+      "cbattr": {
+        "uart": "0"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "UART3",
+      "phyaddrs": {},
+      "logicallabel": "UART3",
+      "assigngrp": "uart3",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
-        "shmpath": "/dev/amba_virt_shm",
+        "uart": "3"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_shm1",
+      "phyaddrs": {},
+      "logicallabel": "amba_shm1",
+      "assigngrp": "amba_shm1",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_shm1",
         "shmsize": "1G"
       },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "cavalry_profile",
+      "phyaddrs": {
+        "Ifname": "/dev/cavalry_profile"
+      },
+      "logicallabel": "cavalry_profile",
+      "assigngrp": "cavalry",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
       "usagePolicy": {},
       "cost": 0,
       "vfs": null,
@@ -194,13 +133,31 @@
       "parentassigngrp": ""
     },
     {
-      "ztype": "IO_TYPE_USB_CONTROLLER",
-      "phylabel": "USB",
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "UART2",
       "phyaddrs": {},
-      "logicallabel": "USB",
-      "assigngrp": "USB",
+      "logicallabel": "UART2",
+      "assigngrp": "uart2",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
+      "cbattr": {
+        "uart": "2"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_shm",
+      "phyaddrs": {},
+      "logicallabel": "amba_shm",
+      "assigngrp": "amba_shm",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_shm",
+        "shmsize": "1G"
+      },
       "usagePolicy": {},
       "cost": 0,
       "vfs": null,
@@ -223,14 +180,57 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "cavalry_profile",
-      "phyaddrs": {
-        "Ifname": "/dev/cavalry_profile"
+      "phylabel": "UART1",
+      "phyaddrs": {},
+      "logicallabel": "UART1",
+      "assigngrp": "uart1",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "uart": "1"
       },
-      "logicallabel": "cavalry_profile",
-      "assigngrp": "cavalry",
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_virt",
+      "phyaddrs": {
+        "Ifname": "/dev/amba_virt"
+      },
+      "logicallabel": "amba_virt",
+      "assigngrp": "amba_virt",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_USB_CONTROLLER",
+      "phylabel": "USB",
+      "phyaddrs": {},
+      "logicallabel": "USB",
+      "assigngrp": "USB",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "UART4",
+      "phyaddrs": {},
+      "logicallabel": "UART4",
+      "assigngrp": "uart4",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "uart": "4"
+      },
       "usagePolicy": {},
       "cost": 0,
       "vfs": null,
