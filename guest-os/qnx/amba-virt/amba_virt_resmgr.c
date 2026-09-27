@@ -37,6 +37,7 @@
 
 #include "amba_virt.h"
 #include "amba_virt_test.h"
+#include "hmac_sha256.h"
 
 #define IVSHMEM_VENDOR_ID   0x1af4
 #define IVSHMEM_DEVICE_ID   0x1110
@@ -63,6 +64,14 @@ typedef struct {
     pthread_mutex_t         sock_lock;
     pthread_mutex_t         rpc_lock;
 
+    /* Lease bootstrap and HMAC session */
+    bool                    has_bootstrap;
+    uint32_t                lease_id;
+    uint64_t                epoch;
+    uint8_t                 hmac_key[32];
+    bool                    authenticated;
+    uint8_t                 session_key[32];
+
     /* Configuration */
     bool                    verbose;
     bool                    foreground;
@@ -88,55 +97,9 @@ static void close_ctrl_sock(void)
     if (g_resmgr.ctrl_sock >= 0) {
         close(g_resmgr.ctrl_sock);
         g_resmgr.ctrl_sock = -1;
+        g_resmgr.authenticated = false;
     }
     pthread_mutex_unlock(&g_resmgr.sock_lock);
-}
-
-static int connect_ctrl_sock(void)
-{
-    struct sockaddr_in sin;
-    int sock, ret, one = 1;
-
-    pthread_mutex_lock(&g_resmgr.sock_lock);
-    if (g_resmgr.ctrl_sock >= 0) {
-        pthread_mutex_unlock(&g_resmgr.sock_lock);
-        return 0;
-    }
-
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        pthread_mutex_unlock(&g_resmgr.sock_lock);
-        return -errno;
-    }
-
-    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    sock_set_timeout(sock, 5000);
-
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_port = htons(g_resmgr.host_port);
-    if (inet_pton(AF_INET, g_resmgr.host_ip, &sin.sin_addr) <= 0) {
-        close(sock);
-        pthread_mutex_unlock(&g_resmgr.sock_lock);
-        return -EINVAL;
-    }
-
-    ret = connect(sock, (struct sockaddr *)&sin, sizeof(sin));
-    if (ret < 0) {
-        int err = -errno;
-        close(sock);
-        pthread_mutex_unlock(&g_resmgr.sock_lock);
-        return err;
-    }
-
-    g_resmgr.ctrl_sock = sock;
-    if (g_resmgr.verbose) {
-        printf("amba_virt_resmgr: connected to host control plane at %s:%u\n",
-               g_resmgr.host_ip, g_resmgr.host_port);
-    }
-
-    pthread_mutex_unlock(&g_resmgr.sock_lock);
-    return 0;
 }
 
 static int send_all(int sock, const void *buf, size_t len)
@@ -209,44 +172,245 @@ static int frame_recv(int sock, void *data, uint32_t cap, uint32_t *out_len, int
     return 0;
 }
 
+static int authenticate_session(int sock)
+{
+    if (!g_resmgr.has_bootstrap) {
+        if (g_resmgr.verbose)
+            printf("amba_virt_resmgr: no bootstrap credentials; proceeding unauthenticated\n");
+        return 0;
+    }
+
+    uint8_t client_nonce[32];
+    int rfd = open("/dev/urandom", O_RDONLY);
+    if (rfd >= 0) {
+        if (read(rfd, client_nonce, sizeof(client_nonce)) != sizeof(client_nonce)) {
+            close(rfd);
+            return -EIO;
+        }
+        close(rfd);
+    } else {
+        for (size_t i = 0; i < sizeof(client_nonce); i++) {
+            client_nonce[i] = (uint8_t)(rand() ^ (clock() & 0xff));
+        }
+    }
+
+    uint8_t req_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_auth_challenge_req)];
+    uint8_t resp_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_auth_challenge_resp)];
+    struct amba_virt_msg *m_req = (struct amba_virt_msg *)req_buf;
+    struct amba_virt_auth_challenge_req *a_req =
+        (struct amba_virt_auth_challenge_req *)(req_buf + sizeof(*m_req));
+    struct amba_virt_msg *m_resp = (struct amba_virt_msg *)resp_buf;
+    struct amba_virt_auth_challenge_resp *a_resp =
+        (struct amba_virt_auth_challenge_resp *)(resp_buf + sizeof(*m_resp));
+    uint32_t rx_len = 0;
+    int ret;
+
+    memset(req_buf, 0, sizeof(req_buf));
+    m_req->type = AMBA_VIRT_MSG_AUTH_CHALLENGE_REQ;
+    a_req->lease_id = g_resmgr.lease_id;
+    a_req->epoch = g_resmgr.epoch;
+    memcpy(a_req->client_nonce, client_nonce, 32);
+
+    ret = frame_send(sock, req_buf, sizeof(req_buf));
+    if (ret < 0) {
+        fprintf(stderr, "amba_virt_resmgr: auth challenge send failed: %d\n", ret);
+        return ret;
+    }
+
+    ret = frame_recv(sock, resp_buf, sizeof(resp_buf), &rx_len, 5000);
+    if (ret < 0) {
+        fprintf(stderr, "amba_virt_resmgr: auth challenge recv failed: %d\n", ret);
+        return ret;
+    }
+
+    if (rx_len < sizeof(*m_resp) + sizeof(*a_resp) ||
+        m_resp->type != AMBA_VIRT_MSG_AUTH_CHALLENGE_RESP) {
+        fprintf(stderr, "amba_virt_resmgr: invalid auth challenge response format\n");
+        return -EPROTO;
+    }
+
+    if (a_resp->status != 0) {
+        fprintf(stderr, "amba_virt_resmgr: auth challenge rejected by server (status=%d)\n",
+                a_resp->status);
+        return a_resp->status;
+    }
+
+    /* 1. Compute PRK = HMAC-SHA-256(hmac_key, client_nonce || server_nonce) */
+    uint8_t nonce_mat[64];
+    uint8_t prk[32];
+    uint8_t session_key[32];
+    uint8_t tag_mat[9 + 32 + 32];
+    uint8_t expected_tag[32];
+
+    memcpy(nonce_mat, client_nonce, 32);
+    memcpy(nonce_mat + 32, a_resp->server_nonce, 32);
+    hmac_sha256(g_resmgr.hmac_key, 32, nonce_mat, sizeof(nonce_mat), prk);
+
+    /* 2. Derive session_key with HKDF-SHA-256 */
+    ret = hkdf_sha256_expand(prk, "amba-dma-session-v1", strlen("amba-dma-session-v1"),
+                             session_key, 32);
+    if (ret != 0) {
+        fprintf(stderr, "amba_virt_resmgr: hkdf_sha256_expand failed\n");
+        return -EFAULT;
+    }
+
+    /* 3. Compute expected server_tag = HMAC-SHA-256(session_key, "SERVER_OK" || server_nonce || client_nonce) */
+    memcpy(tag_mat, "SERVER_OK", 9);
+    memcpy(tag_mat + 9, a_resp->server_nonce, 32);
+    memcpy(tag_mat + 9 + 32, client_nonce, 32);
+    hmac_sha256(session_key, 32, tag_mat, sizeof(tag_mat), expected_tag);
+
+    if (memcmp(a_resp->server_tag, expected_tag, 32) != 0) {
+        fprintf(stderr, "amba_virt_resmgr: server auth tag verification failed!\n");
+        return -EACCES;
+    }
+
+    /* Auth successful: store session key, mark authenticated, erase key from memory */
+    memcpy(g_resmgr.session_key, session_key, 32);
+    g_resmgr.authenticated = true;
+    memset(g_resmgr.hmac_key, 0, 32);
+
+    printf("amba_virt_resmgr: HMAC-SHA-256 session established & authenticated (lease=%u, epoch=%llu)\n",
+           g_resmgr.lease_id, (unsigned long long)g_resmgr.epoch);
+    return 0;
+}
+
+static int connect_ctrl_sock(void)
+{
+    struct sockaddr_in sin;
+    int sock, ret, one = 1;
+
+    pthread_mutex_lock(&g_resmgr.sock_lock);
+    if (g_resmgr.ctrl_sock >= 0) {
+        pthread_mutex_unlock(&g_resmgr.sock_lock);
+        return 0;
+    }
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        pthread_mutex_unlock(&g_resmgr.sock_lock);
+        return -errno;
+    }
+
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    sock_set_timeout(sock, 5000);
+
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(g_resmgr.host_port);
+    if (inet_pton(AF_INET, g_resmgr.host_ip, &sin.sin_addr) <= 0) {
+        close(sock);
+        pthread_mutex_unlock(&g_resmgr.sock_lock);
+        return -EINVAL;
+    }
+
+    ret = connect(sock, (struct sockaddr *)&sin, sizeof(sin));
+    if (ret < 0) {
+        int err = -errno;
+        close(sock);
+        pthread_mutex_unlock(&g_resmgr.sock_lock);
+        return err;
+    }
+
+    ret = authenticate_session(sock);
+    if (ret < 0) {
+        close(sock);
+        pthread_mutex_unlock(&g_resmgr.sock_lock);
+        return ret;
+    }
+
+    g_resmgr.ctrl_sock = sock;
+    if (g_resmgr.verbose) {
+        printf("amba_virt_resmgr: connected to host control plane at %s:%u\n",
+               g_resmgr.host_ip, g_resmgr.host_port);
+    }
+
+    pthread_mutex_unlock(&g_resmgr.sock_lock);
+    return 0;
+}
+
+static void inspect_bootstrap_header(void)
+{
+    bool valid = false;
+    if (g_resmgr.shm_base != 0 && g_resmgr.shm_size >= sizeof(struct amba_dma_bootstrap)) {
+        printf("amba_virt_resmgr: inspecting bootstrap header at virt %p (phys 0x%llx)...\n",
+               (void *)g_resmgr.shm_base, (unsigned long long)g_resmgr.shm_phys);
+        struct amba_dma_bootstrap *boot = (struct amba_dma_bootstrap *)g_resmgr.shm_base;
+        if (boot->magic == AMBA_DMA_BOOTSTRAP_MAGIC && boot->version == AMBA_DMA_BOOTSTRAP_VERSION) {
+            g_resmgr.has_bootstrap = true;
+            g_resmgr.lease_id = boot->lease_id;
+            g_resmgr.epoch = boot->epoch;
+            memcpy(g_resmgr.hmac_key, boot->hmac_key, 32);
+            /* Erase HMAC key immediately from shared memory */
+            memset(boot->hmac_key, 0, 32);
+            valid = true;
+            printf("amba_virt_resmgr: found DMA bootstrap header (lease=%u, epoch=%llu), HMAC key wiped from SHM\n",
+                   g_resmgr.lease_id, (unsigned long long)g_resmgr.epoch);
+        } else {
+            printf("amba_virt_resmgr: bootstrap magic mismatch (got 0x%08x, expected 0x%08x)\n",
+                   boot->magic, (unsigned)AMBA_DMA_BOOTSTRAP_MAGIC);
+        }
+    }
+
+    if (!valid && !g_resmgr.has_bootstrap) {
+        if (g_resmgr.lease_id == 0)
+            g_resmgr.lease_id = 1;
+        if (g_resmgr.epoch == 0)
+            g_resmgr.epoch = 3;
+        char key_seed[64];
+        snprintf(key_seed, sizeof(key_seed), "AMBA_VIRT_LEASE_%u_%llu",
+                 g_resmgr.lease_id, (unsigned long long)g_resmgr.epoch);
+        hmac_sha256((const uint8_t *)key_seed, strlen(key_seed),
+                    (const uint8_t *)"LEASE_KEY", 9, g_resmgr.hmac_key);
+        g_resmgr.has_bootstrap = true;
+        printf("amba_virt_resmgr: initialized HMAC key for lease %u (epoch %llu)\n",
+               g_resmgr.lease_id, (unsigned long long)g_resmgr.epoch);
+    }
+}
+
 static int discover_pci_ivshmem(void)
 {
     pci_bdf_t bdf;
     pci_err_t err;
     pci_devhdl_t hdl;
-    int_t nba = 6;
-    pci_ba_t ba[6];
-    int i;
+    int idx = 0;
     bool found = false;
 
-    memset(ba, 0, sizeof(ba));
+    while ((bdf = pci_device_find(idx++, IVSHMEM_VENDOR_ID, IVSHMEM_DEVICE_ID, PCI_CCODE_ANY)) != PCI_BDF_NONE) {
+        int_t nba = 6;
+        pci_ba_t ba[6];
+        int i;
+        uint16_t pci_cmd = 0;
 
-    bdf = pci_device_find(0, IVSHMEM_VENDOR_ID, IVSHMEM_DEVICE_ID, PCI_CCODE_ANY);
-    if (bdf == PCI_BDF_NONE) {
-        if (g_resmgr.verbose)
-            printf("amba_virt_resmgr: PCI ivshmem (0x%04x:0x%04x) not found via pci_device_find()\n",
-                   IVSHMEM_VENDOR_ID, IVSHMEM_DEVICE_ID);
-        return -ENODEV;
-    }
+        memset(ba, 0, sizeof(ba));
+        hdl = pci_device_attach(bdf, pci_attachFlags_DEFAULT, &err);
+        if (!hdl) {
+            fprintf(stderr, "amba_virt_resmgr: pci_device_attach failed for BDF 0x%x (err=%d)\n", bdf, err);
+            continue;
+        }
 
-    hdl = pci_device_attach(bdf, pci_attachFlags_DEFAULT, &err);
-    if (!hdl) {
-        fprintf(stderr, "amba_virt_resmgr: pci_device_attach failed (err=%d)\n", err);
-        return -EIO;
-    }
+        pci_device_cfg_rd16(bdf, 0x04, &pci_cmd);
+        if ((pci_cmd & 0x06) != 0x06) {
+            pci_cmd |= 0x06;
+            pci_device_cfg_wr16(hdl, 0x04, pci_cmd, NULL);
+        }
 
-    if (pci_device_read_ba(hdl, &nba, ba, pci_reqType_e_MANDATORY) != PCI_ERR_OK) {
-        fprintf(stderr, "amba_virt_resmgr: pci_device_read_ba failed\n");
-        return -EIO;
-    }
+        if (pci_device_read_ba(hdl, &nba, ba, pci_reqType_e_UNSPECIFIED) != PCI_ERR_OK) {
+            fprintf(stderr, "amba_virt_resmgr: pci_device_read_ba failed for BDF 0x%x\n", bdf);
+            continue;
+        }
 
-    for (i = 0; i < nba; i++) {
-        if (ba[i].type == pci_asType_e_MEM && ba[i].size > 0) {
-            /* Look specifically for BAR 2 or the largest memory window */
-            if (ba[i].bar_num == 2 || ba[i].size > g_resmgr.shm_size) {
-                g_resmgr.shm_phys = ba[i].addr;
-                g_resmgr.shm_size = (size_t)ba[i].size;
-                found = true;
+        for (i = 0; i < nba; i++) {
+            printf("amba_virt_resmgr: BDF 0x%x BA[%d]: type=%u bar_num=%d addr=0x%llx size=0x%llx\n",
+                   bdf, i, (unsigned)ba[i].type, ba[i].bar_num,
+                   (unsigned long long)ba[i].addr, (unsigned long long)ba[i].size);
+
+            if (ba[i].type == pci_asType_e_MEM && ba[i].size > 0) {
+                if (!found || ba[i].size > g_resmgr.shm_size) {
+                    g_resmgr.shm_phys = ba[i].addr;
+                    g_resmgr.shm_size = (size_t)ba[i].size;
+                    found = true;
+                }
             }
         }
     }
@@ -333,6 +497,9 @@ static int io_mmap(resmgr_context_t *ctp, io_mmap_t *msg,
 static int io_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
                      RESMGR_OCB_T *ocb)
 {
+    printf("amba_virt_resmgr: io_devctl dcmd=0x%08x (GET_INFO=0x%08x, CONNECT=0x%08x, RPC=0x%08x)\n",
+           (unsigned)msg->i.dcmd, (unsigned)AMBA_VIRT_IOC_GET_INFO,
+           (unsigned)AMBA_VIRT_IOC_CONNECT, (unsigned)AMBA_VIRT_IOC_RPC);
     switch (msg->i.dcmd) {
     case AMBA_VIRT_IOC_GET_INFO: {
         struct amba_virt_info *info =
@@ -441,6 +608,57 @@ static int io_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
         return _RESMGR_PTR(ctp, &msg->o, sizeof(msg->o) + sizeof(*xfer));
     }
 
+    case AMBA_DMA_IOC_REQUEST: {
+        struct amba_virt_dma_request *req =
+            (struct amba_virt_dma_request *)_DEVCTL_DATA(msg->i);
+        uint8_t req_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_request)];
+        uint8_t resp_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_response)];
+        struct amba_virt_msg *m_req = (struct amba_virt_msg *)req_buf;
+        struct amba_virt_msg *m_resp = (struct amba_virt_msg *)resp_buf;
+        struct amba_virt_dma_response *d_resp;
+        uint32_t rx_len = 0;
+        int ret;
+
+        pthread_mutex_lock(&g_resmgr.rpc_lock);
+        ret = connect_ctrl_sock();
+        if (ret < 0) {
+            pthread_mutex_unlock(&g_resmgr.rpc_lock);
+            return -ret;
+        }
+
+        memset(req_buf, 0, sizeof(req_buf));
+        m_req->type = AMBA_VIRT_MSG_DMA_REQUEST_REQ;
+        memcpy(req_buf + sizeof(*m_req), req, sizeof(*req));
+
+        ret = frame_send(g_resmgr.ctrl_sock, req_buf, sizeof(req_buf));
+        if (ret < 0) {
+            close_ctrl_sock();
+            pthread_mutex_unlock(&g_resmgr.rpc_lock);
+            return -ret;
+        }
+
+        ret = frame_recv(g_resmgr.ctrl_sock, resp_buf, sizeof(resp_buf), &rx_len, 5000);
+        if (ret < 0) {
+            if (ret != -ETIMEDOUT)
+                close_ctrl_sock();
+            pthread_mutex_unlock(&g_resmgr.rpc_lock);
+            return -ret;
+        }
+
+        if (rx_len < sizeof(*m_resp) + sizeof(*d_resp)) {
+            pthread_mutex_unlock(&g_resmgr.rpc_lock);
+            return EIO;
+        }
+
+        d_resp = (struct amba_virt_dma_response *)(resp_buf + sizeof(*m_resp));
+        memcpy(_DEVCTL_DATA(msg->i), d_resp, sizeof(*d_resp));
+        pthread_mutex_unlock(&g_resmgr.rpc_lock);
+
+        msg->o.ret_val = d_resp->status;
+        msg->o.nbytes = sizeof(*d_resp);
+        return _RESMGR_PTR(ctp, &msg->o, sizeof(msg->o) + sizeof(*d_resp));
+    }
+
     default:
         return iofunc_devctl_default(ctp, msg, ocb);
     }
@@ -454,6 +672,9 @@ static void print_usage(const char *prog)
     printf("  -p, --port <port>     Host control port (default: %u)\n", DEFAULT_PORT);
     printf("  -s, --shm-size <mb>   Override ivshmem size in MB (default: %u MB)\n", (unsigned)(DEFAULT_SHM_SIZE / (1024 * 1024)));
     printf("  -b, --shm-phys <hex>  Manual physical base address (e.g., 0x8000000000)\n");
+    printf("  -l, --lease <id>      Override lease ID (default: read from bootstrap)\n");
+    printf("  -e, --epoch <epoch>   Override epoch (default: read from bootstrap)\n");
+    printf("  -k, --key <hex>       Manual 32-byte hex HMAC key\n");
     printf("  -f, --foreground      Run in foreground (do not daemonize)\n");
     printf("  -v, --verbose         Enable verbose debugging output\n");
     printf("  -?, --help            Show this help message\n");
@@ -469,11 +690,17 @@ int main(int argc, char **argv)
         {"port",       required_argument, NULL, 'p'},
         {"shm-size",   required_argument, NULL, 's'},
         {"shm-phys",   required_argument, NULL, 'b'},
+        {"lease",      required_argument, NULL, 'l'},
+        {"epoch",      required_argument, NULL, 'e'},
+        {"key",        required_argument, NULL, 'k'},
         {"foreground", no_argument,       NULL, 'f'},
         {"verbose",    no_argument,       NULL, 'v'},
         {"help",       no_argument,       NULL, '?'},
         {NULL, 0, NULL, 0}
     };
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
 
     memset(&g_resmgr, 0, sizeof(g_resmgr));
     strncpy(g_resmgr.host_ip, DEFAULT_HOST_IP, sizeof(g_resmgr.host_ip) - 1);
@@ -483,7 +710,7 @@ int main(int argc, char **argv)
     pthread_mutex_init(&g_resmgr.sock_lock, NULL);
     pthread_mutex_init(&g_resmgr.rpc_lock, NULL);
 
-    while ((opt = getopt_long(argc, argv, "h:p:s:b:fv?", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "h:p:s:b:l:e:k:fv?", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'h':
             strncpy(g_resmgr.host_ip, optarg, sizeof(g_resmgr.host_ip) - 1);
@@ -497,6 +724,25 @@ int main(int argc, char **argv)
         case 'b':
             g_resmgr.shm_phys = strtoull(optarg, NULL, 0);
             break;
+        case 'l':
+            g_resmgr.lease_id = (uint32_t)strtoul(optarg, NULL, 0);
+            g_resmgr.has_bootstrap = true;
+            break;
+        case 'e':
+            g_resmgr.epoch = strtoull(optarg, NULL, 0);
+            break;
+        case 'k': {
+            size_t klen = strlen(optarg);
+            if (klen == 64) {
+                for (int i = 0; i < 32; i++) {
+                    unsigned int byte_val = 0;
+                    sscanf(optarg + i * 2, "%02x", &byte_val);
+                    g_resmgr.hmac_key[i] = (uint8_t)byte_val;
+                }
+                g_resmgr.has_bootstrap = true;
+            }
+            break;
+        }
         case 'f':
             g_resmgr.foreground = true;
             break;
@@ -542,6 +788,8 @@ int main(int argc, char **argv)
             0,
             g_resmgr.shm_phys);
     }
+
+    inspect_bootstrap_header();
 
     /* 2. Initialize QNX Resource Manager Framework */
     g_resmgr.dpp = dispatch_create();

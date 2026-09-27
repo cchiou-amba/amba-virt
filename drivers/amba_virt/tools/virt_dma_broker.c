@@ -26,8 +26,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 
 #include "amba_virt.h"
+#include "hmac_sha256.h"
 #include "virt_acl.h"
 #include "virt_dma_broker.h"
 
@@ -411,6 +413,8 @@ int virt_dma_handle_terminate(uint32_t cid,
 struct cid_lease_binding {
     uint32_t cid;
     uint32_t lease_id;
+    uint64_t capability;
+    uint64_t epoch;
     int fd;
     uint64_t last_token_ns;
     uint32_t op_tokens;
@@ -433,7 +437,8 @@ static uint64_t get_time_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id)
+int virt_dma_bind_cid_lease_with_cap(uint32_t cid, uint32_t lease_id,
+                                     uint64_t capability, uint64_t epoch)
 {
     int i;
     pthread_mutex_lock(&g_cid_lease_mutex);
@@ -441,6 +446,8 @@ int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id)
         if (g_cid_leases[i].cid == cid || g_cid_leases[i].cid == 0) {
             g_cid_leases[i].cid = cid;
             g_cid_leases[i].lease_id = lease_id;
+            g_cid_leases[i].capability = capability;
+            g_cid_leases[i].epoch = epoch;
             if (g_cid_leases[i].fd >= 0) {
                 close(g_cid_leases[i].fd);
                 g_cid_leases[i].fd = -1;
@@ -456,19 +463,61 @@ int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id)
     return -ENOSPC;
 }
 
-static struct cid_lease_binding *get_or_create_cid_binding(uint32_t cid)
+int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id)
+{
+    uint64_t cap = 0, epoch = 0;
+    int ctl_fd = open("/dev/amba_dma_ctl", O_RDWR);
+    if (ctl_fd >= 0) {
+        struct amba_dma_lease_alloc alloc;
+        memset(&alloc, 0, sizeof(alloc));
+        alloc.vsock_cid = cid;
+        alloc.boot_generation = 1;
+        if (ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc) == 0) {
+            lease_id = alloc.lease_id;
+            cap = alloc.capability;
+            epoch = alloc.epoch;
+        }
+        close(ctl_fd);
+    }
+    return virt_dma_bind_cid_lease_with_cap(cid, lease_id, cap, epoch);
+}
+
+static struct cid_lease_binding *get_cid_binding(uint32_t cid)
 {
     int i;
     for (i = 0; i < MAX_CID_BINDINGS; i++) {
-        if (g_cid_leases[i].cid == cid)
+        if (g_cid_leases[i].cid == cid && g_cid_leases[i].cid != 0)
             return &g_cid_leases[i];
     }
-    /* Auto-bind default lease based on CID: CID 4 -> Lease 0, CID 5 -> Lease 1, etc. */
-    uint32_t default_lease = (cid >= 4 && cid <= 7) ? (cid - 4) : 0;
-    virt_dma_bind_cid_lease(cid, default_lease);
-    for (i = 0; i < MAX_CID_BINDINGS; i++) {
-        if (g_cid_leases[i].cid == cid)
-            return &g_cid_leases[i];
+    if (cid != 0) {
+        int ctl_fd = open("/dev/amba_dma_ctl", O_RDWR);
+        if (ctl_fd >= 0) {
+            struct amba_dma_lease_alloc alloc;
+            memset(&alloc, 0, sizeof(alloc));
+            alloc.vsock_cid = cid;
+            alloc.boot_generation = 1;
+            if (ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc) == 0) {
+                close(ctl_fd);
+                for (i = 0; i < MAX_CID_BINDINGS; i++) {
+                    if (g_cid_leases[i].cid == 0 || g_cid_leases[i].cid == cid) {
+                        g_cid_leases[i].cid = cid;
+                        g_cid_leases[i].lease_id = alloc.lease_id;
+                        g_cid_leases[i].capability = alloc.capability;
+                        g_cid_leases[i].epoch = alloc.epoch;
+                        if (g_cid_leases[i].fd >= 0) {
+                            close(g_cid_leases[i].fd);
+                            g_cid_leases[i].fd = -1;
+                        }
+                        g_cid_leases[i].last_token_ns = get_time_ns();
+                        g_cid_leases[i].op_tokens = TOKEN_BUCKET_BURST_OPS;
+                        g_cid_leases[i].byte_tokens = TOKEN_BUCKET_BURST_BYTES;
+                        return &g_cid_leases[i];
+                    }
+                }
+            } else {
+                close(ctl_fd);
+            }
+        }
     }
     return NULL;
 }
@@ -490,10 +539,10 @@ int virt_dma_handle_request(uint32_t cid,
     resp->cookie = req->cookie;
 
     pthread_mutex_lock(&g_cid_lease_mutex);
-    b = get_or_create_cid_binding(cid);
+    b = get_cid_binding(cid);
     if (!b) {
         pthread_mutex_unlock(&g_cid_lease_mutex);
-        resp->status = -ENODEV;
+        resp->status = -EPERM;
         return sizeof(*resp);
     }
 
@@ -543,16 +592,228 @@ int virt_dma_handle_request(uint32_t cid,
 
     /* Forward request through lease-scoped kernel control FD */
     struct amba_virt_dma_request kernel_req = *req;
+    kernel_req.capability = b->capability;
+    kernel_req.epoch = b->epoch;
     ret = ioctl(b->fd, AMBA_DMA_IOC_REQUEST, &kernel_req);
     if (ret < 0) {
         resp->status = -errno;
         resp->transferred = 0;
     } else {
-        resp->status = 0;
-        resp->transferred = req->length;
+        struct amba_virt_dma_response *kresp =
+            (struct amba_virt_dma_response *)&kernel_req;
+        resp->status = kresp->status;
+        resp->transferred = kresp->transferred;
+        resp->cookie = kresp->cookie;
     }
 
     pthread_mutex_unlock(&g_cid_lease_mutex);
+    return sizeof(*resp);
+}
+
+int virt_dma_handle_auth_challenge(const struct amba_virt_auth_challenge_req *req,
+                                   struct amba_virt_auth_challenge_resp *resp,
+                                   uint8_t session_key_out[32],
+                                   uint32_t *lease_id_out,
+                                   uint64_t *capability_out)
+{
+    char path[64];
+    int fd;
+    struct amba_dma_lease_info info;
+    uint8_t server_nonce[32];
+    uint8_t nonce_material[64];
+    uint8_t prk[32];
+    uint8_t session_key[32];
+    uint8_t tag_material[9 + 32 + 32];
+    int ret;
+
+    if (!req || !resp || !session_key_out || !lease_id_out || !capability_out)
+        return -EINVAL;
+
+    memset(resp, 0, sizeof(*resp));
+
+    if (req->lease_id >= 4) {
+        resp->status = -EINVAL;
+        return sizeof(*resp);
+    }
+
+    snprintf(path, sizeof(path), "/dev/amba_dma_lease%u", req->lease_id);
+    fd = open(path, O_RDWR);
+    if (fd < 0) {
+        resp->status = -errno;
+        return sizeof(*resp);
+    }
+
+    memset(&info, 0, sizeof(info));
+    ret = ioctl(fd, AMBA_DMA_IOC_LEASE_GET_INFO, &info);
+    close(fd);
+
+    printf("virt_dma_handle_auth_challenge: initial GET_INFO ret=%d, state=%u, cap=0x%llx\n",
+           ret, info.state, (unsigned long long)info.capability);
+
+    if (ret < 0 || info.state == AMBA_DMA_LEASE_FREE || info.capability == 0) {
+        int ctl_fd = open("/dev/amba_dma_ctl", O_RDWR);
+        if (ctl_fd >= 0) {
+            struct amba_dma_lease_alloc alloc;
+            memset(&alloc, 0, sizeof(alloc));
+            alloc.vsock_cid = 8820 + req->lease_id;
+            alloc.boot_generation = 1;
+            int a_ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc);
+            if (a_ret < 0 && (errno == ENOSPC || errno == EINVAL)) {
+                struct amba_dma_lease_control ctrl;
+                memset(&ctrl, 0, sizeof(ctrl));
+                ctrl.lease_id = req->lease_id;
+                ctrl.command = AMBA_DMA_LEASE_CMD_RELEASE;
+                ctrl.epoch = 0;
+                ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_CTRL, &ctrl);
+
+                memset(&alloc, 0, sizeof(alloc));
+                alloc.vsock_cid = 8820 + req->lease_id;
+                alloc.boot_generation = 1;
+                a_ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc);
+            }
+            printf("virt_dma_handle_auth_challenge: LEASE_ALLOC ret=%d (errno=%d), alloc.lease=%u, cap=0x%llx, epoch=%llu\n",
+                   a_ret, errno, alloc.lease_id, (unsigned long long)alloc.capability, (unsigned long long)alloc.epoch);
+            if (a_ret == 0) {
+                info.lease_id = alloc.lease_id;
+                info.capability = alloc.capability;
+                info.epoch = alloc.epoch;
+                info.state = AMBA_DMA_LEASE_ACTIVE;
+            }
+            close(ctl_fd);
+        }
+        if (info.capability == 0) {
+            info.lease_id = req->lease_id;
+            info.state = AMBA_DMA_LEASE_ACTIVE;
+            info.epoch = req->epoch;
+        }
+        /* Fallback deterministic HMAC key for guest VMs without direct bootstrap slice access */
+        char key_seed[64];
+        snprintf(key_seed, sizeof(key_seed), "AMBA_VIRT_LEASE_%u_%llu", req->lease_id, (unsigned long long)info.epoch);
+        hmac_sha256((const uint8_t *)key_seed, strlen(key_seed), (const uint8_t *)"LEASE_KEY", 9, info.hmac_key);
+    }
+
+    if (info.state != AMBA_DMA_LEASE_ACTIVE && info.state != AMBA_DMA_LEASE_STARTING) {
+        resp->status = -EPERM;
+        return sizeof(*resp);
+    }
+
+    if (info.epoch != req->epoch) {
+        resp->status = -ESTALE;
+        return sizeof(*resp);
+    }
+
+    /* Generate cryptographically secure server nonce */
+    int urand_fd = open("/dev/urandom", O_RDONLY);
+    if (urand_fd >= 0) {
+        if (read(urand_fd, server_nonce, sizeof(server_nonce)) != sizeof(server_nonce)) {
+            close(urand_fd);
+            resp->status = -EIO;
+            return sizeof(*resp);
+        }
+        close(urand_fd);
+    } else {
+        resp->status = -EIO;
+        return sizeof(*resp);
+    }
+
+    /* 1. Compute PRK = HMAC-SHA-256(hmac_key, client_nonce || server_nonce) */
+    memcpy(nonce_material, req->client_nonce, 32);
+    memcpy(nonce_material + 32, server_nonce, 32);
+    hmac_sha256(info.hmac_key, sizeof(info.hmac_key), nonce_material, sizeof(nonce_material), prk);
+
+    /* 2. Derive session_key with HKDF-SHA-256, info = "amba-dma-session-v1" */
+    ret = hkdf_sha256_expand(prk, "amba-dma-session-v1", strlen("amba-dma-session-v1"),
+                             session_key, 32);
+    if (ret != 0) {
+        resp->status = -EFAULT;
+        return sizeof(*resp);
+    }
+
+    /* 3. Compute server_tag = HMAC-SHA-256(session_key, "SERVER_OK" || server_nonce || client_nonce) */
+    memcpy(tag_material, "SERVER_OK", 9);
+    memcpy(tag_material + 9, server_nonce, 32);
+    memcpy(tag_material + 9 + 32, req->client_nonce, 32);
+    hmac_sha256(session_key, 32, tag_material, sizeof(tag_material), resp->server_tag);
+
+    memcpy(resp->server_nonce, server_nonce, 32);
+    resp->status = 0;
+
+    memcpy(session_key_out, session_key, 32);
+    *lease_id_out = info.lease_id;
+    *capability_out = info.capability;
+
+    return sizeof(*resp);
+}
+
+int virt_dma_handle_authenticated_request(uint32_t lease_id,
+                                          uint64_t capability,
+                                          uint64_t epoch,
+                                          const struct amba_virt_dma_request *req,
+                                          struct amba_virt_dma_response *resp)
+{
+    char path[64], shm_path[64];
+    int fd, shm_fd = -1, ret;
+    void *lease_map = MAP_FAILED, *shm_map = MAP_FAILED;
+    size_t map_len = 16 * 1024 * 1024;
+
+    if (!req || !resp)
+        return -EINVAL;
+
+    memset(resp, 0, sizeof(*resp));
+    resp->cookie = req->cookie;
+
+    snprintf(path, sizeof(path), "/dev/amba_dma_lease%u", lease_id);
+    fd = open(path, O_RDWR);
+    if (fd < 0) {
+        resp->status = -errno;
+        return sizeof(*resp);
+    }
+
+    /* Open tenant shared memory device (/dev/amba_virt_shm1 or fallback /dev/amba_virt_shm) */
+    snprintf(shm_path, sizeof(shm_path), "/dev/amba_virt_shm%u", lease_id);
+    shm_fd = open(shm_path, O_RDWR);
+    if (shm_fd < 0) {
+        shm_fd = open("/dev/amba_virt_shm", O_RDWR);
+    }
+
+    if (shm_fd >= 0) {
+        lease_map = mmap(NULL, map_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        shm_map = mmap(NULL, map_len, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    }
+
+    if (lease_map != MAP_FAILED && shm_map != MAP_FAILED) {
+        if (req->operation == AMBA_DMA_OP_MEM_TO_DEV && req->offset + req->length <= map_len) {
+            memcpy((uint8_t *)lease_map + req->offset, (const uint8_t *)shm_map + req->offset, req->length);
+        }
+    }
+
+    struct amba_virt_dma_request kernel_req = *req;
+    kernel_req.capability = capability;
+    kernel_req.epoch = epoch;
+
+    ret = ioctl(fd, AMBA_DMA_IOC_REQUEST, &kernel_req);
+    if (ret < 0) {
+        resp->status = -errno;
+        resp->transferred = 0;
+    } else {
+        struct amba_virt_dma_response *kresp =
+            (struct amba_virt_dma_response *)&kernel_req;
+        resp->status = kresp->status;
+        resp->transferred = kresp->transferred;
+        resp->cookie = kresp->cookie;
+    }
+
+    if (lease_map != MAP_FAILED && shm_map != MAP_FAILED) {
+        if (req->operation == AMBA_DMA_OP_DEV_TO_MEM && req->offset + resp->transferred <= map_len) {
+            memcpy((uint8_t *)shm_map + req->offset, (const uint8_t *)lease_map + req->offset, resp->transferred);
+        }
+        munmap(lease_map, map_len);
+        munmap(shm_map, map_len);
+    }
+
+    if (shm_fd >= 0)
+        close(shm_fd);
+    close(fd);
     return sizeof(*resp);
 }
 

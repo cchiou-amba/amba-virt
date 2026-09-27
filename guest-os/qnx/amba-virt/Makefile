@@ -4,7 +4,7 @@
 QNX_TARGET_ARCH ?= gcc_ntoaarch64le
 CC := qcc
 AR ?= ntoaarch64-ar
-CFLAGS ?= -V$(QNX_TARGET_ARCH) -O2 -Wall -Wextra -Iinclude -I../../../drivers/amba_virt/include/uapi
+CFLAGS ?= -V$(QNX_TARGET_ARCH) -O2 -Wall -Wextra -Iinclude -I../../../drivers/amba_virt/include/uapi -I../../../drivers/amba_virt/tools
 LDFLAGS ?= -V$(QNX_TARGET_ARCH) -lpci -lsocket
 
 BIN_TARGET := amba-virt-resmgr
@@ -23,8 +23,8 @@ check_compiler:
 		exit 1; \
 	fi
 
-$(BIN_TARGET): amba_virt_resmgr.c check_compiler
-	$(CC) $(CFLAGS) -o $@ amba_virt_resmgr.c $(LDFLAGS)
+$(BIN_TARGET): amba_virt_resmgr.c ../../../drivers/amba_virt/tools/hmac_sha256.c check_compiler
+	$(CC) $(CFLAGS) -o $@ amba_virt_resmgr.c ../../../drivers/amba_virt/tools/hmac_sha256.c $(LDFLAGS)
 
 $(LIB_SO_TARGET): libamba_virt.c include/amba_virt_qnx.h check_compiler
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ libamba_virt.c -V$(QNX_TARGET_ARCH)

@@ -96,6 +96,26 @@ int virt_dma_handle_request(uint32_t cid,
 /* Bind CID to paired lease device */
 int virt_dma_bind_cid_lease(uint32_t cid, uint32_t lease_id);
 
+/*
+ * Handle an authentication challenge request from a TCP client (e.g. QNX).
+ * Verifies the lease and epoch, generates server_nonce, derives session_key,
+ * and populates the server authentication tag.
+ */
+int virt_dma_handle_auth_challenge(const struct amba_virt_auth_challenge_req *req,
+                                   struct amba_virt_auth_challenge_resp *resp,
+                                   uint8_t session_key_out[32],
+                                   uint32_t *lease_id_out,
+                                   uint64_t *capability_out);
+
+/*
+ * Direct lease request handler for authenticated TCP sessions.
+ */
+int virt_dma_handle_authenticated_request(uint32_t lease_id,
+                                          uint64_t capability,
+                                          uint64_t epoch,
+                                          const struct amba_virt_dma_request *req,
+                                          struct amba_virt_dma_response *resp);
+
 #endif /* _VIRT_DMA_BROKER_H_ */
 
 /*

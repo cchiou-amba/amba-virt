@@ -484,11 +484,114 @@ static int recv_exact_tcp(int sock, void *buf, size_t len)
 	return 0;
 }
 
+struct tcp_client_session {
+	int authenticated;
+	uint32_t lease_id;
+	uint64_t epoch;
+	uint64_t capability;
+	uint8_t  session_key[32];
+};
+
+static void process_tcp_msg(struct tcp_client_session *sess,
+                            struct amba_virt_xfer *rx,
+                            struct amba_virt_xfer *tx,
+                            int fd, void *map,
+                            const struct amba_virt_info *info)
+{
+	struct amba_virt_msg *in, *out;
+
+	if (rx->len < sizeof(*in)) {
+		fprintf(stderr, "short header %u\n", rx->len);
+		return;
+	}
+
+	in = (struct amba_virt_msg *)rx->data;
+
+	if (in->type == AMBA_VIRT_MSG_AUTH_CHALLENGE_REQ) {
+		struct amba_virt_auth_challenge_req *a_req;
+		struct amba_virt_auth_challenge_resp *a_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*a_req)) {
+			fprintf(stderr, "short auth challenge req %u\n", rx->len);
+			return;
+		}
+		a_req = (struct amba_virt_auth_challenge_req *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_AUTH_CHALLENGE_RESP;
+		out->seq = in->seq;
+		a_resp = (struct amba_virt_auth_challenge_resp *)(tx->data + sizeof(*out));
+
+		int ret = virt_dma_handle_auth_challenge(a_req, a_resp,
+		                                        sess->session_key,
+		                                        &sess->lease_id,
+		                                        &sess->capability);
+		printf("amba-virt-server: auth challenge lease=%u epoch=%llu -> ret=%d status=%d (cap=0x%llx)\n",
+		       a_req->lease_id, (unsigned long long)a_req->epoch, ret, a_resp->status,
+		       (unsigned long long)sess->capability);
+		if (ret >= 0 && a_resp->status == 0) {
+			sess->authenticated = 1;
+			sess->epoch = a_req->epoch;
+		}
+		tx->len = sizeof(*out) + sizeof(*a_resp);
+		return;
+	}
+
+	if (!sess->authenticated) {
+		if (in->type == AMBA_VIRT_MSG_PING) {
+			out = (struct amba_virt_msg *)tx->data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_PONG;
+			out->seq = in->seq;
+			tx->len = sizeof(*out);
+			return;
+		}
+		printf("amba-virt-server: rejecting unauthenticated msg type %u with -EPERM\n", in->type);
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = in->type + 1;
+		out->seq = in->seq;
+		struct amba_virt_dma_response *d_resp = (struct amba_virt_dma_response *)(tx->data + sizeof(*out));
+		memset(d_resp, 0, sizeof(*d_resp));
+		d_resp->status = -EPERM;
+		tx->len = sizeof(*out) + sizeof(*d_resp);
+		return;
+	}
+
+	if (in->type == AMBA_VIRT_MSG_DMA_REQUEST_REQ) {
+		struct amba_virt_dma_request *d_req;
+		struct amba_virt_dma_response *d_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*d_req)) {
+			fprintf(stderr, "short DMA request req %u\n", rx->len);
+			return;
+		}
+		d_req = (struct amba_virt_dma_request *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_DMA_REQUEST_RESP;
+		out->seq = in->seq;
+		d_resp = (struct amba_virt_dma_response *)(tx->data + sizeof(*out));
+
+		int ret = virt_dma_handle_authenticated_request(sess->lease_id, sess->capability,
+		                                      sess->epoch, d_req, d_resp);
+		printf("amba-virt-server: authenticated DMA req lease=%u op=%u len=%u off=0x%llx -> ret=%d status=%d xfer=%u\n",
+		       sess->lease_id, d_req->operation, d_req->length, (unsigned long long)d_req->offset,
+		       ret, d_resp->status, d_resp->transferred);
+		tx->len = sizeof(*out) + sizeof(*d_resp);
+	} else {
+		process_incoming_msg(rx, tx, fd, map, info);
+	}
+}
+
 static void *tcp_client_worker(void *arg)
 {
 	int sock = (int)(intptr_t)arg;
+	struct tcp_client_session sess;
 	struct amba_virt_xfer rx, tx;
 	uint32_t len = 0;
+
+	memset(&sess, 0, sizeof(sess));
 
 	for (;;) {
 		if (recv_exact_tcp(sock, &len, sizeof(len)) < 0)
@@ -497,12 +600,12 @@ static void *tcp_client_worker(void *arg)
 			break;
 		memset(&rx, 0, sizeof(rx));
 		rx.len = len;
-		rx.client_cid = 4; /* Default guest CID */
+		rx.client_cid = 0;
 		if (recv_exact_tcp(sock, rx.data, len) < 0)
 			break;
 
 		memset(&tx, 0, sizeof(tx));
-		process_incoming_msg(&rx, &tx, g_ctx.fd, g_ctx.map, &g_ctx.info);
+		process_tcp_msg(&sess, &rx, &tx, g_ctx.fd, g_ctx.map, &g_ctx.info);
 
 		if (tx.len > 0) {
 			if (send_exact_tcp(sock, &tx.len, sizeof(tx.len)) < 0)

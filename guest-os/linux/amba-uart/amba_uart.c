@@ -12,7 +12,6 @@
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -27,10 +26,12 @@
 #include <linux/irqdomain.h>
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
-#include <linux/dmaengine.h>
-#include <linux/dma-mapping.h>
 #include <linux/circ_buf.h>
+#include <linux/workqueue.h>
+#include <linux/seq_file.h>
 
+#include <amba_virt.h>
+#include "amba_virt_kernel.h"
 #include "amba_uart.h"
 
 #define DRIVER_NAME		"amba_uart"
@@ -39,6 +40,11 @@
 static unsigned int clk_hz = AMBA_UART_DEFAULT_CLK;
 static bool use_dma = true;
 static bool force_poll = false;
+
+static int (*amba_rpc_fn)(const void *request, u32 request_len, void *response,
+			  u32 *response_len, unsigned int timeout_ms);
+static int (*amba_get_dma32_fn)(phys_addr_t *phys, void __iomem **iomem,
+				size_t *size);
 
 static ssize_t use_dma_show(struct device_driver *driver, char *buf)
 {
@@ -76,13 +82,9 @@ static ssize_t clk_hz_show(struct device_driver *driver, char *buf)
 }
 static DRIVER_ATTR_RO(clk_hz);
 
-static struct attribute *amba_uart_driver_attrs[] = {
-	&driver_attr_use_dma.attr,
-	&driver_attr_force_poll.attr,
-	&driver_attr_clk_hz.attr,
-	NULL,
-};
-ATTRIBUTE_GROUPS(amba_uart_driver);
+struct amba_uart_port;
+static struct amba_uart_port *amba_ports[AMBA_UART_MAX_PORTS];
+static DEFINE_MUTEX(amba_port_mutex);
 
 struct amba_uart_port {
 	struct uart_port	port;
@@ -93,19 +95,58 @@ struct amba_uart_port {
 	bool			tx_fifo_fix;
 	bool			running;
 
-	/* DMA Engine State (Envelope 15) */
+	/* Mediated Low-DMA32 State */
 	bool			dma_enabled;
-	struct dma_chan		*tx_dma_chan;
-	dma_addr_t		tx_dma_addr;
+	u32			fcr;
+	u64			dma_cookie;
+	u32			tx_dma_offset;
 	unsigned char		*tx_dma_buf;
-	bool			tx_dma_is_shm;
 	size_t			tx_dma_len;
 	bool			tx_dma_in_progress;
-	dma_cookie_t		tx_cookie;
+	struct work_struct	tx_work;
+
+	u32			rx_dma_offset;
+	unsigned char		*rx_dma_buf;
+	size_t			rx_dma_len;
+	bool			rx_dma_in_progress;
+	struct work_struct	rx_work;
 };
 
-static struct amba_uart_port *amba_ports[AMBA_UART_MAX_PORTS];
-static DEFINE_MUTEX(amba_port_mutex);
+static ssize_t dma_rx_show(struct device_driver *driver, char *buf)
+{
+	bool in_prog = false;
+	mutex_lock(&amba_port_mutex);
+	if (amba_ports[0])
+		in_prog = amba_ports[0]->rx_dma_in_progress;
+	mutex_unlock(&amba_port_mutex);
+	return sprintf(buf, "%d\n", in_prog ? 1 : 0);
+}
+
+static ssize_t dma_rx_store(struct device_driver *driver, const char *buf, size_t count)
+{
+	unsigned int len;
+	if (kstrtouint(buf, 0, &len) || len == 0)
+		return -EINVAL;
+	mutex_lock(&amba_port_mutex);
+	if (amba_ports[0] && amba_ports[0]->dma_enabled) {
+		amba_ports[0]->rx_dma_len = len;
+		schedule_work(&amba_ports[0]->rx_work);
+	}
+	mutex_unlock(&amba_port_mutex);
+	return count;
+}
+static DRIVER_ATTR_RW(dma_rx);
+
+static struct attribute *amba_uart_driver_attrs[] = {
+	&driver_attr_use_dma.attr,
+	&driver_attr_force_poll.attr,
+	&driver_attr_clk_hz.attr,
+	&driver_attr_dma_rx.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(amba_uart_driver);
+
+
 
 static inline u32 amba_uart_read(struct uart_port *port, unsigned int offset)
 {
@@ -161,91 +202,184 @@ static void amba_uart_transmit_chars(struct uart_port *port)
 		uart_write_wakeup(port);
 }
 
-static void amba_uart_start_tx_dma(struct amba_uart_port *amb_port);
-
-static void amba_uart_dma_tx_complete(void *data)
+static int amba_uart_rpc_dma_request(struct amba_uart_port *amb_port,
+				     u32 operation, u64 offset, u32 length,
+				     u32 *transferred)
 {
-	struct amba_uart_port *amb_port = data;
+	u8 req_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_request)];
+	u8 resp_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_response)];
+	struct amba_virt_msg *msg;
+	struct amba_virt_dma_request *d_req;
+	struct amba_virt_dma_response *d_resp;
+	u32 resp_len = sizeof(resp_buf);
+	int ret;
+
+	if (!amba_rpc_fn)
+		return -ENODEV;
+
+	memset(req_buf, 0, sizeof(req_buf));
+	msg = (struct amba_virt_msg *)req_buf;
+	msg->type = AMBA_VIRT_MSG_DMA_REQUEST_REQ;
+
+	d_req = (struct amba_virt_dma_request *)(req_buf + sizeof(*msg));
+	d_req->cookie = ++amb_port->dma_cookie;
+	d_req->endpoint_id = AMBA_DMA_ENDPOINT_UART2;
+	d_req->operation = operation;
+	d_req->offset = offset;
+	d_req->length = length;
+	d_req->flags = 0;
+
+	ret = amba_rpc_fn(req_buf, sizeof(req_buf), resp_buf, &resp_len, 10000);
+	if (ret)
+		return ret;
+
+	if (resp_len < sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_response))
+		return -EIO;
+
+	d_resp = (struct amba_virt_dma_response *)(resp_buf + sizeof(struct amba_virt_msg));
+	if (transferred)
+		*transferred = d_resp->transferred;
+	return d_resp->status;
+}
+
+static void amba_uart_tx_work(struct work_struct *work)
+{
+	struct amba_uart_port *amb_port = container_of(work, struct amba_uart_port, tx_work);
 	struct uart_port *port = &amb_port->port;
 	struct circ_buf *xmit = &port->state->xmit;
 	unsigned long flags;
-	unsigned int count;
+	unsigned int count, c;
+	int tail, ret;
+	u32 transferred = 0;
 
 	spin_lock_irqsave(&port->lock, flags);
+	if (amb_port->tx_dma_in_progress || uart_tx_stopped(port) || uart_circ_empty(xmit)) {
+		spin_unlock_irqrestore(&port->lock, flags);
+		return;
+	}
 
-	count = amb_port->tx_dma_len;
-	xmit->tail = (xmit->tail + count) & (UART_XMIT_SIZE - 1);
-	port->icount.tx += count;
+	tail = xmit->tail;
+	count = uart_circ_chars_pending(xmit);
+	if (count == 0) {
+		spin_unlock_irqrestore(&port->lock, flags);
+		return;
+	}
+
+	if (count <= 32) {
+		/* Small pending count: transmit immediately via PIO */
+		u32 ie = amba_uart_read(port, UART_IE_OFFSET);
+		if (!(ie & UART_IE_ETBEI))
+			amba_uart_write(port, ie | UART_IE_ETBEI, UART_IE_OFFSET);
+		amba_uart_transmit_chars(port);
+		spin_unlock_irqrestore(&port->lock, flags);
+		return;
+	}
+
+	if (count > 4096)
+		count = 4096;
+
+	c = CIRC_CNT_TO_END(xmit->head, tail, UART_XMIT_SIZE);
+	if (c >= count) {
+		memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[tail], count);
+	} else {
+		memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[tail], c);
+		memcpy_toio((void __iomem *)(amb_port->tx_dma_buf + c), &xmit->buf[0], count - c);
+	}
+	wmb();
+	amb_port->tx_dma_len = count;
+	amb_port->tx_dma_in_progress = true;
+
+	/* Configure UART hardware for DMA TX */
+	amb_port->fcr |= UART_FC_DMA_SELECT;
+	amba_uart_write(port, amb_port->fcr, UART_FC_OFFSET);
+	amba_uart_write(port, amba_uart_read(port, UART_DMAE_OFFSET) | 0x02, UART_DMAE_OFFSET);
+	spin_unlock_irqrestore(&port->lock, flags);
+
+	ret = amba_uart_rpc_dma_request(amb_port, AMBA_DMA_OP_MEM_TO_DEV,
+					amb_port->tx_dma_offset, count, &transferred);
+
+	spin_lock_irqsave(&port->lock, flags);
 	amb_port->tx_dma_in_progress = false;
+	/* Restore normal FCR without DMA_SELECT for standard PIO interrupt operation */
+	amb_port->fcr &= ~UART_FC_DMA_SELECT;
+	amba_uart_write(port, amb_port->fcr, UART_FC_OFFSET);
+	amba_uart_write(port, amba_uart_read(port, UART_DMAE_OFFSET) & ~0x02, UART_DMAE_OFFSET);
+
+	if (ret == 0 && transferred > 0) {
+		xmit->tail = (xmit->tail + transferred) & (UART_XMIT_SIZE - 1);
+		port->icount.tx += transferred;
+	} else {
+		dev_warn_ratelimited(port->dev, "DMA TX fallback to PIO (ret=%d)\n", ret);
+		amba_uart_transmit_chars(port);
+	}
 	amb_port->tx_dma_len = 0;
 
 	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 
-	/* If more data is queued, dispatch next burst */
 	if (!uart_circ_empty(xmit) && !uart_tx_stopped(port)) {
-		if (uart_circ_chars_pending(xmit) >= 16) {
-			amba_uart_start_tx_dma(amb_port);
-		} else {
-			amba_uart_transmit_chars(port);
-		}
+		u32 ie = amba_uart_read(port, UART_IE_OFFSET);
+		if (!(ie & UART_IE_ETBEI))
+			amba_uart_write(port, ie | UART_IE_ETBEI, UART_IE_OFFSET);
+		amba_uart_transmit_chars(port);
 	}
 
 	spin_unlock_irqrestore(&port->lock, flags);
 }
 
-static void amba_uart_start_tx_dma(struct amba_uart_port *amb_port)
+static void amba_uart_rx_work(struct work_struct *work)
 {
+	struct amba_uart_port *amb_port = container_of(work, struct amba_uart_port, rx_work);
 	struct uart_port *port = &amb_port->port;
-	struct circ_buf *xmit = &port->state->xmit;
-	struct dma_async_tx_descriptor *desc;
-	unsigned int count, c;
-	int tail;
+	struct tty_port *tport = &port->state->port;
+	u32 transferred = 0;
+	int ret, i;
+	unsigned int len = amb_port->rx_dma_len ? amb_port->rx_dma_len : 4096;
+	unsigned long flags;
 
-	if (amb_port->tx_dma_in_progress)
+	if (amb_port->rx_dma_in_progress)
 		return;
 
-	tail = xmit->tail;
-	count = uart_circ_chars_pending(xmit);
-	if (count == 0)
-		return;
+	amb_port->rx_dma_in_progress = true;
 
-	/* Determine contiguous chunk length */
-	c = CIRC_CNT_TO_END(xmit->head, tail, UART_XMIT_SIZE);
-	if (c > count)
-		c = count;
-	if (c > UART_XMIT_SIZE)
-		c = UART_XMIT_SIZE;
+	/* Configure UART hardware for DMA RX and mask RX interrupt to prevent PIO collision */
+	spin_lock_irqsave(&port->lock, flags);
+	amba_uart_write(port, amba_uart_read(port, UART_IE_OFFSET) & ~UART_IE_ERBFI, UART_IE_OFFSET);
+	amb_port->fcr = UART_FC_FIFOE | UART_FC_RX_HALF_FULL | UART_FC_TX_EMPTY | UART_FC_DMA_SELECT;
+	amba_uart_write(port, amb_port->fcr | UART_FC_RCVRR | UART_FC_XMITR, UART_FC_OFFSET);
+	amba_uart_write(port, amba_uart_read(port, UART_DMAE_OFFSET) | 0x01, UART_DMAE_OFFSET);
+	spin_unlock_irqrestore(&port->lock, flags);
 
-	if (amb_port->tx_dma_is_shm)
-		memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[tail], c);
-	else
-		memcpy(amb_port->tx_dma_buf, &xmit->buf[tail], c);
-	wmb();
-	amb_port->tx_dma_len = c;
-	amb_port->tx_dma_in_progress = true;
-
-	/* Ensure hardware UART DMA mode is asserted */
-	amba_uart_write(port, amba_uart_read(port, UART_FC_OFFSET) | UART_FC_DMA_SELECT, UART_FC_OFFSET);
-	amba_uart_write(port, 0x02, UART_DMAE_OFFSET);
-
-	desc = dmaengine_prep_slave_single(amb_port->tx_dma_chan,
-					   amb_port->tx_dma_addr,
-					   c,
-					   DMA_MEM_TO_DEV,
-					   DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
-	if (!desc) {
-		amb_port->tx_dma_in_progress = false;
-		amb_port->tx_dma_len = 0;
-		amba_uart_transmit_chars(port);
-		return;
+	ret = amba_uart_rpc_dma_request(amb_port, AMBA_DMA_OP_DEV_TO_MEM,
+					amb_port->rx_dma_offset, len, &transferred);
+	if (ret == 0 && transferred > 0) {
+		u8 *tmp = kmalloc(transferred, GFP_KERNEL);
+		if (tmp) {
+			memcpy_fromio(tmp, (void __iomem *)amb_port->rx_dma_buf, transferred);
+			rmb();
+			tty_insert_flip_string(tport, tmp, transferred);
+			kfree(tmp);
+		} else {
+			for (i = 0; i < (int)transferred; i++) {
+				tty_insert_flip_char(tport, readb((void __iomem *)(amb_port->rx_dma_buf + i)), TTY_NORMAL);
+			}
+		}
+		port->icount.rx += transferred;
+		tty_flip_buffer_push(tport);
+	} else if (ret != -ETIMEDOUT) {
+		dev_err(port->dev, "DMA RX request failed: ret=%d transferred=%u\n",
+			ret, transferred);
 	}
 
-	desc->callback = amba_uart_dma_tx_complete;
-	desc->callback_param = amb_port;
+	spin_lock_irqsave(&port->lock, flags);
+	amb_port->fcr &= ~UART_FC_DMA_SELECT;
+	amba_uart_write(port, amb_port->fcr, UART_FC_OFFSET);
+	amba_uart_write(port, amba_uart_read(port, UART_DMAE_OFFSET) & ~0x01, UART_DMAE_OFFSET);
+	amba_uart_write(port, amba_uart_read(port, UART_IE_OFFSET) | UART_IE_ERBFI, UART_IE_OFFSET);
+	spin_unlock_irqrestore(&port->lock, flags);
 
-	amb_port->tx_cookie = dmaengine_submit(desc);
-	dma_async_issue_pending(amb_port->tx_dma_chan);
+	amb_port->rx_dma_in_progress = false;
+	amb_port->rx_dma_len = 0;
 }
 
 static void amba_uart_start_tx(struct uart_port *port)
@@ -265,15 +399,14 @@ static void amba_uart_start_tx(struct uart_port *port)
 		return;
 	}
 
-	/* Offload bursts >= 16 bytes via DMA when active */
-	if (amb_port->dma_enabled && amb_port->tx_dma_chan && !amb_port->tx_dma_in_progress) {
-		if (uart_circ_chars_pending(xmit) >= 16) {
-			amba_uart_start_tx_dma(amb_port);
-			return;
-		}
+	/* Bulk DMA acceleration for streams > 256 bytes */
+	if (amb_port->dma_enabled && uart_circ_chars_pending(xmit) > 256) {
+		if (!amb_port->tx_dma_in_progress)
+			schedule_work(&amb_port->tx_work);
+		return;
 	}
 
-	/* Short burst or DMA busy: arm THRE interrupt and transmit chars */
+	/* Fast-path PIO for interactive byte streams */
 	{
 		u32 ie = amba_uart_read(port, UART_IE_OFFSET);
 		if (!(ie & UART_IE_ETBEI))
@@ -329,25 +462,6 @@ next_char:
 
 	if (pushed)
 		tty_flip_buffer_push(tport);
-}
-
-static enum hrtimer_restart amba_uart_poll_timer(struct hrtimer *timer)
-{
-	struct amba_uart_port *amb_port = container_of(timer, struct amba_uart_port, poll_timer);
-	struct uart_port *port = &amb_port->port;
-	unsigned long flags;
-
-	if (!amb_port->running)
-		return HRTIMER_NORESTART;
-
-	spin_lock_irqsave(&port->lock, flags);
-	amba_uart_receive_chars(port);
-	if (!uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
-		amba_uart_transmit_chars(port);
-	spin_unlock_irqrestore(&port->lock, flags);
-
-	hrtimer_forward_now(timer, amb_port->poll_interval);
-	return HRTIMER_RESTART;
 }
 
 static unsigned int amba_uart_tx_empty(struct uart_port *port)
@@ -426,6 +540,7 @@ static void amba_uart_break_ctl(struct uart_port *port, int break_state)
 static irqreturn_t amba_uart_interrupt(int irq, void *dev_id)
 {
 	struct uart_port *port = dev_id;
+	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
 	u32 iir;
 	unsigned long flags;
 	int handled = 0;
@@ -446,13 +561,19 @@ static irqreturn_t amba_uart_interrupt(int irq, void *dev_id)
 		case UART_II_CHAR_TIMEOUT_FIFO_EMPTY:
 		case UART_II_RCV_DATA_AVAIL:
 		case UART_II_RCV_STATUS:
+			if (amb_port->rx_dma_in_progress)
+				break;
 			amba_uart_receive_chars(port);
 			break;
 		case UART_II_THR_EMPTY:
-			if (!uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
-				amba_uart_transmit_chars(port);
-			else
+			if (amb_port->tx_dma_in_progress) {
 				amba_uart_stop_tx(port);
+			} else {
+				if (!uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
+					amba_uart_transmit_chars(port);
+				else
+					amba_uart_stop_tx(port);
+			}
 			break;
 		default:
 			amba_uart_read(port, UART_LS_OFFSET);
@@ -466,119 +587,98 @@ static irqreturn_t amba_uart_interrupt(int irq, void *dev_id)
 	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
 
-static bool amba_uart_dma_filter(struct dma_chan *chan, void *param)
-{
-	(void)param;
-	return true;
-}
-
 static void amba_uart_release_dma(struct amba_uart_port *amb_port)
 {
-	if (amb_port->tx_dma_chan) {
-		dmaengine_terminate_sync(amb_port->tx_dma_chan);
-		dma_release_channel(amb_port->tx_dma_chan);
-		amb_port->tx_dma_chan = NULL;
-	}
-
-	if (amb_port->tx_dma_buf) {
-		if (!amb_port->tx_dma_is_shm) {
-			dma_free_coherent(amb_port->port.dev, UART_XMIT_SIZE,
-					  amb_port->tx_dma_buf, amb_port->tx_dma_addr);
-		}
-		amb_port->tx_dma_buf = NULL;
-		amb_port->tx_dma_is_shm = false;
-	}
+	cancel_work_sync(&amb_port->tx_work);
+	cancel_work_sync(&amb_port->rx_work);
 
 	amb_port->dma_enabled = false;
+	amb_port->tx_dma_buf = NULL;
+	amb_port->rx_dma_buf = NULL;
 	amb_port->tx_dma_in_progress = false;
+	amb_port->rx_dma_in_progress = false;
+
+	if (amba_rpc_fn) {
+		symbol_put_addr((void *)amba_rpc_fn);
+		amba_rpc_fn = NULL;
+	}
+	if (amba_get_dma32_fn) {
+		symbol_put_addr((void *)amba_get_dma32_fn);
+		amba_get_dma32_fn = NULL;
+	}
 }
 
-static void amba_uart_init_dma(struct amba_uart_port *amb_port)
+static int amba_uart_init_dma(struct amba_uart_port *amb_port)
 {
 	struct uart_port *port = &amb_port->port;
-	dma_cap_mask_t mask;
-	struct dma_slave_config cfg;
 	phys_addr_t shm_phys = 0;
 	void __iomem *shm_iomem = NULL;
 	size_t shm_size = 0;
+	u32 tx_offset, rx_offset;
 	int ret;
 
 	if (!use_dma) {
-		dev_info(port->dev, "DMA disabled by module parameter (use_dma=0)\n");
-		return;
+		dev_err(port->dev, "DMA requested but disabled by use_dma parameter\n");
+		return -EINVAL;
 	}
 
-	dma_cap_zero(mask);
-	dma_cap_set(DMA_SLAVE, mask);
-
-	amb_port->tx_dma_chan = dma_request_channel(mask, amba_uart_dma_filter, NULL);
-	if (!amb_port->tx_dma_chan) {
-		dev_info(port->dev, "No DMA channel available; continuing in interrupt-driven PIO mode\n");
-		return;
-	}
-
-	/*
-	 * Allocate TX buffer from ivshmem shared window so physical Generic-DMA1
-	 * on Dom0 can read from it directly.
-	 * Resolve amba_virt_get_window dynamically via __symbol_get to avoid
-	 * static module dependency cycles and sysfs mod_sysfs_setup faults.
-	 */
-	{
-		int (*get_win_fn)(phys_addr_t *, void __iomem **, size_t *) =
-			__symbol_get("amba_virt_get_dma32_window");
-		if (!get_win_fn)
-			get_win_fn = __symbol_get("amba_virt_get_window");
-		if (get_win_fn) {
-			ret = get_win_fn(&shm_phys, &shm_iomem, &shm_size);
-			symbol_put_addr((void *)get_win_fn);
-		} else {
-			ret = -ENODEV;
+	amba_rpc_fn = __symbol_get("amba_virt_rpc");
+	amba_get_dma32_fn = __symbol_get("amba_virt_get_dma32_window");
+	if (!amba_rpc_fn || !amba_get_dma32_fn) {
+		dev_err(port->dev, "Required amba_virt symbols (dma32/rpc) not found\n");
+		if (amba_rpc_fn) {
+			symbol_put_addr((void *)amba_rpc_fn);
+			amba_rpc_fn = NULL;
 		}
-	}
-	if (ret == 0 && shm_iomem && shm_size >= 0x00200000) {
-		/* UART staging buffers at 0x00100000 + (port_id * 0x1000) */
-		u32 offset = 0x00100000 + (amb_port->id * 0x1000);
-		amb_port->tx_dma_buf = (unsigned char *)shm_iomem + offset;
-		amb_port->tx_dma_addr = (dma_addr_t)(shm_phys + offset);
-		amb_port->tx_dma_is_shm = true;
-	} else {
-		amb_port->tx_dma_buf = dma_alloc_coherent(port->dev, UART_XMIT_SIZE,
-							  &amb_port->tx_dma_addr, GFP_KERNEL);
-		amb_port->tx_dma_is_shm = false;
-	}
-
-	if (!amb_port->tx_dma_buf) {
-		dev_warn(port->dev, "Failed to allocate DMA buffer; falling back to PIO\n");
-		dma_release_channel(amb_port->tx_dma_chan);
-		amb_port->tx_dma_chan = NULL;
-		return;
-	}
-
-	memset(&cfg, 0, sizeof(cfg));
-	cfg.direction = DMA_MEM_TO_DEV;
-	cfg.dst_addr = port->mapbase + UART_DMAF_OFFSET;
-	cfg.dst_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
-	cfg.dst_maxburst = 8;
-
-	ret = dmaengine_slave_config(amb_port->tx_dma_chan, &cfg);
-	if (ret) {
-		dev_warn(port->dev, "dmaengine_slave_config failed: %d; falling back to PIO\n", ret);
-		if (!amb_port->tx_dma_is_shm) {
-			dma_free_coherent(port->dev, UART_XMIT_SIZE, amb_port->tx_dma_buf, amb_port->tx_dma_addr);
+		if (amba_get_dma32_fn) {
+			symbol_put_addr((void *)amba_get_dma32_fn);
+			amba_get_dma32_fn = NULL;
 		}
-		amb_port->tx_dma_buf = NULL;
-		amb_port->tx_dma_is_shm = false;
-		dma_release_channel(amb_port->tx_dma_chan);
-		amb_port->tx_dma_chan = NULL;
-		return;
+		return -ENODEV;
+	}
+
+	ret = amba_get_dma32_fn(&shm_phys, &shm_iomem, &shm_size);
+	if (ret != 0 || !shm_iomem || shm_size < 0x00200000) {
+		dev_err(port->dev, "DMA32 window unavailable or too small (ret=%d, size=%zu)\n",
+			ret, shm_size);
+		symbol_put_addr((void *)amba_rpc_fn);
+		symbol_put_addr((void *)amba_get_dma32_fn);
+		amba_rpc_fn = NULL;
+		amba_get_dma32_fn = NULL;
+		return -ENODEV;
+	}
+
+	/* UART buffers in DMA32 slice above bootstrap page (0x00100000 + port * 0x2000) */
+	tx_offset = 0x00100000 + (amb_port->id * 0x2000);
+	rx_offset = tx_offset + 0x1000;
+
+	amb_port->tx_dma_buf = (unsigned char *)shm_iomem + tx_offset;
+	amb_port->tx_dma_offset = tx_offset;
+	amb_port->rx_dma_buf = (unsigned char *)shm_iomem + rx_offset;
+	amb_port->rx_dma_offset = rx_offset;
+	amb_port->dma_cookie = ktime_get_ns();
+
+	INIT_WORK(&amb_port->tx_work, amba_uart_tx_work);
+	INIT_WORK(&amb_port->rx_work, amba_uart_rx_work);
+
+	/* Probe lease binding: probe request with length 0 */
+	ret = amba_uart_rpc_dma_request(amb_port, AMBA_DMA_OP_MEM_TO_DEV,
+					tx_offset, 0, NULL);
+	if (ret == -EPERM) {
+		dev_err(port->dev, "No DMA lease bound to guest CID\n");
+		amba_uart_release_dma(amb_port);
+		return -EPERM;
+	}
+	if (ret != -EINVAL && ret != 0) {
+		dev_err(port->dev, "DMA lease check failed: %d\n", ret);
+		amba_uart_release_dma(amb_port);
+		return ret;
 	}
 
 	amb_port->dma_enabled = true;
-	amb_port->tx_dma_in_progress = false;
-	dev_info(port->dev, "DMA TX acceleration initialized (channel: %s, %s buf=0x%llx)\n",
-		 dma_chan_name(amb_port->tx_dma_chan),
-		 amb_port->tx_dma_is_shm ? "ivshmem" : "coherent",
-		 (unsigned long long)amb_port->tx_dma_addr);
+	dev_info(port->dev, "Ambarella mediated DMA acceleration initialized (tx_offset=0x%x, rx_offset=0x%x)\n",
+		 tx_offset, rx_offset);
+	return 0;
 }
 
 static void amba_uart_hw_init(struct uart_port *port)
@@ -590,22 +690,16 @@ static void amba_uart_hw_init(struct uart_port *port)
 	udelay(100);
 	amba_uart_write(port, 0x00, UART_SRR_OFFSET);
 
-	/* Enable FIFOs with quarter-full (16 chars) RX threshold and clear FIFOs */
-	amba_uart_write(port, UART_FC_FIFOE | UART_FC_RX_QUARTER_FULL |
-			UART_FC_TX_EMPTY | UART_FC_XMITR | UART_FC_RCVRR,
-			UART_FC_OFFSET);
+	/* Enable FIFOs with half-full (8 chars) RX threshold and clear FIFOs */
+	amb_port->fcr = UART_FC_FIFOE | UART_FC_RX_HALF_FULL | UART_FC_TX_EMPTY;
+	amba_uart_write(port, amb_port->fcr | UART_FC_XMITR | UART_FC_RCVRR, UART_FC_OFFSET);
+	amba_uart_write(port, 0x00, UART_DMAE_OFFSET);
 
 	/* Assert DTR, RTS, and OUT2 (hardware interrupt gate) */
 	amba_uart_write(port, UART_MC_OUT2 | UART_MC_RTS | UART_MC_DTR,
 			UART_MC_OFFSET);
 
-	/* Configure DMA registers if DMA is enabled */
-	if (amb_port->dma_enabled) {
-		amba_uart_write(port, amba_uart_read(port, UART_FC_OFFSET) | UART_FC_DMA_SELECT, UART_FC_OFFSET);
-		amba_uart_write(port, 0x02, UART_DMAE_OFFSET);
-	}
-
-	/* Enable configured interrupts (RX Data, Line Status, Character Timeout) */
+	/* Enable configured default interrupts (ERBFI, ELSI, ETOI) */
 	amba_uart_write(port, AMBA_UART_DEFAULT_IER, UART_IE_OFFSET);
 }
 
@@ -614,8 +708,12 @@ static int amba_uart_startup(struct uart_port *port)
 	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
 	int ret = 0;
 
-	/* Initialize DMA channel before hardware setup */
-	amba_uart_init_dma(amb_port);
+	/* Initialize DMA. If DMA setup fails, port startup MUST FAIL. No PIO fallback. */
+	ret = amba_uart_init_dma(amb_port);
+	if (ret) {
+		dev_err(port->dev, "DMA setup failed (%d); aborting port startup\n", ret);
+		return ret;
+	}
 
 	amba_uart_hw_init(port);
 
@@ -626,24 +724,17 @@ static int amba_uart_startup(struct uart_port *port)
 	if (port->irq > 0 && !force_poll) {
 		ret = request_irq(port->irq, amba_uart_interrupt, IRQF_SHARED, DRIVER_NAME, port);
 		if (ret) {
-			dev_warn(port->dev, "Failed to request IRQ %d: %d, falling back to polling\n",
-				 port->irq, ret);
-			port->irq = 0;
-		} else {
-			dev_info(port->dev, "Ambarella UART%d running in interrupt-driven mode (IRQ %d, DMA %s)\n",
-				 amb_port->id, port->irq, amb_port->dma_enabled ? "enabled" : "disabled");
+			dev_err(port->dev, "Failed to request IRQ %d: %d\n",
+				port->irq, ret);
+			amba_uart_release_dma(amb_port);
+			return ret;
 		}
-	}
-
-	if (port->irq == 0 || force_poll) {
-		/* Fallback to hrtimer polling if no IRQ allocated or request_irq failed */
-		amb_port->running = true;
-		amb_port->poll_interval = ms_to_ktime(1);
-		hrtimer_init(&amb_port->poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-		amb_port->poll_timer.function = amba_uart_poll_timer;
-		hrtimer_start(&amb_port->poll_timer, amb_port->poll_interval, HRTIMER_MODE_REL);
-		dev_info(port->dev, "Ambarella UART%d running in polling mode (1 ms hrtimer, DMA %s)\n",
-			 amb_port->id, amb_port->dma_enabled ? "enabled" : "disabled");
+		dev_info(port->dev, "Ambarella UART%d running in interrupt-driven mode (IRQ %d, DMA active)\n",
+			 amb_port->id, port->irq);
+	} else {
+		dev_err(port->dev, "No valid IRQ for UART%d; polling mode forbidden\n", amb_port->id);
+		amba_uart_release_dma(amb_port);
+		return -ENODEV;
 	}
 
 	return 0;
@@ -678,6 +769,7 @@ static void amba_uart_shutdown(struct uart_port *port)
 static void amba_uart_set_termios(struct uart_port *port, struct ktermios *termios,
 				  const struct ktermios *old)
 {
+	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
 	unsigned int baud, quot;
 	unsigned long flags;
 	u32 lc = 0;
@@ -753,7 +845,11 @@ static void amba_uart_set_termios(struct uart_port *port, struct ktermios *termi
 
 static const char *amba_uart_type(struct uart_port *port)
 {
-	return (port->type == PORT_8250) ? "amba_uart" : NULL;
+	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
+
+	if (port->type != PORT_8250)
+		return NULL;
+	return amb_port->dma_enabled ? "amba_uart dma:active" : "amba_uart dma:inactive";
 }
 
 static void amba_uart_config_port(struct uart_port *port, int flags)
@@ -809,6 +905,7 @@ static struct uart_driver amba_uart_driver = {
 	.minor		= 0,
 	.nr		= AMBA_UART_MAX_PORTS,
 };
+
 
 /* ========================================================================== */
 /* Platform Driver for Direct Hardware Passthrough                           */
@@ -977,3 +1074,4 @@ module_exit(amba_uart_exit);
 MODULE_AUTHOR("Ambarella International LLC");
 MODULE_DESCRIPTION("Ambarella HVM UART Passthrough Serial Driver");
 MODULE_LICENSE("GPL");
+MODULE_SOFTDEP("pre: amba_virt");

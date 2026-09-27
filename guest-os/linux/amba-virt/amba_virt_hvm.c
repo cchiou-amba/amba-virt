@@ -149,6 +149,16 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 		pci_set_drvdata(pdev, &dma32_win);
 		dev_info(&pdev->dev, "amba_virt guest: DMA32 lease window BAR%d phys 0x%llx size %zu\n",
 			 bar, (unsigned long long)start, (size_t)len);
+
+		if (!gdev.devt) {
+			memset(&gdev, 0, sizeof(gdev));
+			gdev.shm_phys = start;
+			gdev.shm_size = (size_t)len;
+			gdev.shm_iomem = dma32_win.iomem;
+			ret = amba_virt_core_init(&gdev, false);
+			if (ret)
+				dev_warn(&pdev->dev, "amba_virt core init for DMA32 returned %d\n", ret);
+		}
 		return 0;
 	}
 
@@ -192,6 +202,10 @@ static void amba_virt_pci_remove(struct pci_dev *pdev)
 	void *drvdata = pci_get_drvdata(pdev);
 
 	if (drvdata == &dma32_win) {
+		if (gdev.shm_phys == dma32_win.phys) {
+			amba_virt_core_exit(&gdev);
+			memset(&gdev, 0, sizeof(gdev));
+		}
 		if (dma32_win.iomem) {
 			iounmap(dma32_win.iomem);
 			dma32_win.iomem = NULL;

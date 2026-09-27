@@ -41,9 +41,22 @@ static struct amba_dma_endpoint_policy endpoint_uart2 = {
 	.tx_dreq      = 13,
 	.rx_dreq      = 14,
 	.fifo_offset  = 0x40,
-	.fifo_phys    = 0xffe0018040ULL,
+	.fifo_phys    = 0xe0018040ULL,
 	.addr_width   = DMA_SLAVE_BUSWIDTH_1_BYTE,
-	.max_burst    = 1,
+	.max_burst    = 8,
+	.owner_lease  = -1,
+};
+
+static struct amba_dma_endpoint_policy endpoint_uart3 = {
+	.endpoint_id  = AMBA_DMA_ENDPOINT_UART3,
+	.name         = "UART3",
+	.of_node_path = "/ahb@ffe0000000/uart@e0019000",
+	.tx_dreq      = 15,
+	.rx_dreq      = 16,
+	.fifo_offset  = 0x40,
+	.fifo_phys    = 0xe0019040ULL,
+	.addr_width   = DMA_SLAVE_BUSWIDTH_1_BYTE,
+	.max_burst    = 8,
 	.owner_lease  = -1,
 };
 
@@ -51,8 +64,8 @@ static void amba_dma_watchdog_fired(struct timer_list *t)
 {
 	struct amba_dma_lease *lease = from_timer(lease, t, watchdog);
 
-	pr_warn("%s: lease %u DMA transfer watchdog timed out (500 ms)\n",
-		DRV_NAME, lease->lease_id);
+	pr_warn("%s: lease %u DMA transfer watchdog timed out (%u ms)\n",
+		DRV_NAME, lease->lease_id, lease->active_timeout_ms);
 
 	lease->xfer_status = -ETIMEDOUT;
 	lease->stats.err_dma_watchdog++;
@@ -62,6 +75,12 @@ static void amba_dma_watchdog_fired(struct timer_list *t)
 			dmaengine_terminate_sync(endpoint_uart2.tx_chan);
 		else if (lease->active_operation == AMBA_DMA_OP_DEV_TO_MEM && endpoint_uart2.rx_chan)
 			dmaengine_terminate_sync(endpoint_uart2.rx_chan);
+	}
+	if (endpoint_uart3.owner_lease == (int)lease->lease_id) {
+		if (lease->active_operation == AMBA_DMA_OP_MEM_TO_DEV && endpoint_uart3.tx_chan)
+			dmaengine_terminate_sync(endpoint_uart3.tx_chan);
+		else if (lease->active_operation == AMBA_DMA_OP_DEV_TO_MEM && endpoint_uart3.rx_chan)
+			dmaengine_terminate_sync(endpoint_uart3.rx_chan);
 	}
 
 	complete(&lease->xfer_done);
@@ -103,6 +122,32 @@ static int amba_dma_sanitize_slice(struct amba_dma_lease *lease)
 	return 0;
 }
 
+static void amba_dma_write_bootstrap_page(struct amba_dma_lease *lease)
+{
+	void __iomem *vaddr;
+	struct amba_dma_bootstrap boot;
+
+	vaddr = ioremap_wc(lease->slice_phys, AMBA_DMA_BOOTSTRAP_SIZE);
+	if (!vaddr) {
+		pr_err("%s: failed to map bootstrap page for lease %u\n",
+		       DRV_NAME, lease->lease_id);
+		return;
+	}
+
+	memset_io(vaddr, 0, AMBA_DMA_BOOTSTRAP_SIZE);
+	memset(&boot, 0, sizeof(boot));
+	boot.magic = AMBA_DMA_BOOTSTRAP_MAGIC;
+	boot.version = AMBA_DMA_BOOTSTRAP_VERSION;
+	boot.lease_id = lease->lease_id;
+	boot.reserved0 = 0;
+	boot.epoch = lease->epoch;
+	memcpy(boot.hmac_key, lease->hmac_key, sizeof(boot.hmac_key));
+
+	memcpy_toio(vaddr, &boot, sizeof(boot));
+	wmb();
+	iounmap(vaddr);
+}
+
 int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 {
 	struct amba_dma_lease *lease;
@@ -114,6 +159,25 @@ int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 
 	mutex_lock(&global_lock);
 
+	/* 1. If vsock_cid already has an allocated lease, return it */
+	if (alloc->vsock_cid != 0) {
+		for (id = 0; id < AMBA_VIRT_DMA32_NUM_SLICES; id++) {
+			lease = &leases[id];
+			mutex_lock(&lease->lock);
+			if ((lease->state == AMBA_DMA_LEASE_ACTIVE ||
+			     lease->state == AMBA_DMA_LEASE_STARTING) &&
+			    lease->vsock_cid == alloc->vsock_cid) {
+				alloc->lease_id = id;
+				alloc->capability = lease->capability;
+				alloc->epoch = lease->epoch;
+				mutex_unlock(&lease->lock);
+				mutex_unlock(&global_lock);
+				return 0;
+			}
+			mutex_unlock(&lease->lock);
+		}
+	}
+
 	for (id = 0; id < AMBA_VIRT_DMA32_NUM_SLICES; id++) {
 		lease = &leases[id];
 		mutex_lock(&lease->lock);
@@ -124,7 +188,10 @@ int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 			memcpy(lease->vm_uuid, alloc->vm_uuid, 16);
 
 			get_random_bytes(&lease->capability, sizeof(lease->capability));
+			get_random_bytes(lease->hmac_key, sizeof(lease->hmac_key));
 			lease->epoch++;
+
+			amba_dma_write_bootstrap_page(lease);
 
 			alloc->lease_id = id;
 			alloc->capability = lease->capability;
@@ -178,6 +245,12 @@ int amba_dma_drain_lease(u32 lease_id, u64 epoch, bool force)
 				if (endpoint_uart2.rx_chan)
 					dmaengine_terminate_sync(endpoint_uart2.rx_chan);
 			}
+			if (endpoint_uart3.owner_lease == (int)lease->lease_id) {
+				if (endpoint_uart3.tx_chan)
+					dmaengine_terminate_sync(endpoint_uart3.tx_chan);
+				if (endpoint_uart3.rx_chan)
+					dmaengine_terminate_sync(endpoint_uart3.rx_chan);
+			}
 			complete(&lease->xfer_done);
 		} else {
 			mutex_unlock(&lease->lock);
@@ -221,6 +294,11 @@ int amba_dma_release_lease(u32 lease_id, u64 epoch)
 		endpoint_uart2.owner_lease = -1;
 	mutex_unlock(&endpoint_uart2.lock);
 
+	mutex_lock(&endpoint_uart3.lock);
+	if (endpoint_uart3.owner_lease == (int)lease_id)
+		endpoint_uart3.owner_lease = -1;
+	mutex_unlock(&endpoint_uart3.lock);
+
 	ret = amba_dma_sanitize_slice(lease);
 	if (ret) {
 		lease->state = AMBA_DMA_LEASE_QUARANTINED;
@@ -230,6 +308,7 @@ int amba_dma_release_lease(u32 lease_id, u64 epoch)
 
 	/* Reset identity and state */
 	lease->capability = 0;
+	memset(lease->hmac_key, 0, sizeof(lease->hmac_key));
 	lease->vsock_cid = 0;
 	lease->boot_generation = 0;
 	memset(lease->vm_uuid, 0, 16);
@@ -261,9 +340,20 @@ int amba_dma_quarantine_release(u32 lease_id, u64 epoch)
 		return -EINVAL;
 	}
 
+	mutex_lock(&endpoint_uart2.lock);
+	if (endpoint_uart2.owner_lease == (int)lease_id)
+		endpoint_uart2.owner_lease = -1;
+	mutex_unlock(&endpoint_uart2.lock);
+
+	mutex_lock(&endpoint_uart3.lock);
+	if (endpoint_uart3.owner_lease == (int)lease_id)
+		endpoint_uart3.owner_lease = -1;
+	mutex_unlock(&endpoint_uart3.lock);
+
 	amba_dma_sanitize_slice(lease);
 	lease->state = AMBA_DMA_LEASE_FREE;
 	lease->epoch++;
+	memset(lease->hmac_key, 0, sizeof(lease->hmac_key));
 
 	pr_info("%s: lease %u quarantine cleared by administrator\n",
 		DRV_NAME, lease_id);
@@ -373,7 +463,9 @@ int amba_dma_dispatch_request(u32 lease_id,
 		return -EINVAL;
 	}
 
-	if (req->offset >= lease->slice_size || req->offset > (lease->slice_size - req->length)) {
+	if (req->offset < AMBA_DMA_BOOTSTRAP_SIZE ||
+	    req->offset >= lease->slice_size ||
+	    req->offset > (lease->slice_size - req->length)) {
 		lease->stats.err_invalid_bounds++;
 		mutex_unlock(&lease->lock);
 		return -ERANGE;
@@ -387,36 +479,54 @@ int amba_dma_dispatch_request(u32 lease_id,
 	}
 
 	/* 5. Endpoint policy check */
-	if (req->endpoint_id != AMBA_DMA_ENDPOINT_UART2) {
+	struct amba_dma_endpoint_policy *ep;
+	if (req->endpoint_id == AMBA_DMA_ENDPOINT_UART2) {
+		ep = &endpoint_uart2;
+	} else if (req->endpoint_id == AMBA_DMA_ENDPOINT_UART3) {
+		ep = &endpoint_uart3;
+	} else {
 		mutex_unlock(&lease->lock);
 		return -ENODEV;
 	}
 
-	mutex_lock(&endpoint_uart2.lock);
-	if (endpoint_uart2.owner_lease != -1 && endpoint_uart2.owner_lease != (int)lease_id) {
-		mutex_unlock(&endpoint_uart2.lock);
+	/* Negative constraint 9: One lease binds one endpoint */
+	if ((ep == &endpoint_uart2 && endpoint_uart3.owner_lease == (int)lease_id) ||
+	    (ep == &endpoint_uart3 && endpoint_uart2.owner_lease == (int)lease_id)) {
+		mutex_unlock(&lease->lock);
+		return -EBUSY;
+	}
+
+	/* Verification: A UART3 request is rejected until UART3 channels exist */
+	if (!ep->tx_chan || !ep->rx_chan) {
+		mutex_unlock(&lease->lock);
+		return -ENODEV;
+	}
+
+	mutex_lock(&ep->lock);
+	if (ep->owner_lease != -1 && ep->owner_lease != (int)lease_id) {
+		mutex_unlock(&ep->lock);
 		mutex_unlock(&lease->lock);
 		return -EBUSY; /* Exclusive endpoint already owned by another lease */
 	}
-	endpoint_uart2.owner_lease = lease_id;
-	mutex_unlock(&endpoint_uart2.lock);
+	ep->owner_lease = lease_id;
+	mutex_unlock(&ep->lock);
 
 	/* 6. Channel & direction configuration */
 	memset(&cfg, 0, sizeof(cfg));
 	if (req->operation == AMBA_DMA_OP_MEM_TO_DEV) {
 		dir = DMA_MEM_TO_DEV;
-		chan = endpoint_uart2.tx_chan;
+		chan = ep->tx_chan;
 		cfg.direction = DMA_MEM_TO_DEV;
-		cfg.dst_addr = endpoint_uart2.fifo_dma;
-		cfg.dst_addr_width = endpoint_uart2.addr_width;
-		cfg.dst_maxburst = endpoint_uart2.max_burst;
+		cfg.dst_addr = ep->fifo_dma;
+		cfg.dst_addr_width = ep->addr_width;
+		cfg.dst_maxburst = ep->max_burst;
 	} else if (req->operation == AMBA_DMA_OP_DEV_TO_MEM) {
 		dir = DMA_DEV_TO_MEM;
-		chan = endpoint_uart2.rx_chan;
+		chan = ep->rx_chan;
 		cfg.direction = DMA_DEV_TO_MEM;
-		cfg.src_addr = endpoint_uart2.fifo_dma;
-		cfg.src_addr_width = endpoint_uart2.addr_width;
-		cfg.src_maxburst = endpoint_uart2.max_burst;
+		cfg.src_addr = ep->fifo_dma;
+		cfg.src_addr_width = ep->addr_width;
+		cfg.src_maxburst = ep->max_burst;
 	} else {
 		mutex_unlock(&lease->lock);
 		return -EINVAL;
@@ -440,6 +550,11 @@ int amba_dma_dispatch_request(u32 lease_id,
 		return -EIO;
 	}
 
+	pr_info("%s: lease %u %s DMA submitted: chan=%s dreq=%u addr=0x%llx len=%u cookie=%llu\n",
+		DRV_NAME, lease_id, ep->name, dma_chan_name(chan),
+		req->operation == AMBA_DMA_OP_MEM_TO_DEV ? ep->tx_dreq : ep->rx_dreq,
+		(unsigned long long)buf_dma, req->length, (unsigned long long)req->cookie);
+
 	/* 7. Setup in-flight transaction */
 	lease->in_flight = true;
 	lease->active_cookie = req->cookie;
@@ -452,8 +567,12 @@ int amba_dma_dispatch_request(u32 lease_id,
 	tx_desc->callback = amba_dma_callback;
 	tx_desc->callback_param = lease;
 
-	/* Arm 500 ms watchdog */
-	mod_timer(&lease->watchdog, jiffies + msecs_to_jiffies(AMBA_DMA_WATCHDOG_MS));
+	/* Arm dynamic line-time watchdog: line time + 2000 ms margin */
+	{
+		u32 timeout_ms = ((uint64_t)req->length * 10 * 1000) / 115200 + 2000;
+		lease->active_timeout_ms = timeout_ms;
+		mod_timer(&lease->watchdog, jiffies + msecs_to_jiffies(timeout_ms));
+	}
 
 	dmaengine_submit(tx_desc);
 	dma_async_issue_pending(chan);
@@ -590,6 +709,28 @@ static long amba_dma_lease_ioctl(struct file *file, unsigned int cmd, unsigned l
 		return 0;
 	}
 
+	if (cmd == AMBA_DMA_IOC_LEASE_GET_INFO) {
+		struct amba_dma_lease_info info;
+		struct amba_dma_lease *lease;
+
+		if (lease_id >= AMBA_VIRT_DMA32_NUM_SLICES)
+			return -EINVAL;
+		lease = &leases[lease_id];
+		mutex_lock(&lease->lock);
+		memset(&info, 0, sizeof(info));
+		info.lease_id = lease->lease_id;
+		info.state = lease->state;
+		info.capability = lease->capability;
+		info.epoch = lease->epoch;
+		info.vsock_cid = lease->vsock_cid;
+		memcpy(info.hmac_key, lease->hmac_key, sizeof(info.hmac_key));
+		mutex_unlock(&lease->lock);
+
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
+			return -EFAULT;
+		return 0;
+	}
+
 	return -ENOTTY;
 }
 
@@ -600,43 +741,102 @@ static const struct file_operations amba_dma_lease_fops = {
 	.unlocked_ioctl = amba_dma_lease_ioctl,
 };
 
-static int amba_dma_acquire_channels(struct device *parent)
+static int amba_dma_acquire_endpoint(struct device *parent, struct amba_dma_endpoint_policy *ep)
 {
 	struct device_node *of_node;
+	struct device *dma_dev = NULL;
 
-	of_node = of_find_node_by_path(endpoint_uart2.of_node_path);
+	ep->tx_chan = NULL;
+	ep->rx_chan = NULL;
+	ep->fifo_dma = 0;
+
+	of_node = of_find_node_by_path(ep->of_node_path);
 	if (!of_node) {
-		pr_warn("%s: OF node %s not found in host DT\n",
-			DRV_NAME, endpoint_uart2.of_node_path);
+		pr_warn("%s: OF node %s not found in host DT\n", DRV_NAME, ep->of_node_path);
 		return -ENODEV;
 	}
 
-	endpoint_uart2.tx_chan = of_dma_request_slave_channel(of_node, "tx");
-	endpoint_uart2.rx_chan = of_dma_request_slave_channel(of_node, "rx");
+	ep->tx_chan = of_dma_request_slave_channel(of_node, "tx");
+	ep->rx_chan = of_dma_request_slave_channel(of_node, "rx");
 	of_node_put(of_node);
 
-	if (!endpoint_uart2.tx_chan || !endpoint_uart2.rx_chan) {
+	if (!ep->tx_chan || !ep->rx_chan) {
 		pr_warn("%s: warning: could not acquire slave DMA channels for %s (TX=%p, RX=%p)\n",
-			DRV_NAME, endpoint_uart2.name,
-			endpoint_uart2.tx_chan, endpoint_uart2.rx_chan);
-	} else {
-		pr_info("%s: acquired slave DMA channels for %s (TX=%s, RX=%s)\n",
-			DRV_NAME, endpoint_uart2.name,
-			dma_chan_name(endpoint_uart2.tx_chan),
-			dma_chan_name(endpoint_uart2.rx_chan));
+			DRV_NAME, ep->name, ep->tx_chan, ep->rx_chan);
+		return -ENODEV;
 	}
 
-	endpoint_uart2.fifo_dma = (dma_addr_t)endpoint_uart2.fifo_phys;
+	pr_info("%s: acquired slave DMA channels for %s (TX=%s, RX=%s)\n",
+		DRV_NAME, ep->name,
+		dma_chan_name(ep->tx_chan),
+		dma_chan_name(ep->rx_chan));
+
+	if (ep->tx_chan && ep->tx_chan->device)
+		dma_dev = ep->tx_chan->device->dev;
+	else if (parent)
+		dma_dev = parent;
+
+	if (dma_dev) {
+		ep->fifo_dma = dma_map_resource(dma_dev, ep->fifo_phys, 0x1000,
+						 DMA_BIDIRECTIONAL, 0);
+		if (dma_mapping_error(dma_dev, ep->fifo_dma)) {
+			pr_err("%s: failed to map FIFO resource for %s\n", DRV_NAME, ep->name);
+			ep->fifo_dma = 0;
+			return -EIO;
+		}
+	}
+
 	return 0;
+}
+
+static void amba_dma_release_endpoint(struct device *parent, struct amba_dma_endpoint_policy *ep)
+{
+	struct device *dma_dev = NULL;
+
+	mutex_lock(&ep->lock);
+	if (ep->tx_chan && ep->tx_chan->device)
+		dma_dev = ep->tx_chan->device->dev;
+	else if (parent)
+		dma_dev = parent;
+
+	if (dma_dev && ep->fifo_dma) {
+		dma_unmap_resource(dma_dev, ep->fifo_dma, 0x1000, DMA_BIDIRECTIONAL, 0);
+		ep->fifo_dma = 0;
+	}
+
+	if (ep->tx_chan) {
+		dmaengine_terminate_sync(ep->tx_chan);
+		dma_release_channel(ep->tx_chan);
+		ep->tx_chan = NULL;
+	}
+	if (ep->rx_chan) {
+		dmaengine_terminate_sync(ep->rx_chan);
+		dma_release_channel(ep->rx_chan);
+		ep->rx_chan = NULL;
+	}
+	ep->owner_lease = -1;
+	mutex_unlock(&ep->lock);
 }
 
 int amba_virt_dma_init(struct device *parent)
 {
 	int ret, i;
 	dev_t devt;
+	struct device *dma_dev = NULL;
 
 	mutex_init(&global_lock);
 	mutex_init(&endpoint_uart2.lock);
+	mutex_init(&endpoint_uart3.lock);
+
+	amba_dma_acquire_endpoint(parent, &endpoint_uart2);
+	amba_dma_acquire_endpoint(parent, &endpoint_uart3);
+
+	if (endpoint_uart2.tx_chan && endpoint_uart2.tx_chan->device)
+		dma_dev = endpoint_uart2.tx_chan->device->dev;
+	else if (endpoint_uart3.tx_chan && endpoint_uart3.tx_chan->device)
+		dma_dev = endpoint_uart3.tx_chan->device->dev;
+	else
+		dma_dev = parent;
 
 	ret = alloc_chrdev_region(&dma_devt_base, 0, AMBA_VIRT_DMA32_NUM_SLICES + 1, "amba_dma");
 	if (ret) {
@@ -672,7 +872,16 @@ int amba_virt_dma_init(struct device *parent)
 		lease->epoch = 1;
 		lease->slice_phys = AMBA_VIRT_DMA32_POOL_BASE + (i * AMBA_VIRT_DMA32_SLICE_SIZE);
 		lease->slice_size = AMBA_VIRT_DMA32_SLICE_SIZE;
-		lease->slice_dma  = (dma_addr_t)lease->slice_phys;
+		if (dma_dev) {
+			lease->slice_dma = dma_map_resource(dma_dev, lease->slice_phys,
+							    lease->slice_size, DMA_BIDIRECTIONAL, 0);
+			if (dma_mapping_error(dma_dev, lease->slice_dma)) {
+				pr_err("%s: failed to map slice %d resource\n", DRV_NAME, i);
+				lease->slice_dma = 0;
+			}
+		} else {
+			lease->slice_dma = 0;
+		}
 
 		mutex_init(&lease->lock);
 		init_completion(&lease->xfer_done);
@@ -696,12 +905,14 @@ int amba_virt_dma_init(struct device *parent)
 			DRV_NAME, i, (u64)lease->slice_phys);
 	}
 
-	amba_dma_acquire_channels(parent);
 	pr_info("%s: kernel DMA reference monitor initialized\n", DRV_NAME);
 	return 0;
 
 err_cdev_lease:
 	while (--i >= 0) {
+		if (dma_dev && leases[i].slice_dma)
+			dma_unmap_resource(dma_dev, leases[i].slice_dma, leases[i].slice_size,
+					   DMA_BIDIRECTIONAL, 0);
 		device_destroy(dma_class, MKDEV(MAJOR(dma_devt_base), i + 1));
 		cdev_del(&leases[i].cdev);
 	}
@@ -717,23 +928,22 @@ err_cdev_ctl:
 void amba_virt_dma_exit(void)
 {
 	int i;
+	struct device *dma_dev = NULL;
 
-	mutex_lock(&endpoint_uart2.lock);
-	if (endpoint_uart2.tx_chan) {
-		dmaengine_terminate_sync(endpoint_uart2.tx_chan);
-		dma_release_channel(endpoint_uart2.tx_chan);
-		endpoint_uart2.tx_chan = NULL;
-	}
-	if (endpoint_uart2.rx_chan) {
-		dmaengine_terminate_sync(endpoint_uart2.rx_chan);
-		dma_release_channel(endpoint_uart2.rx_chan);
-		endpoint_uart2.rx_chan = NULL;
-	}
-	mutex_unlock(&endpoint_uart2.lock);
+	if (endpoint_uart2.tx_chan && endpoint_uart2.tx_chan->device)
+		dma_dev = endpoint_uart2.tx_chan->device->dev;
+	else if (endpoint_uart3.tx_chan && endpoint_uart3.tx_chan->device)
+		dma_dev = endpoint_uart3.tx_chan->device->dev;
+
+	amba_dma_release_endpoint(NULL, &endpoint_uart2);
+	amba_dma_release_endpoint(NULL, &endpoint_uart3);
 
 	for (i = 0; i < AMBA_VIRT_DMA32_NUM_SLICES; i++) {
 		struct amba_dma_lease *lease = &leases[i];
 		del_timer_sync(&lease->watchdog);
+		if (dma_dev && lease->slice_dma)
+			dma_unmap_resource(dma_dev, lease->slice_dma, lease->slice_size,
+					   DMA_BIDIRECTIONAL, 0);
 		device_destroy(dma_class, MKDEV(MAJOR(dma_devt_base), i + 1));
 		cdev_del(&lease->cdev);
 	}

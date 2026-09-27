@@ -107,9 +107,10 @@ struct amba_virt_dmabuf_slice {
 #define AMBA_VIRT_MSG_DMA_SUBMIT_RESP		53u
 #define AMBA_VIRT_MSG_DMA_TERMINATE_REQ		54u
 #define AMBA_VIRT_MSG_DMA_TERMINATE_RESP		55u
-#define AMBA_VIRT_MSG_DMA_COMPLETE_EVENT		56u
 #define AMBA_VIRT_MSG_DMA_REQUEST_REQ		57u
 #define AMBA_VIRT_MSG_DMA_REQUEST_RESP		58u
+#define AMBA_VIRT_MSG_AUTH_CHALLENGE_REQ	60u
+#define AMBA_VIRT_MSG_AUTH_CHALLENGE_RESP	61u
 
 enum vcav_opcode {
 	VCAV_OP_GET_VERSION	= 1,
@@ -530,6 +531,20 @@ struct amba_virt_dma_complete {
 /* Endpoint IDs (controller-neutral reference monitor policies) */
 #define AMBA_DMA_ENDPOINT_NONE          0
 #define AMBA_DMA_ENDPOINT_UART2         1
+#define AMBA_DMA_ENDPOINT_UART3         2u
+
+#define AMBA_DMA_BOOTSTRAP_MAGIC        0x414d4253u /* 'AMBS' */
+#define AMBA_DMA_BOOTSTRAP_VERSION      1u
+#define AMBA_DMA_BOOTSTRAP_SIZE         4096u
+
+struct amba_dma_bootstrap {
+	__u32 magic;       /* 0x414d4253, 'AMBS' */
+	__u32 version;     /* 1 */
+	__u32 lease_id;
+	__u32 reserved0;
+	__u64 epoch;
+	__u8  hmac_key[32];
+};
 
 /* Operations */
 #define AMBA_DMA_OP_MEM_TO_DEV          1
@@ -597,11 +612,38 @@ struct amba_dma_lease_stats {
 	__u32 sanitize_duration_us;
 };
 
+/* Authentication Challenge Request (TCP broker protocol) */
+struct amba_virt_auth_challenge_req {
+	__u32 lease_id;
+	__u32 reserved0;
+	__u64 epoch;
+	__u8  client_nonce[32];
+};
+
+/* Authentication Challenge Response (TCP broker protocol) */
+struct amba_virt_auth_challenge_resp {
+	__s32 status;
+	__u32 reserved0;
+	__u8  server_nonce[32];
+	__u8  server_tag[32];
+};
+
+/* Lease info query */
+struct amba_dma_lease_info {
+	__u32 lease_id;
+	__u32 state;
+	__u64 capability;
+	__u64 epoch;
+	__u32 vsock_cid;
+	__u8  hmac_key[32];
+};
+
 /* Ioctl codes for lease device (/dev/amba_dma_lease<N>) and master (/dev/amba_dma_ctl) */
 #define AMBA_DMA_IOC_REQUEST       _IOWR(AMBA_VIRT_IOC_MAGIC, 0x30, struct amba_virt_dma_request)
 #define AMBA_DMA_IOC_LEASE_ALLOC   _IOWR(AMBA_VIRT_IOC_MAGIC, 0x31, struct amba_dma_lease_alloc)
 #define AMBA_DMA_IOC_LEASE_CTRL    _IOWR(AMBA_VIRT_IOC_MAGIC, 0x32, struct amba_dma_lease_control)
 #define AMBA_DMA_IOC_LEASE_STATS   _IOWR(AMBA_VIRT_IOC_MAGIC, 0x33, struct amba_dma_lease_stats)
+#define AMBA_DMA_IOC_LEASE_GET_INFO _IOR(AMBA_VIRT_IOC_MAGIC, 0x34, struct amba_dma_lease_info)
 
 #endif /* _UAPI_AMBA_VIRT_H */
 

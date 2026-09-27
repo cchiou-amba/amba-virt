@@ -45,6 +45,7 @@ struct amba_dma_lease {
 	u32 state;
 	u64 epoch;
 	u64 capability;
+	u8  hmac_key[32];
 	u8  vm_uuid[16];
 	u32 boot_generation;
 	u32 vsock_cid;
@@ -65,6 +66,7 @@ struct amba_dma_lease {
 	u32 active_operation;
 	struct completion xfer_done;
 	struct timer_list watchdog;
+	u32 active_timeout_ms;
 	int xfer_status;
 	u32 xfer_transferred;
 

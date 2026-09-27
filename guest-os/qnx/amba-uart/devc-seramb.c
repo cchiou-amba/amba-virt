@@ -26,12 +26,14 @@
 #include <sys/procmgr.h>
 #include <hw/inout.h>
 
+#include "amba_virt_qnx.h"
+
 #define DRIVER_NAME		"devc-seramb"
 #define DEFAULT_DEV_NAME	"/dev/ser3"
 #define DEFAULT_CLK_HZ		24000000	/* 24 MHz */
 #define DEFAULT_BAUD		115200
-#define DEFAULT_UART_PHYS	0x804020c000ULL	/* QEMU virt IVSHMEM BAR2 GPA */
-#define DEFAULT_UART_IRQ	0		/* 0: pure polling mode (QEMU FDT omits virtual IRQ routing) */
+#define DEFAULT_UART_PHYS	0x0c000000ULL	/* QEMU virt UART3 MMIO GPA */
+#define DEFAULT_UART_IRQ	144		/* QEMU virt GIC SPI 112 -> IRQ 144 */
 #define UART_MAP_SIZE		0x1000		/* 4 KiB */
 
 /* ========================================================================== */
@@ -53,12 +55,22 @@
 #define UART_US_OFFSET		0x7c	/* UART Status Register              */
 #define UART_SRR_OFFSET		0x88	/* Software Reset Register           */
 
+/* Interrupt Enable Register Bits */
+#define UART_IE_ERBFI		0x01
+#define UART_IE_ETBEI		0x02
+#define UART_IE_ELSI		0x04
+#define UART_IE_EDSSI		0x08
+#define UART_IE_ETOI		0x20
+
 /* FIFO Control Register Bits */
 #define UART_FC_FIFOE		0x01
 #define UART_FC_RCVRR		0x02
 #define UART_FC_XMITR		0x04
 #define UART_FC_DMA_SELECT	0x08
 #define UART_FC_TX_EMPTY	0x00
+#define UART_FC_RX_ONECHAR	0x00
+#define UART_FC_RX_QUARTER	0x40
+#define UART_FC_RX_HALF		0x80
 #define UART_FC_RX_2_TO_FULL	0xc0
 
 /* Line Control Register Bits */
@@ -98,6 +110,14 @@ typedef struct dev_entry {
 	bool			foreground;
 	bool			dma_enabled;
 	bool			use_interrupts;
+
+	/* Shared DMA window & parameters */
+	uint64_t		shm_phys;
+	void			*shm_virt;
+	size_t			shm_size;
+	uint32_t		tx_dma_offset;
+	uint32_t		rx_dma_offset;
+	uint64_t		dma_cookie;
 } DEV_ENTRY;
 
 static DEV_ENTRY g_amb_dev;
@@ -113,6 +133,40 @@ static inline void uart_write(DEV_ENTRY *amb, uint32_t val, unsigned int offset)
 	out32(amb->base + offset, val);
 }
 
+static int devc_dma_request(DEV_ENTRY *amb, uint32_t operation,
+			    uint64_t offset, uint32_t length,
+			    uint32_t *transferred)
+{
+	uint8_t req_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_request)];
+	uint8_t resp_buf[sizeof(struct amba_virt_msg) + sizeof(struct amba_virt_dma_response)];
+	struct amba_virt_msg *m_req = (struct amba_virt_msg *)req_buf;
+	struct amba_virt_dma_request *d_req = (struct amba_virt_dma_request *)(req_buf + sizeof(*m_req));
+	struct amba_virt_msg *m_resp = (struct amba_virt_msg *)resp_buf;
+	struct amba_virt_dma_response *d_resp = (struct amba_virt_dma_response *)(resp_buf + sizeof(*m_resp));
+	uint32_t resp_len = sizeof(resp_buf);
+	int ret;
+
+	memset(req_buf, 0, sizeof(req_buf));
+	m_req->type = AMBA_VIRT_MSG_DMA_REQUEST_REQ;
+	d_req->cookie = ++amb->dma_cookie;
+	d_req->endpoint_id = AMBA_DMA_ENDPOINT_UART3;
+	d_req->operation = operation;
+	d_req->offset = offset;
+	d_req->length = length;
+	d_req->flags = 0;
+
+	ret = amba_virt_rpc(req_buf, sizeof(req_buf), resp_buf, &resp_len, 10000);
+	if (ret < 0)
+		return ret;
+
+	if (resp_len < sizeof(*m_resp) + sizeof(*d_resp))
+		return -EIO;
+
+	if (transferred)
+		*transferred = d_resp->transferred;
+	return d_resp->status;
+}
+
 static void uart_hw_init(DEV_ENTRY *amb)
 {
 	unsigned int quot;
@@ -123,7 +177,7 @@ static void uart_hw_init(DEV_ENTRY *amb)
 	uart_write(amb, 0x00, UART_SRR_OFFSET);
 
 	/* 2. Configure FIFOs */
-	uint32_t fcr = UART_FC_FIFOE | UART_FC_RX_2_TO_FULL |
+	uint32_t fcr = UART_FC_FIFOE | UART_FC_RX_ONECHAR |
 		       UART_FC_TX_EMPTY | UART_FC_XMITR | UART_FC_RCVRR;
 	if (amb->dma_enabled) {
 		fcr |= UART_FC_DMA_SELECT;
@@ -133,9 +187,9 @@ static void uart_hw_init(DEV_ENTRY *amb)
 		uart_write(amb, 0x02, UART_DMAE_OFFSET);
 	}
 
-	/* 3. Configure Interrupts: enable RX available if interrupt mode enabled */
+	/* 3. Configure Interrupts: enable RX available, line status, and character timeout IRQs */
 	if (amb->use_interrupts) {
-		uart_write(amb, 0x01, UART_IE_OFFSET); /* ERBFI: Enable Received Data Available */
+		uart_write(amb, UART_IE_ERBFI | UART_IE_ELSI | UART_IE_ETOI, UART_IE_OFFSET);
 	} else {
 		uart_write(amb, 0x00, UART_IE_OFFSET);
 	}
@@ -176,6 +230,38 @@ int tto(TTYDEV *dev, int action, int arg)
 
 		pthread_mutex_lock(&g_tx_mutex);
 		dev_lock(dev);
+
+		/* DMA path for large buffers (> 16 chars) when DMA is enabled and mapped */
+		if (amb->dma_enabled && dev->obuf.cnt > 16 && amb->shm_virt != NULL) {
+			unsigned int count = dev->obuf.cnt;
+			if (count > 4096)
+				count = 4096;
+
+			uint8_t *tx_buf = (uint8_t *)amb->shm_virt + amb->tx_dma_offset;
+			for (unsigned int i = 0; i < count; i++) {
+				tx_buf[i] = tto_getchar(dev);
+			}
+
+			/* Configure UART hardware for DMA TX */
+			uint32_t fcr = UART_FC_FIFOE | UART_FC_RX_2_TO_FULL |
+				       UART_FC_TX_EMPTY | UART_FC_DMA_SELECT;
+			uart_write(amb, fcr, UART_FC_OFFSET);
+			uart_write(amb, 0x02, UART_DMAE_OFFSET);
+			dev_unlock(dev);
+
+			uint32_t transferred = 0;
+			int ret = devc_dma_request(amb, AMBA_DMA_OP_MEM_TO_DEV,
+						   amb->tx_dma_offset, count, &transferred);
+
+			dev_lock(dev);
+			if (ret != 0 || transferred != count) {
+				if (amb->verbose) {
+					fprintf(stderr, "devc-seramb: DMA TX transfer failed (ret=%d, xfer=%u/%u)\n",
+						ret, transferred, count);
+				}
+			}
+		}
+
 		while ((uart_read(amb, UART_US_OFFSET) & UART_US_TFNF) && (dev->obuf.cnt > 0)) {
 			unsigned char ch = tto_getchar(dev);
 			uart_write(amb, (uint32_t)ch, UART_TH_OFFSET);
@@ -285,6 +371,12 @@ static void print_usage(const char *prog)
 	printf("  -?, --help            Show this help message\n");
 }
 
+static void sig_handler(int sig)
+{
+	(void)sig;
+	g_amb_dev.running = false;
+}
+
 int main(int argc, char **argv)
 {
 	int opt;
@@ -309,7 +401,8 @@ int main(int argc, char **argv)
 	g_amb_dev.phys = DEFAULT_UART_PHYS;
 	g_amb_dev.irq = DEFAULT_UART_IRQ;
 	g_amb_dev.intr_id = -1;
-	g_amb_dev.dma_enabled = false; /* Default: PIO polling mode */
+	g_amb_dev.dma_enabled = true; /* Default: DMA accelerated mode */
+	g_amb_dev.dma_cookie = ((uint64_t)time(NULL) & 0xffff) * 10000ULL;
 
 	while ((opt = getopt_long(argc, argv, "p:b:c:a:i:Dfv?", long_opts, NULL)) != -1) {
 		switch (opt) {
@@ -382,6 +475,25 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* 3.5. Initialize Virtual DMA acceleration */
+	if (g_amb_dev.dma_enabled) {
+		if (amba_virt_get_window(&g_amb_dev.shm_phys, &g_amb_dev.shm_virt, &g_amb_dev.shm_size) == 0 &&
+		    g_amb_dev.shm_virt != NULL) {
+			g_amb_dev.tx_dma_offset = 0x00100000;
+			g_amb_dev.rx_dma_offset = 0x00101000;
+			if (g_amb_dev.verbose) {
+				printf("devc-seramb: DMA acceleration initialized (phys=0x%llx, size=%zu MB, tx_off=0x%x, rx_off=0x%x)\n",
+				       (unsigned long long)g_amb_dev.shm_phys,
+				       g_amb_dev.shm_size / (1024 * 1024),
+				       g_amb_dev.tx_dma_offset, g_amb_dev.rx_dma_offset);
+			}
+		} else {
+			if (g_amb_dev.verbose)
+				printf("devc-seramb: /dev/amba_virt unavailable; running in PIO mode\n");
+			g_amb_dev.dma_enabled = false;
+		}
+	}
+
 	/* 4. Initialize QNX io-char TTY controller */
 	ttyctrl.dpp = dispatch_create();
 	if (!ttyctrl.dpp) {
@@ -396,9 +508,9 @@ int main(int argc, char **argv)
 	ttc(TTC_INIT_PROC, &ttyctrl, 0);
 
 	{
-		unsigned int isize = 4096;
-		unsigned int osize = 16384;
-		unsigned int csize = 1024;
+		unsigned int isize = 65536;
+		unsigned int osize = 65536;
+		unsigned int csize = 4096;
 
 		g_amb_dev.tty.ibuf.buff = malloc(isize);
 		g_amb_dev.tty.ibuf.head = g_amb_dev.tty.ibuf.buff;
@@ -415,12 +527,12 @@ int main(int argc, char **argv)
 		g_amb_dev.tty.cbuf.tail = g_amb_dev.tty.cbuf.buff;
 		g_amb_dev.tty.cbuf.size = csize;
 
-		g_amb_dev.tty.highwater = isize - 32;
+		g_amb_dev.tty.highwater = isize - 512;
 		g_amb_dev.tty.baud = g_amb_dev.baud;
 		g_amb_dev.tty.c_cflag = CS8 | CREAD | CLOCAL;
-		g_amb_dev.tty.c_iflag = ICRNL;
-		g_amb_dev.tty.c_lflag = ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN;
-		g_amb_dev.tty.c_oflag = OPOST | ONLCR;
+		g_amb_dev.tty.c_iflag = 0;
+		g_amb_dev.tty.c_lflag = 0;
+		g_amb_dev.tty.c_oflag = 0;
 		g_amb_dev.tty.verbose = g_amb_dev.verbose ? 1 : 0;
 		int unit = 3;
 		char *p = strstr(g_amb_dev.devname, "ser");
@@ -455,10 +567,23 @@ int main(int argc, char **argv)
 	       g_amb_dev.use_interrupts ? "interrupt+poll" : "polling", g_amb_dev.baud);
 	fflush(stdout);
 
+	if (!g_amb_dev.foreground) {
+		if (procmgr_daemon(EXIT_SUCCESS, PROCMGR_DAEMON_NOCHDIR | PROCMGR_DAEMON_NOCLOSE) < 0) {
+			fprintf(stderr, "devc-seramb: failed to daemonize: %s\n", strerror(errno));
+		}
+	}
+
+	signal(SIGHUP, SIG_IGN);
+	signal(SIGTERM, sig_handler);
+	signal(SIGINT, sig_handler);
+
 	/* 7. Start io-char event loop */
 	ttc(TTC_INIT_START, &ttyctrl, 0);
 
-	g_amb_dev.running = false;
+	while (g_amb_dev.running) {
+		sleep(10);
+	}
+
 	if (g_amb_dev.use_interrupts && g_amb_dev.intr_id != -1) {
 		InterruptDetach(g_amb_dev.intr_id);
 		pthread_join(g_amb_dev.intr_tid, NULL);

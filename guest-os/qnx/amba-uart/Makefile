@@ -7,8 +7,8 @@
 #
 
 CC = qcc -Vgcc_ntoaarch64le
-CFLAGS = -O2 -Wall -Wextra -D_QNX_SOURCE -I.
-LDFLAGS = -lio-char -lsecpol -lsmmu -lsocket
+CFLAGS = -O2 -Wall -Wextra -D_QNX_SOURCE -I. -I../amba-virt/include -I../../../drivers/amba_virt/include/uapi
+LDFLAGS = -lio-char -lsecpol -lsmmu -lsocket -L../amba-virt -lamba_virt
 
 TARGETS = devc-seramb qnx-getty
 

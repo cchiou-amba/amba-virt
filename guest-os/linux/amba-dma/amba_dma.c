@@ -30,9 +30,9 @@
 #define AMBA_DMA_MAX_CHANNELS   4
 #define AMBA_DMA_RPC_TIMEOUT_MS 1000
 
-static unsigned int base_channel = 13;
+static unsigned int base_channel = 17;
 module_param(base_channel, uint, 0644);
-MODULE_PARM_DESC(base_channel, "Base Generic-DMA1 hardware channel (default 13 for UART2 TX)");
+MODULE_PARM_DESC(base_channel, "Base Generic-DMA1 hardware channel");
 
 struct amba_dma_chan {
     struct dma_chan          chan;

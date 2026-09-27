@@ -9,7 +9,7 @@ CFLAGS ?= -O2 -Wall -Wextra -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/ua
 LDFLAGS ?= -static
 
 TARGETS := amba-virt-server amba-virt-ctl amba-virt-backend
-SERVER_SRCS := amba-virt-server.c cavalry_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_query.c virt_backend_client.c virt_dma_broker.c
+SERVER_SRCS := amba-virt-server.c cavalry_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_query.c virt_backend_client.c virt_dma_broker.c hmac_sha256.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 
 CTL_SRCS := amba-virt-ctl.c
@@ -18,7 +18,7 @@ CTL_OBJS := $(CTL_SRCS:.c=.o)
 BACKEND_SRCS := amba-virt-backend.c
 BACKEND_OBJS := $(BACKEND_SRCS:.c=.o)
 
-TESTS := test_virt_mem_pool test_admin_ipc test_virt_query test_virt_driver_matrix test_backend_ipc test_drain_protocol test_boundary_stress test_state_desync test_fuzz_corruption test_security_exploits test_hardware_safety test_virt_dma_acl test_virt_uart test_virt_dma_broker
+TESTS := test_virt_mem_pool test_admin_ipc test_virt_query test_virt_driver_matrix test_backend_ipc test_drain_protocol test_boundary_stress test_state_desync test_fuzz_corruption test_security_exploits test_hardware_safety test_virt_dma_acl test_virt_uart test_virt_dma_broker test_hmac_sha256
 
 .PHONY: all clean test
 
@@ -48,6 +48,8 @@ test: $(TESTS)
 	./test_hardware_safety
 	./test_virt_dma_acl
 	./test_virt_uart
+	./test_virt_dma_broker
+	./test_hmac_sha256
 
 TEST_CFLAGS := -O2 -Wall -Wextra -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I../../../guest-os/linux/amba-cavalry/include -I../../cavalry/include/cavalry_v3
 
@@ -90,8 +92,11 @@ test_virt_dma_acl: test_virt_dma_acl.c
 test_virt_uart: test_virt_uart.c
 	gcc $(TEST_CFLAGS) -I../../../ -o $@ $^
 
-test_virt_dma_broker: test_virt_dma_broker.c virt_dma_broker.c virt_acl.c
-	$(CC) $(CFLAGS) -static -o $@ $^ -lpthread
+test_virt_dma_broker: test_virt_dma_broker.c virt_dma_broker.c virt_acl.c hmac_sha256.c
+	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
+
+test_hmac_sha256: test_hmac_sha256.c hmac_sha256.c
+	gcc $(TEST_CFLAGS) -o $@ $^
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<

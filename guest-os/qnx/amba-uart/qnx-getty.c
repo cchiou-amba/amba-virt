@@ -18,11 +18,27 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <signal.h>
+
 #define DEFAULT_DEV "/dev/ser3"
+
+static volatile pid_t g_child_pid = 0;
+
+static void sig_term_handler(int sig)
+{
+	(void)sig;
+	if (g_child_pid > 0) {
+		kill(g_child_pid, SIGKILL);
+	}
+	_exit(0);
+}
 
 int main(int argc, char **argv)
 {
 	const char *dev = (argc > 1) ? argv[1] : DEFAULT_DEV;
+
+	signal(SIGTERM, sig_term_handler);
+	signal(SIGINT, sig_term_handler);
 
 	while (1) {
 		/* Wait for serial device to appear */
@@ -32,6 +48,7 @@ int main(int argc, char **argv)
 
 		pid_t pid = fork();
 		if (pid == 0) {
+			g_child_pid = 0;
 			/* Child: become session leader and acquire controlling TTY */
 			setsid();
 
@@ -78,8 +95,10 @@ int main(int argc, char **argv)
 			_exit(1);
 		} else if (pid > 0) {
 			/* Parent supervisor: wait for session to exit */
+			g_child_pid = pid;
 			int status = 0;
 			waitpid(pid, &status, 0);
+			g_child_pid = 0;
 			sleep(1);
 		} else {
 			sleep(1);

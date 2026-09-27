@@ -151,8 +151,9 @@ static void test_lease_mmap_and_sanitization(void)
 	ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, lease_fd, 0);
 	assert(ptr != MAP_FAILED);
 
-	/* Verify slice was zeroed */
-	assert(ptr[0] == 0);
+	/* Verify bootstrap magic at offset 0, and zeroed memory at 4096+ */
+	assert(*(uint32_t *)ptr == AMBA_DMA_BOOTSTRAP_MAGIC);
+	assert(ptr[4096] == 0);
 	assert(ptr[8 * 1024 * 1024] == 0);
 	assert(ptr[size - 1] == 0);
 
@@ -223,9 +224,17 @@ static void test_security_bounds_and_capability_checks(void)
 	assert(ret < 0 && errno == ERANGE);
 	printf("  Out-of-bounds transfer rejected with -ERANGE: PASS\n");
 
-	/* 4. Zero length */
+	/* 4. Offset below 4096 rejected with -ERANGE */
 	req.cookie = 4;
-	req.offset = 0;
+	req.offset = 4095;
+	req.length = 64;
+	ret = ioctl(lease_fd, AMBA_DMA_IOC_REQUEST, &req);
+	assert(ret < 0 && errno == ERANGE);
+	printf("  Bootstrap offset < 4096 rejected with -ERANGE: PASS\n");
+
+	/* 4b. Zero length */
+	req.cookie = 4;
+	req.offset = 4096;
 	req.length = 0;
 	ret = ioctl(lease_fd, AMBA_DMA_IOC_REQUEST, &req);
 	assert(ret < 0 && errno == EINVAL);
@@ -234,6 +243,7 @@ static void test_security_bounds_and_capability_checks(void)
 	/* 5. Non-existent endpoint */
 	req.cookie = 5;
 	req.endpoint_id = 999;
+	req.offset = 4096;
 	req.length = 64;
 	ret = ioctl(lease_fd, AMBA_DMA_IOC_REQUEST, &req);
 	assert(ret < 0 && errno == ENODEV);
@@ -310,7 +320,7 @@ static void test_exclusive_endpoint_concurrency(void)
 	arg0.req.cookie = 1001;
 	arg0.req.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
 	arg0.req.operation = AMBA_DMA_OP_MEM_TO_DEV;
-	arg0.req.offset = 0;
+	arg0.req.offset = 4096;
 	arg0.req.length = 64;
 
 	pthread_create(&th0, NULL, dma_runner, &arg0);
@@ -325,7 +335,7 @@ static void test_exclusive_endpoint_concurrency(void)
 	req1.cookie = 2001;
 	req1.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
 	req1.operation = AMBA_DMA_OP_MEM_TO_DEV;
-	req1.offset = 0;
+	req1.offset = 4096;
 	req1.length = 64;
 
 	ret = ioctl(fd1, AMBA_DMA_IOC_REQUEST, &req1);
