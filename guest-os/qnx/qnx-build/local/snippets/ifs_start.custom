@@ -1,2 +1,4 @@
 # local/snippets/ifs_start.custom
 # Commands executed from ifs start-up script prior to invoking main start-up script or slm
+
+random -l devr-virtio.so:mem=0x0a000000

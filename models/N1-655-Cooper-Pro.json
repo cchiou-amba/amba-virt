@@ -235,6 +235,21 @@
       "cost": 0,
       "vfs": null,
       "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "rng-mmio",
+      "phyaddrs": {},
+      "logicallabel": "rng-mmio",
+      "assigngrp": "rng-mmio",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "rng": "mmio"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
     }
   ]
 }

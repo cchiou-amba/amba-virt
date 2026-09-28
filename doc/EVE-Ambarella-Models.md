@@ -123,6 +123,13 @@ The exact UART `cbattr` schema is not implemented yet. Do not publish guessed
 model entries. When implementation lands, replace the current `COM2`/`COM3`
 entries and update the shared table above in the same change.
 
+### Hardware RNG & VirtIO RNG Virtualization
+
+- **`hwrng` Dom0 Retention**: `/dev/hwrng` is created by `ambarella-rng.c` on Dom0. It is published in the model but must remain **unassigned** to any app instance. Dom0 retains exclusive ownership of physical TRNG registers (`0xe002f000`), constantly seeding the Dom0 kernel CSPRNG (`/dev/urandom`).
+- **Stock VirtIO RNG for HVMs**: All ARM64 `virt` HVM guests (Ubuntu, Alpine, Windows) automatically receive a stock `virtio-rng-pci` device backed by Dom0's `/dev/urandom` (with rate limit `max-bytes = "4096"`, `period = "1000"`). Like `vhost-vsock-pci`, this is a standard platform device and requires no custom model adapter assignments.
+- **QNX `rng-mmio` Adapter**: QNX guest VMs require MMIO transport (`virtio-rng-device` on `virtio-mmio-bus.0`) rather than PCI. To select MMIO, QNX instances are assigned the `rng-mmio` adapter (`IO_TYPE_OTHER`, empty `phyaddrs`, `cbattr: {"rng": "mmio"}`), which pairs with native QNX `random -l devr-virtio.so:mem=<address>`.
+- **Exclusions**: NOHYPER / OCI containers and x86 domains do not receive VirtIO RNG devices.
+
 `/dev/ucode` was not added (not confirmed on the host). Assigning a missing
 `Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails)
 — which is exactly what happens with `iav` today.
