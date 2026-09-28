@@ -172,8 +172,9 @@ Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/` and cloud ima
 - [doc/AmbaVirtServer.md](doc/AmbaVirtServer.md) — Host daemon (`amba-virt-server`), transport architecture, IPC benchmarks, and memory layouts.
 - [doc/EVE-Native-ivshmem-Support.md](doc/EVE-Native-ivshmem-Support.md) — Native `ivshmem-plain` device support in EVE Pillar KVM.
 
-### Hardware Accelerator Virtualization
+### Hardware Accelerator & Peripheral Virtualization
 - [doc/CavalryVirtualization.md](doc/CavalryVirtualization.md) — Cavalry VisORC NPU/VP virtualization, host DMA mapping, and proxy architecture.
+- [doc/RNGVirtualization.md](doc/RNGVirtualization.md) — Host-mediated hardware TRNG virtualization, Dom0 silicon retention, and VirtIO RNG architecture.
 
 ### Driver & Firmware Operations
 - [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Persistent storage layout (`/persist`), dynamic firmware loading, and boot hooks.
