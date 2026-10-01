@@ -60,21 +60,24 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 ### 3.1 Mandatory Reserved Memory Carveouts
 Both `ambcma.ko` and `cavalry.ko` enforce strict hardware memory carveout checks during module initialization. If the active device tree lacks these nodes, `ambcma.ko` immediately aborts with `-ENODEV` (`#iav_error# ambarella_get_cma_pool_info: /reserved-memory/cavalry@0 not found`), preventing `/dev/iav` and `/dev/cavalry` from being created.
 
-The verified EVE platform device tree (`eve_iav_cooper.dtb`) declares the following reserved memory nodes under `/reserved-memory`:
+U-Boot detects the DRAM size from the controller and LPDDR5 MR8, then writes `/memory`, `/chosen/sys-dram-size`, and `cavalry@0` before GRUB starts. On the N1-655 devkit and pro boards that size is 32 GiB. The checked-in DTB carries the same 32 GiB default. GRUB must forward U-Boot's tree. A `set_global devicetree` assignment replaces it.
+
+The ipcam-mini reserved-memory contract is:
 
 | Memory / Carveout Node | Physical Address Range | Size | Allocation Policy | Functional Purpose |
 | :--- | :--- | :--- | :--- | :--- |
-| `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | System physical RAM address space (`reg = <0x0 0x0 0x8 0x0>`) |
-| `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Explicit DRAM size node for `ambcma.ko` DRAM size validation |
+| `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | Detected DRAM (`reg = <0x0 0x0 0x8 0x0>`) |
+| `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Size `ambcma.ko` validates |
 | `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
-| `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer (`cavalry_ucode`) |
-| `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA descriptors (`cavalry_shared`) |
-| `/reserved-memory/disp@0` | `0x007e000000`–`0x007fffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer (`disp_buffer`) |
-| `/reserved-memory/iav@1` | `0x0080000000`–`0x0097ffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
-| `/reserved-memory/iav@0` | `0x0098000000`–`0x00ffffffff` | 1664 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers, contiguous with `iav@1`) |
-| `/reserved-memory/linux,cma` | Dynamically placed | 512 MiB | `reusable;` | Linux kernel default CMA allocator pool |
-| `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | NPU / Cavalry user DRAM pool (`cavalry_reserved`, 64-bit space) |
-| `amba_virt_shm` | `0x0100000000`–`0x017fffffff` | 2 GiB | `shm_phys` | Guest VM zero-copy shared memory window (HVM tenants) |
+| `/reserved-memory/cavalry@2` | `0x1fc00000`–`0x1fffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer |
+| `/reserved-memory/cavalry@1` | none | 0 | `no-map;` | Node and phandle kept; this profile has no shared-pool `reg` |
+| `/reserved-memory/disp@0` | `0x20000000`–`0x27ffffff` | 128 MiB | `no-map;` | Display buffer |
+| `/reserved-memory/iav@1` | `0x28000000`–`0x3fffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` |
+| `/reserved-memory/iav@0` | `0x40000000`–`0xffffffff` | 3072 MiB | `no-map;` | `IDSP_PRIVATE`, contiguous with `iav@1` and ending at 4 GiB |
+| `/reserved-memory/linux,cma` | Linux high, above `0x400000000` | 512 MiB | `reusable;` | Kernel CMA. Linux low is smaller than this pool |
+| `/reserved-memory/cavalry@0` | `0x100000000`–`0x3ffffffff` | 12 GiB | `no-map;` | Cavalry private pool. Linux RAM continues from `0x400000000` to the detected DRAM top |
+
+`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it. `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. Loading `ambcma`, `dsp`, `iav`, or `cavalry` against this map has not been qualified.
 
 In addition, the device tree declares the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specifies `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation.
 
@@ -84,70 +87,39 @@ The Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bi
 
 This establishes a critical architectural rule: **All memory managed by `ambcma.ko` for DSP buffers must reside strictly below the 4 GiB physical address boundary and align contiguously with `iav@1`.**
 
-In the authoritative 32 GiB Cooper Pro layout:
-1. `/reserved-memory/iav@1` starts at `0x0080000000` with size `0x18000000` (384 MiB) for IDSP shared memory.
-2. `/reserved-memory/iav@0` starts at `0x0098000000` with size `0x68000000` (1664 MiB), spanning contiguously up to `0x0100000000` (4 GiB), forming a single contiguous 2.0 GiB window `[0x80000000 .. 0x100000000]`.
-3. When `ambcma.ko` initializes with `ama_enable=1 dsp_buf_size=0x68000000` (1664 MiB), the DSP buffer `0x98000000` + `0x68000000` = `0x100000000` (4 GiB) remains completely inside 32-bit space with zero address wraparound and satisfies OrcVIN descriptor invariants.
-4. `cavalry@0` (12 GiB) is anchored at `0x0100000000` in 64-bit address space, non-overlapping with DSP memory.
+On the ipcam-mini map:
+1. `/reserved-memory/iav@1` starts at `0x28000000` with size `0x18000000` (384 MiB).
+2. `/reserved-memory/iav@0` starts at `0x40000000` with size `0xc0000000` (3072 MiB) and ends at `0x100000000`.
+3. `dsp_buf_size` has to fit inside that `iav@0` node and remain below 4 GiB. The old 1664 MiB value belonged to a different map. No `dsp_buf_size` has been qualified on this one.
+4. `cavalry@0` (12 GiB) starts at `0x100000000`. Linux RAM continues above it, from `0x400000000` to the detected top. The EFI stub may place kernel code in that Linux-high range. That placement is outside the DSP window.
 
 ### 3.3 U-Boot SMP Relocation Top (`/u-boot_cfg/reloc-top`)
 
 On 32 GiB Ambarella N1-655 platforms, U-Boot dynamically relocates itself near the top of usable physical RAM. In `arch/arm/mach-ambarella/common.c`, `board_get_usable_ram_top()` queries the control DTB for `/u-boot_cfg/reloc-top`.
 
 1. **Failure Mode (Missing `reloc-top`)**: If `/u-boot_cfg` is absent from the control DTB, U-Boot relocates to the top of 32 GiB (`0x7fff3db90`). The spin-table trampoline (`secondary_cortex_jump`) is placed at this 35-bit physical address. When Linux attempts to release secondary CPUs (`CPU1..3`), the PC-relative instructions (`adr`) fail to reach the high-memory spin table. The secondary cores never wake, Linux reports `CPU1..3: failed to come online` at 5-second intervals, and the board resets via hardware watchdog after 15 seconds.
-2. **Resolution**: Any control DTB compiled into or used by U-Boot must include:
-   ```dts
-   u-boot_cfg {
-       #address-cells = <0x01>;
-       #size-cells = <0x00>;
-       reloc-top = <0x80000000>;
-   };
-   ```
-   This restricts U-Boot relocation to the 2 GiB boundary (`0x7ff37b90`), ensuring secondary CPU spin tables remain accessible.
+2. **Resolution**: The control DTB sets `reloc-top` to `0x13000000`, below `cavalry@2`. `fdt_update_cpux()` writes `cpu-release-addr` to the runtime address of `secondary_cortex_jump`. The old `0x80000000` top falls inside `iav@0` of this map.
 
 ### 3.4 Partition 4 (`CONFIG`) Device Tree Deployment & GRUB Override
 
-EVE provides a persistent mechanism to deliver custom device trees via the FAT configuration partition (`CONFIG`, partition 4 / `/dev/mmcblk0p4`).
+Do not set `devicetree` in `/config/grub.cfg` or the CONFIG-partition `grub.cfg`. That assignment makes GRUB replace the tree U-Boot patched, including the detected DRAM size and the runtime spin-table addresses.
 
-> [!WARNING]
-> When GRUB loads a device tree via `set_global devicetree "($config_part)/eve.dtb"`, it passes the file directly to the Linux kernel, **bypassing U-Boot's dynamic `spin_table_update_dt()` runtime patching**.
-> Therefore, the static DTB deployed to Partition 4 must explicitly include the pre-calculated per-CPU strided `cpu-release-addr` properties:
-> - `cpu@0`: `0x00 0x7ff38460`
-> - `cpu@1`: `0x00 0x7ff38468`
-> - `cpu@2`: `0x00 0x7ff38470`
-> - `cpu@3`: `0x00 0x7ff38478`
-> Without these strided addresses, the secondary CPUs will fail to come online under Linux.
-
-To deploy the verified device tree:
-
-```bash
-# 1. Mount the persistent CONFIG partition on the edge node
-mkdir -p /tmp/cfgmnt
-mount /dev/mmcblk0p4 /tmp/cfgmnt
-
-# 2. Stage the verified Cooper Pro DTB as eve.dtb
-cp /path/to/build/eve_iav_cooper.dtb /tmp/cfgmnt/eve.dtb
-
-# 3. Configure grub.cfg override to load eve.dtb
-cat << 'EOF' > /tmp/cfgmnt/grub.cfg
-set_global devicetree "($config_part)/eve.dtb"
-EOF
-
-# 4. Unmount and warm reboot
-umount /tmp/cfgmnt
-reboot
-```
-
-Upon reboot, GRUB reads `($config_part)/grub.cfg` and loads `eve.dtb`. Verify active carveouts and SMP in Dom0:
+On a booted Dom0 shell, the tree matches the contract when:
 
 ```bash
 nproc --all
-# Expected output: 4
-cat /proc/device-tree/model
-# Expected output: Ambarella N1-655 Cooper Pro Board
-ls -la /proc/device-tree/reserved-memory/
-# Confirms disp@0, iav@0, iav@1, cavalry@0..2 are present
+od -An -tx1 /proc/device-tree/memory/reg
+od -An -tx1 /proc/device-tree/chosen/sys-dram-size
+od -An -tx1 /proc/device-tree/reserved-memory/iav@0/reg
+od -An -tx1 /proc/device-tree/reserved-memory/iav@1/reg
+od -An -tx1 /proc/device-tree/reserved-memory/cavalry@0/reg
+od -An -tx1 /proc/device-tree/reserved-memory/cavalry@2/reg
+test ! -e /proc/device-tree/reserved-memory/cavalry@1/reg && echo cavalry@1-has-no-reg
+test ! -e /proc/device-tree/reserved-memory/dma32_reserved && echo dma32-absent
+grep -E 'Kernel code|1fc00000-3ffffffff' /proc/iomem
 ```
+
+`nproc --all` prints `4`. `/memory` and `sys-dram-size` are 32 GiB on these boards. Kernel code is outside `0x1fc00000`–`0x400000000`. Placement in Linux high is accepted.
 
 ---
 
@@ -180,7 +152,7 @@ When `cavalry.ko` is inserted:
 1. It matches the `sub_scheduler0` platform device declared in `arch/arm64/boot/dts/ambarella/n1_655.dts`.
 2. It parses and claims the reserved memory carveouts established at boot:
    - `cavalry_reserved` (User/CVMEM pool: `0x100000000 - 0x3ffffffff`, 12 GB)
-   - `cavalry_ucode` (Microcode staging: `0x25c00000 - 0x25ffffff`, 4 MB)
+   - `cavalry_ucode` (Microcode staging: `0x1fc00000`–`0x1fffffff`, 4 MiB)
 3. It loads `/persist/firmware/cavalry.bin` into ucode memory via the redirected firmware path.
 4. It initializes interrupts (IRQ 41/42) and VP clocks, starting the Vector Processor ucode.
 5. It creates device nodes `/dev/cavalry` and `/dev/cavalry_profile`.
@@ -273,7 +245,7 @@ Expected kernel output highlights:
 ```text
 cavalry: loading out-of-tree module taints kernel.
 cavalry_show_version: Cavalry Linux Driver Version: 3.0.x
-cavalry_parse_reserved_mem: CVMEM(1:ucode) RANGE: [0x25c00000 - 0x25ffffff]
+cavalry_parse_reserved_mem: CVMEM(1:ucode) RANGE: [0x1fc00000 - 0x1fffffff]
 cavalry_parse_reserved_mem: CVMEM(0:user)  RANGE: [0x100000000 - 0x3ffffffff]
 show_ucode_version: Cavalry Ucode Version = N1_655-Ver.206-...
 visorc_start: Cavalry Ucode is started.

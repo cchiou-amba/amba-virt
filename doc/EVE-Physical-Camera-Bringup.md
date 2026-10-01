@@ -47,45 +47,24 @@ The Ambarella N1-655 camera subsystem consists of a high-speed GMSL2 SerDes brid
 
 All Ambarella DSP microcode engines (`orccode.bin`, `orcidsp0.bin`, `orcidsp1.bin`, `orcvin0.bin`, `orcvin1.bin`) operate strictly within a **32-bit physical address space (`< 0x100000000` / 4 GiB)**. All memory buffers passed to DSP hardware blocks must reside below this 4 GiB boundary.
 
-### Authoritative 32 GiB Cooper Pro Memory Map
+### ipcam-mini Memory Map
+
+U-Boot writes this map from the detected DRAM size. Both current boards detect 32 GiB. `iav@1` and `iav@0` are contiguous and end at 4 GiB. `cavalry@0` starts there. This boot layout does not qualify sensor, VIN, IDSP, or Cavalry DMA.
 
 | Memory / Carveout Node | Physical Address Range | Size | Allocation Policy | Functional Purpose |
 | :--- | :--- | :--- | :--- | :--- |
-| `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | System physical RAM address space (`reg = <0x0 0x0 0x8 0x0>`) |
-| `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Explicit DRAM size node for `ambcma.ko` DRAM size validation |
+| `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | Detected DRAM |
+| `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Size `ambcma.ko` validates |
 | `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
-| `/reserved-memory/cavalry@2` | `0x0025c00000`–`0x0025ffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer (`cavalry_ucode`) |
-| `/reserved-memory/cavalry@1` | `0x0026000000`–`0x0027ffffff` | 32 MiB | `no-map;` | Cavalry shared DMA descriptors (`cavalry_shared`) |
-| `/reserved-memory/disp@0` | `0x007e000000`–`0x007fffffff` | 32 MiB | `no-map;` | VOUT / Display framebuffer (`disp_buffer`) |
-| `/reserved-memory/iav@1` | `0x0080000000`–`0x0097ffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` (Pyramid layers, canvas, stats) |
-| `/reserved-memory/iav@0` | `0x0098000000`–`0x00ffffffff` | 1664 MiB | `no-map;` | `IDSP_PRIVATE` (DSP DRAM buffers, contiguous with `iav@1`) |
-| `/reserved-memory/linux,cma` | Dynamically placed | 512 MiB | `reusable;` | Linux kernel default CMA allocator pool |
-| `/reserved-memory/cavalry@0` | `0x0100000000`–`0x03ffffffff` | 12 GiB | `no-map;` | NPU / Cavalry user DRAM pool (`cavalry_reserved`, 64-bit space) |
-| `amba_virt_shm` | `0x0100000000`–`0x017fffffff` | 2 GiB | `shm_phys` | Guest VM zero-copy shared memory window (HVM tenants) |
+| `/reserved-memory/cavalry@2` | `0x1fc00000`–`0x1fffffff` | 4 MiB | `no-map;` | Cavalry ucode staging |
+| `/reserved-memory/cavalry@1` | none | 0 | `no-map;` | No shared-pool `reg` in this profile |
+| `/reserved-memory/disp@0` | `0x20000000`–`0x27ffffff` | 128 MiB | `no-map;` | Display buffer |
+| `/reserved-memory/iav@1` | `0x28000000`–`0x3fffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` |
+| `/reserved-memory/iav@0` | `0x40000000`–`0xffffffff` | 3072 MiB | `no-map;` | `IDSP_PRIVATE` |
+| `/reserved-memory/linux,cma` | above `0x400000000` | 512 MiB | `reusable;` | Kernel CMA in Linux high |
+| `/reserved-memory/cavalry@0` | `0x100000000`–`0x3ffffffff` | 12 GiB | `no-map;` | Cavalry private pool |
 
-### Device Tree Deployment via Partition 4
-The platform device tree (`eve_iav_cooper.dtb`) is deployed persistently via Partition 4 (`CONFIG` partition `/dev/mmcblk0p4`):
-
-```bash
-# Mount persistent config partition
-mkdir -p /tmp/cfgmnt
-mount /dev/mmcblk0p4 /tmp/cfgmnt
-
-# Deploy verified platform DTB
-cp /path/to/build/eve_iav_cooper.dtb /tmp/cfgmnt/eve.dtb
-sync
-umount /tmp/cfgmnt
-reboot
-```
-
-After reboot, verify the active device tree:
-```bash
-cat /proc/device-tree/model
-# Output: Ambarella N1-655 Cooper Pro Board
-xxd /proc/device-tree/chosen/sys-dram-size
-# Output: 0000 0008 0000 0000 (32 GiB)
-ls -d /proc/device-tree/reserved-memory/*
-```
+Do not install a static DTB with `set_global devicetree`. GRUB would replace the tree U-Boot patched. Confirm the running tree with `od -An -tx1` on `/proc/device-tree/memory/reg`, `/proc/device-tree/chosen/sys-dram-size`, and the reserved `iav` and `cavalry` nodes.
 
 ---
 
@@ -142,7 +121,9 @@ echo -n "/persist/firmware" > /sys/module/firmware_class/parameters/path
 
 # Insert core timing, CMA, and messaging drivers
 insmod /persist/modules/hw_timer.ko
-insmod /persist/modules/ambcma.ko ama_enable=1 dsp_buf_size=0x68000000
+# dsp_buf_size must fit in iav@0 (3072 MiB, ending at 4 GiB).
+# The old 1664 MiB value belonged to a different map and is not qualified here.
+insmod /persist/modules/ambcma.ko ama_enable=1 dsp_buf_size=0x40000000
 insmod /persist/modules/cavalry.ko
 insmod /persist/modules/msg.ko
 insmod /persist/modules/ambnl.ko
