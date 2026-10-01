@@ -72,8 +72,9 @@ if [ -d "$BUILD_BIN_DIR" ] && [ -n "$(ls -A "$BUILD_BIN_DIR" 2>/dev/null)" ]; th
     echo "Staging host helper binaries from $BUILD_BIN_DIR to $TARGET_NODE:/persist/bin/..."
     for bin in "$BUILD_BIN_DIR"/*; do
         if [ -f "$bin" ] && [ -x "$bin" ]; then
-            scp "$bin" "$TARGET_NODE:/persist/bin/"
-            ssh -o BatchMode=yes "$TARGET_NODE" "chmod +x /persist/bin/$(basename "$bin")"
+            bname=$(basename "$bin")
+            scp "$bin" "$TARGET_NODE:/persist/bin/${bname}.tmp"
+            ssh -o BatchMode=yes "$TARGET_NODE" "mv -f /persist/bin/${bname}.tmp /persist/bin/${bname} && chmod +x /persist/bin/${bname}"
         fi
     done
 fi

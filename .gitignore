@@ -38,6 +38,7 @@ guest-os/qnx/test_hw_irq
 guest-os/qnx/test_irq144
 guest-os/qnx/check_device
 guest-os/qnx/dump_fdt
+guest-os/qnx/private/
 
 # Python caches
 __pycache__/

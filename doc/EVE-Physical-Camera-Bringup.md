@@ -1,5 +1,15 @@
 # Physical Camera & 3A Bringup on Ambarella EVE-OS
 
+> **Checkpoint 2026-10-01, `n1-655-devkit`.** Port A streamed. A cold reset, a
+> self-contained stage built by `tools/bringup/scripts/stage_fresh_bringup.sh`,
+> and `tools/bringup/scripts/run_sensor_bringup_fresh.sh` produced 900 decodable
+> 1920x1080 H.264 frames at 30 fps. `vin0_idsp_sof` counted through the run and
+> the DSP state stayed `0x0`. Do not load DSP, IAV, or Cavalry from the old
+> `/persist` tree, and do not preload those modules at boot. The measured
+> procedure is the `sensor-bringup` skill. Sections below that describe a
+> `/persist/{modules,bin,lib,firmware}` layout are background, not the recipe
+> that cleared the 7-frame stall. `n1-655-pro` was not retested on this path.
+
 This guide details the hardware architecture, memory carveout requirements, driver loading sequence, 3A image tuning database integration, and video pipeline orchestration required to bring up physical GMSL2 cameras (Maxim MAX96712 deserializer with OmniVision OS08A10 sensors) natively in EVE-OS Dom0 on Ambarella N1-655 platforms (`n1-655-pro` and `n1-655-devkit`).
 
 Related documents:

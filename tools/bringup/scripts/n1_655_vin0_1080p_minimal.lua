@@ -99,6 +99,7 @@ stream_0 = {
 _resource_config_ = {
 	version = 1,
 	log_level = 0,
+	encode_mode = 0, -- 0: Normal ISO (Linear)
 	channels = {
 		chan_0,
 	},

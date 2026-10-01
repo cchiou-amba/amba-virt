@@ -125,6 +125,9 @@ stream_2 = {
 _resource_config_ = {
 	version = 1,
 	log_level = 0, -- 0: error; 1: warning; 2: info; 3: debug
+	system_boot_cfg = {
+		debug_chip_id = 0,
+	},
 	channels = {
 		chan_0,
 	},
@@ -142,9 +145,11 @@ _resource_config_ = {
 			extra_dram_buf = 0,
 		},
 		{
-			type = "encode",
+			type = "prev",
 			size = {0, 0}, -- min size to contain source buffers
 			source = {"chan_0.third",},
+			vout_id = 0,
+			vout_YUV422 = 0,
 			extra_dram_buf = 0,
 		},
 		{
