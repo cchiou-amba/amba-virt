@@ -111,6 +111,8 @@ struct amba_virt_dmabuf_slice {
 #define AMBA_VIRT_MSG_DMA_REQUEST_RESP		58u
 #define AMBA_VIRT_MSG_AUTH_CHALLENGE_REQ	60u
 #define AMBA_VIRT_MSG_AUTH_CHALLENGE_RESP	61u
+#define AMBA_VIRT_MSG_IAV_TAP_REQ		70u
+#define AMBA_VIRT_MSG_IAV_TAP_RESP		71u
 
 enum vcav_opcode {
 	VCAV_OP_GET_VERSION	= 1,

@@ -366,8 +366,13 @@ int virt_mem_pool_set_device_bounds(uint32_t cid,
 		dev_end = dev_start + req_size;
 
 		if (arena_sz > 0) {
-			arena_start = dev_end;
-			arena_end = arena_start + arena_sz;
+			if (dev_start >= arena_sz) {
+				arena_start = dev_start - arena_sz;
+				arena_end = dev_start;
+			} else {
+				arena_start = dev_end;
+				arena_end = arena_start + arena_sz;
+			}
 		} else {
 			arena_start = 0;
 			arena_end = 0;

@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -26,6 +27,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/utsname.h>
+#include <sys/time.h>
+#include <signal.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -39,6 +42,8 @@
 #include <cavalry_mem.h>
 #include <nnctrl.h>
 #include "nnctrl_priv.h"
+#include "amba_virt.h"
+#include "iav_proxy.h"
 
 struct net_desc *get_net_desc(struct nnctrl_info *pctl, int net_id);
 
@@ -200,6 +205,13 @@ struct yolo_runtime {
 };
 
 static struct yolo_runtime g_yolo;
+static volatile sig_atomic_t g_live_stop;
+
+static void live_stop_handler(int sig)
+{
+    (void)sig;
+    g_live_stop = 1;
+}
 
 /* Helper: high-resolution timer */
 static inline double get_time_sec(void)
@@ -244,6 +256,127 @@ static void get_os_info(struct yolo_runtime *rt)
         }
         fclose(fp);
     }
+}
+
+/* SHA-256 for Model Integrity Verification */
+typedef struct {
+    uint32_t state[8];
+    uint64_t count;
+    uint8_t buffer[64];
+} app_sha256_ctx;
+
+#define SHA256_ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define SHA256_CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
+#define SHA256_MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define SHA256_EP0(x) (SHA256_ROTR(x, 2) ^ SHA256_ROTR(x, 13) ^ SHA256_ROTR(x, 22))
+#define SHA256_EP1(x) (SHA256_ROTR(x, 6) ^ SHA256_ROTR(x, 11) ^ SHA256_ROTR(x, 25))
+#define SHA256_SIG0(x) (SHA256_ROTR(x, 7) ^ SHA256_ROTR(x, 18) ^ ((x) >> 3))
+#define SHA256_SIG1(x) (SHA256_ROTR(x, 17) ^ SHA256_ROTR(x, 19) ^ ((x) >> 10))
+
+static const uint32_t SHA256_K[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+static void app_sha256_transform(app_sha256_ctx *ctx, const uint8_t data[64])
+{
+    uint32_t a, b, c, d, e, f, g, h, W[64];
+    for (int i = 0; i < 16; i++) {
+        W[i] = ((uint32_t)data[i * 4] << 24) |
+               ((uint32_t)data[i * 4 + 1] << 16) |
+               ((uint32_t)data[i * 4 + 2] << 8) |
+               ((uint32_t)data[i * 4 + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+        W[i] = SHA256_SIG1(W[i - 2]) + W[i - 7] + SHA256_SIG0(W[i - 15]) + W[i - 16];
+    }
+    a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2]; d = ctx->state[3];
+    e = ctx->state[4]; f = ctx->state[5]; g = ctx->state[6]; h = ctx->state[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + SHA256_EP1(e) + SHA256_CH(e, f, g) + SHA256_K[i] + W[i];
+        uint32_t t2 = SHA256_EP0(a) + SHA256_MAJ(a, b, c);
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
+    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
+}
+
+static void app_sha256_init(app_sha256_ctx *ctx)
+{
+    ctx->count = 0;
+    ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
+}
+
+static void app_sha256_update(app_sha256_ctx *ctx, const uint8_t *data, size_t len)
+{
+    size_t idx = (size_t)(ctx->count & 0x3f);
+    ctx->count += len;
+    size_t part_len = 64 - idx;
+    size_t i = 0;
+    if (len >= part_len) {
+        memcpy(&ctx->buffer[idx], data, part_len);
+        app_sha256_transform(ctx, ctx->buffer);
+        for (i = part_len; i + 63 < len; i += 64)
+            app_sha256_transform(ctx, &data[i]);
+        idx = 0;
+    }
+    memcpy(&ctx->buffer[idx], &data[i], len - i);
+}
+
+static void app_sha256_final(app_sha256_ctx *ctx, uint8_t hash[32])
+{
+    uint8_t bits[8];
+    uint64_t total_bits = ctx->count * 8;
+    for (int i = 0; i < 8; i++)
+        bits[7 - i] = (uint8_t)(total_bits >> (i * 8));
+    static const uint8_t padding[64] = { 0x80 };
+    size_t idx = (size_t)(ctx->count & 0x3f);
+    size_t pad_len = (idx < 56) ? (56 - idx) : (120 - idx);
+    app_sha256_update(ctx, padding, pad_len);
+    app_sha256_update(ctx, bits, 8);
+    for (int i = 0; i < 8; i++) {
+        hash[i * 4 + 0] = (uint8_t)(ctx->state[i] >> 24);
+        hash[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
+        hash[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
+        hash[i * 4 + 3] = (uint8_t)(ctx->state[i]);
+    }
+}
+
+static int calc_file_sha256(const char *path, char out_hex[65])
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    app_sha256_ctx ctx;
+    app_sha256_init(&ctx);
+    uint8_t buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+        app_sha256_update(&ctx, buf, n);
+    fclose(fp);
+    uint8_t digest[32];
+    app_sha256_final(&ctx, digest);
+    for (int i = 0; i < 32; i++)
+        sprintf(&out_hex[i * 2], "%02x", digest[i]);
+    out_hex[64] = '\0';
+    return 0;
 }
 
 /* Base64 Encoding */
@@ -1412,48 +1545,646 @@ static int run_cli_mode(struct yolo_runtime *rt, const char *image_path, const c
     return 0;
 }
 
+/* Standalone self-contained MD5 for tensor output verification */
+typedef struct {
+    uint32_t state[4];
+    uint32_t count[2];
+    uint8_t buffer[64];
+} yolo_md5_ctx;
+
+#define F_MD5(x, y, z) (((x) & (y)) | ((~x) & (z)))
+#define G_MD5(x, y, z) (((x) & (z)) | ((y) & (~z)))
+#define H_MD5(x, y, z) ((x) ^ (y) ^ (z))
+#define I_MD5(x, y, z) ((y) ^ ((x) | (~z)))
+#define ROTL_MD5(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+#define FF_MD5(a, b, c, d, x, s, ac) { \
+    (a) += F_MD5((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = ROTL_MD5((a), (s)); \
+    (a) += (b); \
+}
+#define GG_MD5(a, b, c, d, x, s, ac) { \
+    (a) += G_MD5((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = ROTL_MD5((a), (s)); \
+    (a) += (b); \
+}
+#define HH_MD5(a, b, c, d, x, s, ac) { \
+    (a) += H_MD5((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = ROTL_MD5((a), (s)); \
+    (a) += (b); \
+}
+#define II_MD5(a, b, c, d, x, s, ac) { \
+    (a) += I_MD5((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = ROTL_MD5((a), (s)); \
+    (a) += (b); \
+}
+
+static void yolo_md5_transform(uint32_t state[4], const uint8_t block[64])
+{
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], x[16];
+    for (int i = 0; i < 16; i++)
+        x[i] = ((uint32_t)block[i * 4]) | (((uint32_t)block[i * 4 + 1]) << 8) |
+               (((uint32_t)block[i * 4 + 2]) << 16) | (((uint32_t)block[i * 4 + 3]) << 24);
+
+    FF_MD5(a, b, c, d, x[ 0],  7, 0xd76aa478);
+    FF_MD5(d, a, b, c, x[ 1], 12, 0xe8c7b756);
+    FF_MD5(c, d, a, b, x[ 2], 17, 0x242070db);
+    FF_MD5(b, c, d, a, x[ 3], 22, 0xc1bdceee);
+    FF_MD5(a, b, c, d, x[ 4],  7, 0xf57c0faf);
+    FF_MD5(d, a, b, c, x[ 5], 12, 0x4787c62a);
+    FF_MD5(c, d, a, b, x[ 6], 17, 0xa8304613);
+    FF_MD5(b, c, d, a, x[ 7], 22, 0xfd469501);
+    FF_MD5(a, b, c, d, x[ 8],  7, 0x698098d8);
+    FF_MD5(d, a, b, c, x[ 9], 12, 0x8b44f7af);
+    FF_MD5(c, d, a, b, x[10], 17, 0xffff5bb1);
+    FF_MD5(b, c, d, a, x[11], 22, 0x895cd7be);
+    FF_MD5(a, b, c, d, x[12],  7, 0x6b901122);
+    FF_MD5(d, a, b, c, x[13], 12, 0xfd987193);
+    FF_MD5(c, d, a, b, x[14], 17, 0xa679438e);
+    FF_MD5(b, c, d, a, x[15], 22, 0x49b40821);
+
+    GG_MD5(a, b, c, d, x[ 1],  5, 0xf61e2562);
+    GG_MD5(d, a, b, c, x[ 6],  9, 0xc040b340);
+    GG_MD5(c, d, a, b, x[11], 14, 0x265e5a51);
+    GG_MD5(b, c, d, a, x[ 0], 20, 0xe9b6c7aa);
+    GG_MD5(a, b, c, d, x[ 5],  5, 0xd62f105d);
+    GG_MD5(d, a, b, c, x[10],  9, 0x02441453);
+    GG_MD5(c, d, a, b, x[15], 14, 0xd8a1e681);
+    GG_MD5(b, c, d, a, x[ 4], 20, 0xe7d3fbc8);
+    GG_MD5(a, b, c, d, x[ 9],  5, 0x21e1cde6);
+    GG_MD5(d, a, b, c, x[14],  9, 0xc33707d6);
+    GG_MD5(c, d, a, b, x[ 3], 14, 0xf4d50d87);
+    GG_MD5(b, c, d, a, x[ 8], 20, 0x455a14ed);
+    GG_MD5(a, b, c, d, x[13],  5, 0xa9e3e905);
+    GG_MD5(d, a, b, c, x[ 2],  9, 0xfcefa3f8);
+    GG_MD5(c, d, a, b, x[ 7], 14, 0x676f02d9);
+    GG_MD5(b, c, d, a, x[12], 20, 0x8d2a4c8a);
+
+    HH_MD5(a, b, c, d, x[ 5],  4, 0xfffa3942);
+    HH_MD5(d, a, b, c, x[ 8], 11, 0x8771f681);
+    HH_MD5(c, d, a, b, x[11], 16, 0x6d9d6122);
+    HH_MD5(b, c, d, a, x[14], 23, 0xfde5380c);
+    HH_MD5(a, b, c, d, x[ 1],  4, 0xa4beea44);
+    HH_MD5(d, a, b, c, x[ 4], 11, 0x4bdecfa9);
+    HH_MD5(c, d, a, b, x[ 7], 16, 0xf6bb4b60);
+    HH_MD5(b, c, d, a, x[10], 23, 0xbebfbc70);
+    HH_MD5(a, b, c, d, x[13],  4, 0x289b7ec6);
+    HH_MD5(d, a, b, c, x[ 0], 11, 0xeaa127fa);
+    HH_MD5(c, d, a, b, x[ 3], 16, 0xd4ef3085);
+    HH_MD5(b, c, d, a, x[ 6], 23, 0x04881d05);
+    HH_MD5(a, b, c, d, x[ 9],  4, 0xd9d4d039);
+    HH_MD5(d, a, b, c, x[12], 11, 0xe6db99e5);
+    HH_MD5(c, d, a, b, x[15], 16, 0x1fa27cf8);
+    HH_MD5(b, c, d, a, x[ 2], 23, 0xc4ac5665);
+
+    II_MD5(a, b, c, d, x[ 0],  6, 0xf4292244);
+    II_MD5(d, a, b, c, x[ 7], 10, 0x432aff97);
+    II_MD5(c, d, a, b, x[14], 15, 0xab9423a7);
+    II_MD5(b, c, d, a, x[ 5], 21, 0xfc93a039);
+    II_MD5(a, b, c, d, x[12],  6, 0x655b59c3);
+    II_MD5(d, a, b, c, x[ 3], 10, 0x8f0ccc92);
+    II_MD5(c, d, a, b, x[10], 15, 0xffeff47d);
+    II_MD5(b, c, d, a, x[ 1], 21, 0x85845dd1);
+    II_MD5(a, b, c, d, x[ 8],  6, 0x6fa87e4f);
+    II_MD5(d, a, b, c, x[15], 10, 0xfe2ce6e0);
+    II_MD5(c, d, a, b, x[ 6], 15, 0xa3014314);
+    II_MD5(b, c, d, a, x[13], 21, 0x4e0811a1);
+    II_MD5(a, b, c, d, x[ 4],  6, 0xf7537e82);
+    II_MD5(d, a, b, c, x[11], 10, 0xbd3af235);
+    II_MD5(c, d, a, b, x[ 2], 15, 0x2ad7d2bb);
+    II_MD5(b, c, d, a, x[ 9], 21, 0xeb86d391);
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+}
+
+static void yolo_md5_init(yolo_md5_ctx *ctx)
+{
+    ctx->count[0] = ctx->count[1] = 0;
+    ctx->state[0] = 0x67452301;
+    ctx->state[1] = 0xefcdab89;
+    ctx->state[2] = 0x98badcfe;
+    ctx->state[3] = 0x10325476;
+}
+
+static void yolo_md5_update(yolo_md5_ctx *ctx, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t idx = (ctx->count[0] >> 3) & 0x3f;
+
+    if ((ctx->count[0] += ((uint32_t)len << 3)) < ((uint32_t)len << 3))
+        ctx->count[1]++;
+    ctx->count[1] += ((uint32_t)len >> 29);
+
+    uint32_t part_len = 64 - idx;
+    uint32_t i = 0;
+
+    if (len >= part_len) {
+        memcpy(&ctx->buffer[idx], p, part_len);
+        yolo_md5_transform(ctx->state, ctx->buffer);
+        for (i = part_len; i + 63 < len; i += 64)
+            yolo_md5_transform(ctx->state, &p[i]);
+        idx = 0;
+    }
+    memcpy(&ctx->buffer[idx], &p[i], len - i);
+}
+
+static void yolo_md5_final(uint8_t digest[16], yolo_md5_ctx *ctx)
+{
+    static const uint8_t padding[64] = { 0x80 };
+    uint8_t bits[8];
+
+    for (int i = 0; i < 4; i++) {
+        bits[i] = (uint8_t)((ctx->count[0] >> (i * 8)) & 0xff);
+        bits[i + 4] = (uint8_t)((ctx->count[1] >> (i * 8)) & 0xff);
+    }
+
+    uint32_t idx = (ctx->count[0] >> 3) & 0x3f;
+    uint32_t pad_len = (idx < 56) ? (56 - idx) : (120 - idx);
+    yolo_md5_update(ctx, padding, pad_len);
+    yolo_md5_update(ctx, bits, 8);
+
+    for (int i = 0; i < 4; i++) {
+        digest[i]      = (uint8_t)((ctx->state[0] >> (i * 8)) & 0xff);
+        digest[i + 4]  = (uint8_t)((ctx->state[1] >> (i * 8)) & 0xff);
+        digest[i + 8]  = (uint8_t)((ctx->state[2] >> (i * 8)) & 0xff);
+        digest[i + 12] = (uint8_t)((ctx->state[3] >> (i * 8)) & 0xff);
+    }
+}
+
+static void yolo_calc_md5(const void *data, size_t len, char out_hex[33])
+{
+    yolo_md5_ctx ctx;
+    uint8_t digest[16];
+
+    yolo_md5_init(&ctx);
+    yolo_md5_update(&ctx, data, len);
+    yolo_md5_final(digest, &ctx);
+
+    for (int i = 0; i < 16; i++)
+        sprintf(&out_hex[i * 2], "%02x", digest[i]);
+    out_hex[32] = '\0';
+}
+
+struct fp16_stats {
+    uint32_t count;
+    uint32_t nonfinite;
+    uint32_t argmax;
+    float l2;
+    float min;
+    float max;
+};
+
+static float fp16_to_float(uint16_t h)
+{
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1f;
+    uint32_t mant = h & 0x3ff;
+    uint32_t bits;
+    float f;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            exp = 127 - 15 + 1;
+            while (!(mant & 0x400)) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x3ff;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1f) {
+        bits = sign | 0x7f800000 | (mant << 13);
+    } else {
+        bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+    memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+static void fp16_tensor_stats(const void *buf, size_t bytes, struct fp16_stats *st)
+{
+    const uint16_t *v = (const uint16_t *)buf;
+    double sum_sq = 0.0;
+    int seen = 0;
+
+    memset(st, 0, sizeof(*st));
+    st->count = (uint32_t)(bytes / sizeof(uint16_t));
+    for (uint32_t i = 0; i < st->count; i++) {
+        float f = fp16_to_float(v[i]);
+        if (!isfinite(f)) {
+            st->nonfinite++;
+            continue;
+        }
+        if (!seen || f < st->min)
+            st->min = f;
+        if (!seen || f > st->max) {
+            st->max = f;
+            st->argmax = i;
+        }
+        seen = 1;
+        sum_sq += (double)f * f;
+    }
+    st->l2 = (float)sqrt(sum_sq);
+}
+
+static void live_tap_detach_close(int fd_virt)
+{
+    struct amba_virt_xfer xfer;
+    memset(&xfer, 0, sizeof(xfer));
+    struct amba_virt_msg *msg = (struct amba_virt_msg *)xfer.data;
+    msg->type = AMBA_VIRT_MSG_IAV_TAP_REQ;
+    msg->seq = 2;
+    struct iav_tap_rpc *rpc = (struct iav_tap_rpc *)(xfer.data + sizeof(*msg));
+    rpc->opcode = 2; /* IAV_TAP_OP_DETACH */
+    rpc->session_id = 1;
+    xfer.len = sizeof(*msg) + sizeof(*rpc);
+    xfer.timeout_ms = 1000;
+    ioctl(fd_virt, AMBA_VIRT_IOC_RPC, &xfer);
+    close(fd_virt);
+    printf("[PASS] Detached from host live camera tap\n");
+}
+
+static int run_live_tap_mode(struct yolo_runtime *rt, int iters, float conf_thresh, float nms_thresh,
+                             int no_frame_timeout_ms, const char *model_sha256,
+                             uint32_t override_in_handle, int resnet_mode)
+{
+    printf("===============================================================================\n");
+    printf(" Ambarella Cavalry Dual-HVM Live Camera Inference Mode\n");
+    printf(" Target OS: %s\n", rt->os_pretty_name);
+    printf(" Live Frames: %d | Conf Thresh: %.2f | NMS Thresh: %.2f | Timeout: %d ms\n",
+           iters, conf_thresh, nms_thresh, no_frame_timeout_ms);
+    printf("===============================================================================\n\n");
+
+    int fd_virt = open("/dev/amba_virt", O_RDWR);
+    if (fd_virt < 0) {
+        fprintf(stderr, "Fatal: cannot open /dev/amba_virt in live mode: %s\n", strerror(errno));
+        return 1;
+    }
+
+    uint32_t guest_cid = 0;
+    int vfd = open("/dev/vsock", O_RDONLY);
+    if (vfd >= 0) {
+        unsigned int lcid = 0;
+        if (ioctl(vfd, _IO(7, 0xb9), &lcid) == 0 && lcid > 2) {
+            guest_cid = lcid;
+        }
+        close(vfd);
+    }
+    if (guest_cid == 0) {
+        fprintf(stderr, "Fatal: failed to discover guest vsock CID from /dev/vsock\n");
+        close(fd_virt);
+        return 1;
+    }
+
+    struct amba_virt_xfer xfer;
+    memset(&xfer, 0, sizeof(xfer));
+    struct amba_virt_msg *msg = (struct amba_virt_msg *)xfer.data;
+    msg->type = AMBA_VIRT_MSG_IAV_TAP_REQ;
+    msg->seq = 1;
+    struct iav_tap_rpc *rpc = (struct iav_tap_rpc *)(xfer.data + sizeof(*msg));
+    rpc->opcode = 1; /* IAV_TAP_OP_ATTACH */
+    rpc->session_id = 1;
+    xfer.len = sizeof(*msg) + sizeof(*rpc);
+    xfer.timeout_ms = 1000;
+    if (ioctl(fd_virt, AMBA_VIRT_IOC_RPC, &xfer) < 0 || rpc->status != 0) {
+        fprintf(stderr, "Fatal: AMBA_VIRT_IOC_RPC attach failed (status=%d): %s\n",
+                rpc->status, strerror(errno));
+        close(fd_virt);
+        return 1;
+    }
+    printf("[PASS] Attached to host live camera tap via /dev/amba_virt (guest_cid=%u)\n", guest_cid);
+
+    struct nnctrl_info *pctl = get_nnctrl_global_context();
+    struct net_desc *pnet = get_net_desc(pctl, rt->net_id);
+    if (!pnet || !pnet->path_b.is_hvm) {
+        fprintf(stderr, "Fatal: Network %d not registered in Path B HVM mode\n", rt->net_id);
+        live_tap_detach_close(fd_virt);
+        return 1;
+    }
+    uint32_t target_dag_id = pnet->path_b.dag_id;
+    uint32_t in_handle_id = pnet->path_b.in_ports[0].handle_id;
+    uint32_t out_handle_id = pnet->path_b.out_ports[0].handle_id;
+    void *out_virt = pnet->path_b.out_ports[0].virt_addr;
+    void *in_virt = pnet->path_b.in_ports[0].virt_addr;
+    size_t in_size = pnet->path_b.in_ports[0].size;
+    size_t out_size = rt->net_out.out_desc[0].size;
+
+    printf("[*] Path B Handles: dag_id=%u, in_handle=%u, out_handle=%u, out_virt=%p, net_out_virt=%p, size=%zu\n",
+           target_dag_id, in_handle_id, out_handle_id, out_virt, rt->net_out.out_desc[0].virt, out_size);
+
+    /* Pitch padding is never written by the DAG; cross-tenant comparison
+     * must cover only the valid elements of each row. */
+    const struct io_dim *odim = &rt->net_out.out_desc[0].dim;
+    size_t elem_bytes = (size_t)1 << rt->net_out.out_desc[0].data_fmt.size;
+    size_t out_rows = (size_t)odim->plane * odim->depth * odim->height;
+    size_t out_row_bytes = (size_t)odim->width * elem_bytes;
+    if (odim->bitvector || out_rows == 0 || out_row_bytes == 0 || out_row_bytes > odim->pitch ||
+        out_rows * odim->pitch > out_size) {
+        fprintf(stderr, "Fatal: inconsistent output layout rows=%zu row_bytes=%zu pitch=%u size=%zu\n",
+                out_rows, out_row_bytes, (unsigned)odim->pitch, out_size);
+        live_tap_detach_close(fd_virt);
+        return 1;
+    }
+    uint8_t *out_valid = malloc(out_rows * out_row_bytes);
+    if (!out_valid) {
+        live_tap_detach_close(fd_virt);
+        return 1;
+    }
+    printf("[TAP_OUT_LAYOUT] plane=%u depth=%u height=%u width=%u pitch=%u elem_bytes=%zu "
+           "valid_bytes=%zu size=%zu\n",
+           (unsigned)odim->plane, (unsigned)odim->depth, (unsigned)odim->height,
+           (unsigned)odim->width, (unsigned)odim->pitch, elem_bytes,
+           out_rows * out_row_bytes, out_size);
+
+    const struct io_dim *idim = &rt->net_in.in_desc[0].dim;
+    unsigned in_elem_bits = 8u << rt->net_in.in_desc[0].data_fmt.size;
+    printf("[TAP_IN_LAYOUT] plane=%u depth=%u height=%u width=%u pitch=%u elem_bits=%u size=%zu\n",
+           (unsigned)idim->plane, (unsigned)idim->depth, (unsigned)idim->height,
+           (unsigned)idim->width, (unsigned)idim->pitch, in_elem_bits, in_size);
+    int layout_ok = resnet_mode
+        ? (idim->depth == 3 && idim->height == 224 && idim->width == 224 && in_elem_bits == 16 &&
+           out_rows * odim->width == 2048 && elem_bytes == 2)
+        : (idim->depth == 3 && idim->height == YOLO_INPUT_SIZE && idim->width == YOLO_INPUT_SIZE &&
+           in_elem_bits == 8 && odim->height == YOLO_NUM_ANCHORS && odim->width == 85);
+    if (!layout_ok) {
+        fprintf(stderr, "Fatal: model I/O layout does not match --model-kind %s\n",
+                resnet_mode ? "resnet" : "yolox");
+        free(out_valid);
+        live_tap_detach_close(fd_virt);
+        return 1;
+    }
+
+    double t_start = get_time_sec();
+    double last_frame_time = get_time_sec();
+    int successful_frames = 0;
+    int total_detections = 0;
+    uint64_t last_seq = 0;
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = live_stop_handler;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    for (int i = 0; i < iters && !g_live_stop; i++) {
+        pthread_mutex_lock(&rt->lock);
+
+        memset(&xfer, 0, sizeof(xfer));
+        msg = (struct amba_virt_msg *)xfer.data;
+        msg->type = AMBA_VIRT_MSG_IAV_TAP_REQ;
+        msg->seq = (uint32_t)(i + 10);
+        rpc = (struct iav_tap_rpc *)(xfer.data + sizeof(*msg));
+        rpc->opcode = 3; /* IAV_TAP_OP_RUN_LIVE_DAG */
+        rpc->session_id = 1;
+        rpc->dag_id = target_dag_id;
+        rpc->in_handle_id = override_in_handle ? override_in_handle : in_handle_id;
+        rpc->out_handle_id = out_handle_id;
+        xfer.len = sizeof(*msg) + sizeof(*rpc);
+        xfer.timeout_ms = 2000;
+
+        if (ioctl(fd_virt, AMBA_VIRT_IOC_RPC, &xfer) < 0) {
+            if (errno == EINTR) {
+                pthread_mutex_unlock(&rt->lock);
+                i--;
+                continue;
+            }
+            fprintf(stderr, "Fatal: live tap ioctl failed at frame %d: %s\n",
+                    i, strerror(errno));
+            pthread_mutex_unlock(&rt->lock);
+            live_tap_detach_close(fd_virt);
+            return 1;
+        }
+
+        if (rpc->status == -EAGAIN) {
+            /* No new frame produced by camera yet: check timeout */
+            double elapsed_ms = (get_time_sec() - last_frame_time) * 1000.0;
+            if (elapsed_ms >= (double)no_frame_timeout_ms) {
+                fprintf(stderr, "Error: no-frame timeout of %d ms exceeded (elapsed=%.1f ms)\n",
+                        no_frame_timeout_ms, elapsed_ms);
+                pthread_mutex_unlock(&rt->lock);
+                live_tap_detach_close(fd_virt);
+                return 1;
+            }
+            pthread_mutex_unlock(&rt->lock);
+            usleep(5000);
+            i--;
+            continue;
+        }
+
+        if (rpc->status != 0) {
+            fprintf(stderr, "Fatal: live tap RPC failed at frame %d (status=%d)\n",
+                    i, rpc->status);
+            pthread_mutex_unlock(&rt->lock);
+            live_tap_detach_close(fd_virt);
+            if (override_in_handle != 0) {
+                printf("[TAP_CROSS_TENANT] own_in_handle=%u submitted_in_handle=%u status=%d\n",
+                       in_handle_id, override_in_handle, rpc->status);
+                return rpc->status == -EACCES ? 2 : 1;
+            }
+            return 1;
+        }
+
+        if (override_in_handle != 0) {
+            fprintf(stderr, "Fatal: host accepted foreign in_handle=%u (own=%u)\n",
+                    override_in_handle, in_handle_id);
+            pthread_mutex_unlock(&rt->lock);
+            live_tap_detach_close(fd_virt);
+            return 1;
+        }
+
+        if (rpc->active_seq <= last_seq) {
+            fprintf(stderr, "Fatal: replayed or non-monotonic frame: seq=%lu after %lu\n",
+                    (unsigned long)rpc->active_seq, (unsigned long)last_seq);
+            pthread_mutex_unlock(&rt->lock);
+            live_tap_detach_close(fd_virt);
+            return 1;
+        }
+
+        last_seq = rpc->active_seq;
+        last_frame_time = get_time_sec();
+
+        /* Synchronize genuine output tensor from Path B handle buffer */
+        if (out_virt && out_virt != rt->net_out.out_desc[0].virt) {
+            memcpy(rt->net_out.out_desc[0].virt, out_virt, out_size);
+        }
+
+        struct bbox dets[MAX_DETECTIONS];
+        int det_cnt = 0;
+        char interp[160] = {0};
+        if (resnet_mode) {
+            struct fp16_stats st;
+            fp16_tensor_stats(rt->net_out.out_desc[0].virt, out_size, &st);
+            snprintf(interp, sizeof(interp),
+                     "kind=resnet_embedding elems=%u nonfinite=%u l2=%.4f min=%.4f max=%.4f argmax=%u",
+                     st.count, st.nonfinite, st.l2, st.min, st.max, st.argmax);
+        } else {
+            const int16_t *out_tensor = (const int16_t *)rt->net_out.out_desc[0].virt;
+            det_cnt = yolox_postprocess(out_tensor, 1.0f, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE,
+                                        conf_thresh, nms_thresh,
+                                        dets, MAX_DETECTIONS);
+            snprintf(interp, sizeof(interp), "kind=yolox_detections det_cnt=%d", det_cnt);
+        }
+        successful_frames++;
+        total_detections += det_cnt;
+
+        char in_md5[33] = {0};
+        if (in_virt && in_size > 0) {
+            yolo_calc_md5(in_virt, in_size, in_md5);
+        }
+        char out_md5[33] = {0};
+        yolo_calc_md5(rt->net_out.out_desc[0].virt, out_size, out_md5);
+        char out_valid_md5[33] = {0};
+        for (size_t r = 0; r < out_rows; r++) {
+            memcpy(out_valid + r * out_row_bytes,
+                   (const uint8_t *)rt->net_out.out_desc[0].virt + r * odim->pitch, out_row_bytes);
+        }
+        yolo_calc_md5(out_valid, out_rows * out_row_bytes, out_valid_md5);
+
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        struct tm tm;
+        gmtime_r(&tv.tv_sec, &tm);
+        char ts_buf[64];
+        strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+        printf("[TAP_GUEST_RECORD] sample=%d seq=%lu input_md5=%s output_md5=%s output_valid_md5=%s "
+               "in_size=%zu out_size=%zu "
+               "ticks=%u dag_id=%u in_handle=%u out_handle=%u cid=%u model_sha256=%s mono_s=%.6f timestamp=%s %s\n",
+               successful_frames, (unsigned long)rpc->active_seq, in_md5, out_md5, out_valid_md5,
+               in_size, out_size,
+               rpc->exec_ticks, target_dag_id, in_handle_id, out_handle_id, guest_cid, model_sha256,
+               get_time_sec(), ts_buf, interp);
+        fflush(stdout);
+
+        if (!resnet_mode && in_virt &&
+            (successful_frames == 1 || (det_cnt > 0 && successful_frames <= 10))) {
+            uint8_t *rgb_interleaved = malloc(YOLO_INPUT_SIZE * YOLO_INPUT_SIZE * 3);
+            if (rgb_interleaved) {
+                const uint8_t *r_p = (const uint8_t *)in_virt;
+                const uint8_t *g_p = r_p + (YOLO_INPUT_SIZE * YOLO_INPUT_SIZE);
+                const uint8_t *b_p = g_p + (YOLO_INPUT_SIZE * YOLO_INPUT_SIZE);
+                for (int p = 0; p < YOLO_INPUT_SIZE * YOLO_INPUT_SIZE; p++) {
+                    rgb_interleaved[p * 3 + 0] = r_p[p];
+                    rgb_interleaved[p * 3 + 1] = g_p[p];
+                    rgb_interleaved[p * 3 + 2] = b_p[p];
+                }
+                if (det_cnt > 0) {
+                    draw_detections(rgb_interleaved, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE, dets, det_cnt);
+                }
+                struct mem_write_ctx w_ctx = { 0 };
+                stbi_write_jpg_to_func(stbi_write_mem_cb, &w_ctx, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE, 3, rgb_interleaved, 88);
+                if (w_ctx.data && w_ctx.size > 0) {
+                    FILE *fp = fopen("/tmp/e5_scene.jpg", "wb");
+                    if (fp) {
+                        fwrite(w_ctx.data, 1, w_ctx.size, fp);
+                        fclose(fp);
+                    }
+                    fp = fopen("/tmp/e3_scene.jpg", "wb");
+                    if (fp) {
+                        fwrite(w_ctx.data, 1, w_ctx.size, fp);
+                        fclose(fp);
+                    }
+                    free(w_ctx.data);
+                }
+                free(rgb_interleaved);
+            }
+        }
+        pthread_mutex_unlock(&rt->lock);
+    }
+    free(out_valid);
+
+    live_tap_detach_close(fd_virt);
+
+    double t_end = get_time_sec();
+    double duration_s = t_end - t_start;
+
+    printf("\n=== Live Tap Guest Report ===\n");
+    printf("Total Live Inferences  : %d / %d\n", successful_frames, iters);
+    printf("Total Objects Detected : %d\n", total_detections);
+    printf("Average Throughput     : %.2f FPS (Duration: %.3f s)\n",
+           duration_s > 0 ? (double)successful_frames / duration_s : 0.0, duration_s);
+
+    return (successful_frames >= iters) ? 0 : 1;
+}
+
 static void print_usage(const char *prog)
 {
     printf("Usage: %s [OPTIONS]\n", prog);
     printf("\nOptions:\n");
-    printf("  --model <path>      Path to compiled YOLOX .bin model (default: %s)\n", DEFAULT_MODEL_PATH);
-    printf("  --bind <ip:port>    HTTP service bind address (default: %s)\n", DEFAULT_HTTP_BIND);
-    printf("  --image <path>      Run offline inference on image file\n");
-    printf("  --out <path>        Save annotated image with bounding boxes (CLI mode)\n");
-    printf("  --thresh <float>    Detection confidence threshold (default: 0.25)\n");
-    printf("  --nms <float>       NMS IoU threshold (default: 0.45)\n");
-    printf("  --help              Display this help message\n");
+    printf("  --model <path>              Path to compiled YOLOX .bin model (default: %s)\n", DEFAULT_MODEL_PATH);
+    printf("  --expected-model-sha256 <s> Expected 64-char SHA256 of model\n");
+    printf("  --bind <ip:port>            HTTP service bind address (default: %s)\n", DEFAULT_HTTP_BIND);
+    printf("  --image <path>              Run offline inference on image file\n");
+    printf("  --out <path>                Save annotated image with bounding boxes (CLI mode)\n");
+    printf("  --live-tap                  Run live camera tap streaming inference\n");
+    printf("  --iters <N>                 Number of iterations for live-tap mode (default: 300)\n");
+    printf("  --thresh <float>            Detection confidence threshold (default: 0.25)\n");
+    printf("  --nms <float>               NMS IoU threshold (default: 0.45)\n");
+    printf("  --no-frame-timeout-ms <N>   No-frame timeout in ms (default: 2000)\n");
+    printf("  --model-kind <yolox|resnet> Live-tap output interpretation (default: yolox)\n");
+    printf("  --override-in-handle <id>   Submit another handle ID (isolation negative test)\n");
+    printf("  --help                      Display this help message\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *model_path = NULL;
+    const char *expected_model_sha256 = NULL;
     const char *bind_addr = NULL;
     const char *image_path = NULL;
     const char *out_path = NULL;
+    bool live_tap = false;
+    int iters = 300;
     float conf_thresh = 0.25f;
     float nms_thresh = 0.45f;
+    int no_frame_timeout_ms = 2000;
+    uint32_t override_in_handle = 0;
+    int resnet_mode = 0;
 
     static struct option long_opts[] = {
-        { "model",   required_argument, 0, 'm' },
-        { "bind",    required_argument, 0, 'b' },
-        { "image",   required_argument, 0, 'i' },
-        { "out",     required_argument, 0, 'o' },
-        { "thresh",  required_argument, 0, 't' },
-        { "nms",     required_argument, 0, 'n' },
-        { "help",    no_argument,       0, 'h' },
+        { "model",                 required_argument, 0, 'm' },
+        { "expected-model-sha256", required_argument, 0, 1001 },
+        { "bind",                  required_argument, 0, 'b' },
+        { "image",                 required_argument, 0, 'i' },
+        { "out",                   required_argument, 0, 'o' },
+        { "live-tap",              no_argument,       0, 'l' },
+        { "iters",                 required_argument, 0, 'N' },
+        { "thresh",                required_argument, 0, 't' },
+        { "nms",                   required_argument, 0, 'n' },
+        { "no-frame-timeout-ms",   required_argument, 0, 1002 },
+        { "override-in-handle",    required_argument, 0, 1003 },
+        { "model-kind",            required_argument, 0, 1004 },
+        { "help",                  no_argument,       0, 'h' },
         { 0, 0, 0, 0 }
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "m:b:i:o:t:n:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:b:i:o:lN:t:n:h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'm': model_path = optarg; break;
+        case 1001: expected_model_sha256 = optarg; break;
         case 'b': bind_addr = optarg; break;
         case 'i': image_path = optarg; break;
         case 'o': out_path = optarg; break;
+        case 'l': live_tap = true; break;
+        case 'N': iters = atoi(optarg); break;
         case 't': conf_thresh = atof(optarg); break;
         case 'n': nms_thresh = atof(optarg); break;
+        case 1002: no_frame_timeout_ms = atoi(optarg); break;
+        case 1003: override_in_handle = (uint32_t)atoi(optarg); break;
+        case 1004:
+            if (strcmp(optarg, "resnet") == 0) {
+                resnet_mode = 1;
+            } else if (strcmp(optarg, "yolox") != 0) {
+                fprintf(stderr, "Error: --model-kind must be yolox or resnet\n");
+                return 1;
+            }
+            break;
         case 'h': print_usage(argv[0]); return 0;
         default: print_usage(argv[0]); return 1;
         }
@@ -1466,6 +2197,21 @@ int main(int argc, char **argv)
     if (!bind_addr) bind_addr = getenv("CAVALRY_HVM_YOLO_BIND");
     if (!bind_addr) bind_addr = DEFAULT_HTTP_BIND;
 
+    /* Verify Model Integrity */
+    char computed_sha256[65] = {0};
+    if (calc_file_sha256(model_path, computed_sha256) < 0) {
+        fprintf(stderr, "Error: cannot read model file to verify SHA256: %s\n", model_path);
+        return 1;
+    }
+    if (expected_model_sha256 && expected_model_sha256[0] != '\0') {
+        if (strcasecmp(computed_sha256, expected_model_sha256) != 0) {
+            fprintf(stderr, "Error: model sha256 mismatch (computed=%s, expected=%s)\n",
+                    computed_sha256, expected_model_sha256);
+            return 1;
+        }
+    }
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
     memset(&g_yolo, 0, sizeof(g_yolo));
     pthread_mutex_init(&g_yolo.lock, NULL);
     get_os_info(&g_yolo);
@@ -1473,7 +2219,7 @@ int main(int argc, char **argv)
     printf("===============================================================================\n");
     printf(" Ambarella Cavalry Edge AI &mdash; Dual-HVM YOLOX Service\n");
     printf(" Target OS: %s\n", g_yolo.os_pretty_name);
-    printf(" Model:     %s\n", model_path);
+    printf(" Model:     %s (SHA256: %s)\n", model_path, computed_sha256);
     printf("===============================================================================\n\n");
 
     /* 1. Open Cavalry device */
@@ -1533,19 +2279,28 @@ int main(int argc, char **argv)
     }
     g_yolo.run_dags = pnet->execute_ctx[0].run_dags;
 
-    printf("[PASS] YOLOX loaded and Path B registered successfully (subgraphs=%u, dags=%u)\n",
-           pnet->subgraph_exe_cnt, g_yolo.run_dags->dag_cnt);
+    printf("[PASS] %s model loaded and Path B registered successfully (subgraphs=%u, dags=%u)\n",
+           resnet_mode ? "ResNet" : "YOLOX", pnet->subgraph_exe_cnt, g_yolo.run_dags->dag_cnt);
 
     /* Warmup coprocessor once */
     printf("[*] Warming up VisORC coprocessor...\n");
     if (nnctrl_run_net(g_yolo.net_id, NULL, NULL, NULL, NULL) < 0) {
-        fprintf(stderr, "VisORC warmup failed\n");
-    } else {
-        printf("[PASS] VisORC warmup complete (ticks=%u)\n", g_yolo.run_dags->exec_total_ticks);
+        fprintf(stderr, "Fatal: VisORC warmup failed\n");
+        cavalry_mem_free(g_yolo.net_m.mem_size, g_yolo.net_m.phy_addr, g_yolo.net_m.virt_addr);
+        nnctrl_exit_net(g_yolo.net_id);
+        nnctrl_exit();
+        cavalry_mem_exit();
+        close(g_yolo.fd_cav);
+        return 1;
     }
+    printf("[PASS] VisORC warmup complete (ticks=%u)\n", g_yolo.run_dags->exec_total_ticks);
 
     int ret = 0;
-    if (image_path) {
+    if (live_tap) {
+        ret = run_live_tap_mode(&g_yolo, iters, conf_thresh, nms_thresh,
+                                no_frame_timeout_ms, computed_sha256,
+                                override_in_handle, resnet_mode);
+    } else if (image_path) {
         ret = run_cli_mode(&g_yolo, image_path, out_path, conf_thresh, nms_thresh);
     } else {
         ret = run_http_server(&g_yolo, bind_addr);

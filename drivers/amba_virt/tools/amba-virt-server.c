@@ -38,9 +38,175 @@
 #include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
 #include "virt_query.h"
+#include <uapi/specific/iav_ioctl.h>
+#include "iav_tap_abi.h"
+#include "iav_proxy.h"
 
 static pthread_mutex_t g_gdma_hw_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t msg_count = 0;
+
+static struct iav_tap_ring g_server_tap_ring;
+static int g_fd_iav = -1;
+static uint8_t *g_dsp_base = MAP_FAILED;
+static size_t g_dsp_len = 0;
+static pthread_t g_tap_thread;
+static volatile int g_tap_running = 0;
+
+/* Caller holds the ring lock. Prefer an EMPTY slot, else the oldest reusable one. */
+static struct iav_tap_slot *server_tap_pick_slot_locked(void)
+{
+	struct iav_tap_slot *pick = NULL;
+	int i;
+
+	for (i = 0; i < IAV_TAP_RING_SLOTS; i++) {
+		struct iav_tap_slot *slot = &g_server_tap_ring.slots[i];
+
+		if (!iav_proxy_slot_writable_locked(slot))
+			continue;
+		if (slot->state == IAV_TAP_SLOT_EMPTY)
+			return slot;
+		if (!pick || slot->seq < pick->seq)
+			pick = slot;
+	}
+	return pick;
+}
+
+static void *server_tap_producer_thread(void *arg)
+{
+	(void)arg;
+	uint64_t last_seen_seq = 0;
+	int paused = 0;
+
+	while (g_tap_running) {
+		if (access("/tmp/iav_tap_pause", F_OK) == 0) {
+			paused = 1;
+			usleep(20000);
+			continue;
+		}
+
+		struct iav_querydesc query;
+		memset(&query, 0, sizeof(query));
+		query.qid = IAV_DESC_CANVAS;
+		query.arg.canvas.canvas_id = 0;
+		query.arg.canvas.non_block_flag = 0;
+
+		if (ioctl(g_fd_iav, IAV_IOC_QUERY_DESC, &query) < 0) {
+			if (errno == EINTR) continue;
+			usleep(5000);
+			continue;
+		}
+
+		struct iav_yuv_cap *yuv = &query.arg.canvas.yuv;
+		uint32_t width = yuv->width;
+		uint32_t height = yuv->height;
+		uint32_t pitch = yuv->pitch;
+		uint32_t format = yuv->format;
+		uint64_t seq = yuv->seq_num;
+		unsigned long y_offset = yuv->y_addr_offset;
+		unsigned long uv_offset = yuv->uv_addr_offset;
+
+		uint32_t y_bytes = height * pitch;
+		uint32_t uv_bytes = (height / 2) * pitch;
+		uint32_t total_bytes = y_bytes + uv_bytes;
+
+		if (total_bytes > IAV_TAP_MAX_PAYLOAD_SIZE) {
+			usleep(10000);
+			continue;
+		}
+
+		if (seq <= last_seen_seq) {
+			usleep(2000);
+			continue;
+		}
+		if (last_seen_seq && seq > last_seen_seq + 1) {
+			iav_proxy_ring_lock();
+			g_server_tap_ring.missed_count += seq - last_seen_seq - 1;
+			iav_proxy_ring_unlock();
+			iav_proxy_log_producer_loss(paused ? "paused" : "missed",
+						    last_seen_seq + 1, seq - 1);
+		}
+		last_seen_seq = seq;
+		paused = 0;
+
+		iav_proxy_ring_lock();
+		struct iav_tap_slot *slot = server_tap_pick_slot_locked();
+		if (!slot) {
+			g_server_tap_ring.drop_count++;
+			iav_proxy_ring_unlock();
+			iav_proxy_log_producer_loss("ring_full", seq, seq);
+			continue;
+		}
+		slot->state = IAV_TAP_SLOT_WRITING;
+		iav_proxy_ring_unlock();
+
+		memcpy(slot->payload, g_dsp_base + y_offset, y_bytes);
+		memcpy(slot->payload + y_bytes, g_dsp_base + uv_offset, uv_bytes);
+
+		iav_proxy_ring_lock();
+		slot->seq = seq;
+		slot->generation++;
+		slot->dsp_pts = yuv->dsp_pts;
+		slot->mono_pts = yuv->mono_pts;
+		slot->width = width;
+		slot->height = height;
+		slot->pitch = pitch;
+		slot->fourcc = format;
+		slot->nbytes = total_bytes;
+		slot->refcount = 0;
+		slot->state = IAV_TAP_SLOT_PUBLISHED;
+		g_server_tap_ring.published_count++;
+		g_server_tap_ring.active_width = width;
+		g_server_tap_ring.active_height = height;
+		g_server_tap_ring.active_pitch = pitch;
+		g_server_tap_ring.active_fourcc = format;
+		iav_proxy_note_published_locked(seq);
+		iav_proxy_ring_unlock();
+	}
+	return NULL;
+}
+
+static void server_init_iav_tap(void)
+{
+	g_fd_iav = open("/dev/iav", O_RDWR);
+	if (g_fd_iav < 0) {
+		printf("amba-virt-server: /dev/iav not found (running without live camera tap)\n");
+		return;
+	}
+
+	struct iav_querymem qmem;
+	memset(&qmem, 0, sizeof(qmem));
+	qmem.mid = IAV_MEM_PARTITION;
+	qmem.arg.partition.pid = IAV_PART_DSP;
+	if (ioctl(g_fd_iav, IAV_IOC_QUERY_MEMBLOCK, &qmem) < 0) {
+		perror("IAV_IOC_QUERY_MEMBLOCK in server");
+		close(g_fd_iav);
+		g_fd_iav = -1;
+		return;
+	}
+
+	g_dsp_len = qmem.arg.partition.mem.length;
+	g_dsp_base = mmap(NULL, g_dsp_len, PROT_READ, MAP_SHARED,
+			  g_fd_iav, qmem.arg.partition.mem.addr);
+	if (g_dsp_base == MAP_FAILED) {
+		perror("mmap IAV_PART_DSP in server");
+		close(g_fd_iav);
+		g_fd_iav = -1;
+		return;
+	}
+
+	memset(&g_server_tap_ring, 0, sizeof(g_server_tap_ring));
+	iav_proxy_init(&g_server_tap_ring);
+
+	g_tap_running = 1;
+	if (pthread_create(&g_tap_thread, NULL, server_tap_producer_thread, NULL) == 0) {
+		pthread_detach(g_tap_thread);
+		printf("amba-virt-server: live camera frame tap producer started (DSP mem %zu MB mapped)\n",
+		       g_dsp_len / (1024 * 1024));
+	} else {
+		perror("pthread_create(server_tap_producer_thread)");
+	}
+}
+
 
 struct server_ctx {
 	int fd;
@@ -262,6 +428,24 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 			cavalry_proxy_handle_rpc(cav_req, cav_resp, rx->client_cid);
 		}
 		tx->len = sizeof(*out) + sizeof(*cav_resp);
+	} else if (in->type == AMBA_VIRT_MSG_IAV_TAP_REQ) {
+		struct iav_tap_rpc *tap_req;
+		struct iav_tap_rpc *tap_resp;
+
+		if (rx->len < sizeof(*in) + sizeof(*tap_req)) {
+			fprintf(stderr, "short iav tap rpc %u (expected >= %zu)\n",
+				rx->len, sizeof(*in) + sizeof(*tap_req));
+			return;
+		}
+		tap_req = (struct iav_tap_rpc *)(rx->data + sizeof(*in));
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_IAV_TAP_RESP;
+		out->seq = in->seq;
+		tap_resp = (struct iav_tap_rpc *)(tx->data + sizeof(*out));
+
+		iav_proxy_handle_rpc(tap_req, tap_resp, rx->client_cid);
+		tx->len = sizeof(*out) + sizeof(*tap_resp);
 	} else if (in->type == AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ) {
 		struct amba_virt_dev_bounds_req *b_req;
 		struct amba_virt_dev_bounds_resp *b_resp;
@@ -686,6 +870,7 @@ static void usage(const char *prog)
 	fprintf(stderr, "  -b, --enforce-path-b        Reject legacy Path A (VCAV_OP_RUN_DAGS) with -EPERM\n");
 	fprintf(stderr, "  -t, --tenant <cid>:<idx>    Pre-register tenant slice for vsock CID to index\n");
 	fprintf(stderr, "  -l, --lease <cid>:<lease>   Bind vsock CID to DMA32 lease index (0..3)\n");
+	fprintf(stderr, "  -c, --tap-cohort <n>        Live tap clients required before frames are consumed (default 1)\n");
 	fprintf(stderr, "  -h, --help                  Show this help message\n");
 }
 
@@ -785,6 +970,7 @@ int main(int argc, char **argv)
 		{"enforce-path-b", no_argument,       0, 'b'},
 		{"tenant",         required_argument, 0, 't'},
 		{"lease",          required_argument, 0, 'l'},
+		{"tap-cohort",     required_argument, 0, 'c'},
 		{"help",           no_argument,       0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -793,7 +979,7 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
-	while ((opt = getopt_long(argc, argv, "bt:l:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "bt:l:c:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'b':
 			enforce_path_b = 1;
@@ -813,6 +999,15 @@ int main(int argc, char **argv)
 				fprintf(stderr, "Invalid tenant format '%s' (expected <cid>:<tenant_idx>)\n", optarg);
 				return 1;
 			}
+			break;
+		}
+		case 'c': {
+			int cohort = atoi(optarg);
+			if (cohort < 1) {
+				fprintf(stderr, "Invalid tap cohort '%s'\n", optarg);
+				return 1;
+			}
+			iav_proxy_set_cohort((uint32_t)cohort);
 			break;
 		}
 		case 'l': {
@@ -859,6 +1054,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed to initialize cavalry proxy\n");
 		return 1;
 	}
+
+	server_init_iav_tap();
 
 	virt_mem_pool_init(0x40000000U); /* 1 GiB default BAR */
 	virt_acl_init();

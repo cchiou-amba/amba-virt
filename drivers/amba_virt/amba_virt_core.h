@@ -70,10 +70,13 @@ struct amba_virt_dev {
 
 	unsigned int vsock_cid;
 	unsigned int vsock_port;
+	unsigned int instance_id;
 };
 
 int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host);
+int amba_virt_core_init_instance(struct amba_virt_dev *dev, bool is_host, unsigned int instance_id);
 void amba_virt_core_exit(struct amba_virt_dev *dev);
+void amba_virt_core_exit_instance(struct amba_virt_dev *dev);
 
 int amba_virt_attach_shm(struct amba_virt_dev *dev);
 int amba_virt_mmap_window(struct amba_virt_dev *dev,

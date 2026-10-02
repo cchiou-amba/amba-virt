@@ -39,7 +39,15 @@ static unsigned long shm_size;
 module_param(shm_size, ulong, 0444);
 MODULE_PARM_DESC(shm_size, "Size in bytes of the physical shared window");
 
-static struct amba_virt_dev gdev;
+#define AMBA_VIRT_MAX_MINORS 8
+
+static unsigned int num_instances = 2;
+module_param(num_instances, uint, 0644);
+MODULE_PARM_DESC(num_instances, "Number of host amba_virt instances (default 2, max 8)");
+
+static struct amba_virt_dev g_devs[AMBA_VIRT_MAX_MINORS];
+static char g_shm_paths[AMBA_VIRT_MAX_MINORS][128];
+static unsigned int g_active_instances = 0;
 static bool cavalry_window_held;
 
 static int amba_virt_host_gdma_copy(struct amba_virt_dev *dev,
@@ -115,7 +123,7 @@ static int amba_virt_shm_open(struct inode *inode, struct file *filp)
 
 static int amba_virt_shm_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return amba_virt_mmap_slice(&gdev, vma, 0);
+	return amba_virt_mmap_slice(&g_devs[0], vma, 0);
 }
 
 static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -125,7 +133,7 @@ static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 
 	switch (cmd) {
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&gdev, 0, 0, 0x40000000ULL, &dmabuf_fd);
+		ret = amba_virt_export_dmabuf_slice(&g_devs[0], 0, 0, 0x40000000ULL, &dmabuf_fd);
 		if (ret)
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
@@ -163,7 +171,7 @@ static int amba_virt_shm0_open(struct inode *inode, struct file *filp)
 
 static int amba_virt_shm0_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return amba_virt_mmap_slice(&gdev, vma, 0);
+	return amba_virt_mmap_slice(&g_devs[0], vma, 0);
 }
 
 static long amba_virt_shm0_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -173,7 +181,7 @@ static long amba_virt_shm0_ioctl(struct file *filp, unsigned int cmd, unsigned l
 
 	switch (cmd) {
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&gdev, 0, 0, 0x40000000ULL, &dmabuf_fd);
+		ret = amba_virt_export_dmabuf_slice(&g_devs[0], 0, 0, 0x40000000ULL, &dmabuf_fd);
 		if (ret)
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
@@ -211,7 +219,7 @@ static int amba_virt_shm1_open(struct inode *inode, struct file *filp)
 
 static int amba_virt_shm1_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return amba_virt_mmap_slice(&gdev, vma, 1);
+	return amba_virt_mmap_slice(&g_devs[1], vma, 1);
 }
 
 static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -221,7 +229,7 @@ static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned l
 
 	switch (cmd) {
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&gdev, 1, 0x40000000ULL, 0x40000000ULL, &dmabuf_fd);
+		ret = amba_virt_export_dmabuf_slice(&g_devs[1], 1, 0x40000000ULL, 0x40000000ULL, &dmabuf_fd);
 		if (ret)
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
@@ -254,18 +262,19 @@ static int __init amba_virt_host_init(void)
 {
 	int (*window_get)(phys_addr_t *phys, size_t *size);
 	phys_addr_t window_end;
-	int ret;
+	int ret = 0;
+	unsigned int i;
 
 	if (vsock_port == 2000) {
 		pr_err("amba_virt: port 2000 is EVE VComLink; refusing\n");
 		return -EINVAL;
 	}
 
-	memset(&gdev, 0, sizeof(gdev));
+	memset(g_devs, 0, sizeof(g_devs));
 	if (!shm_phys) {
 		window_get = symbol_get(cavalry_user_window_get);
 		if (window_get) {
-			ret = window_get(&gdev.shm_phys, &gdev.shm_size);
+			ret = window_get(&g_devs[0].shm_phys, &g_devs[0].shm_size);
 			if (!ret)
 				cavalry_window_held = true;
 			else
@@ -273,15 +282,15 @@ static int __init amba_virt_host_init(void)
 		}
 	}
 	if (shm_phys) {
-		gdev.shm_phys = (phys_addr_t)shm_phys;
-		gdev.shm_size = shm_size;
+		g_devs[0].shm_phys = (phys_addr_t)shm_phys;
+		g_devs[0].shm_size = shm_size;
 	}
-	if (gdev.shm_phys &&
-	    (!gdev.shm_size || gdev.shm_size > U32_MAX ||
-	     !PAGE_ALIGNED(gdev.shm_phys) ||
-	     !PAGE_ALIGNED(gdev.shm_size) ||
-	     check_add_overflow(gdev.shm_phys,
-				(phys_addr_t)gdev.shm_size, &window_end))) {
+	if (g_devs[0].shm_phys &&
+	    (!g_devs[0].shm_size || g_devs[0].shm_size > U32_MAX ||
+	     !PAGE_ALIGNED(g_devs[0].shm_phys) ||
+	     !PAGE_ALIGNED(g_devs[0].shm_size) ||
+	     check_add_overflow(g_devs[0].shm_phys,
+				(phys_addr_t)g_devs[0].shm_size, &window_end))) {
 		pr_err("amba_virt: invalid physical shared window\n");
 		if (cavalry_window_held) {
 			symbol_put(cavalry_user_window_get);
@@ -289,50 +298,37 @@ static int __init amba_virt_host_init(void)
 		}
 		return -EINVAL;
 	}
-	if (gdev.shm_phys) {
-		gdev.gdma_copy = amba_virt_host_gdma_copy;
-	} else {
-		gdev.shm_path = shm_path;
-	}
 
-	ret = amba_virt_core_init(&gdev, true);
-	if (ret) {
-		if (cavalry_window_held) {
-			symbol_put(cavalry_user_window_get);
-			cavalry_window_held = false;
+	if (num_instances < 1) num_instances = 1;
+	if (num_instances > AMBA_VIRT_MAX_MINORS) num_instances = AMBA_VIRT_MAX_MINORS;
+
+	g_active_instances = 0;
+	for (i = 0; i < num_instances; i++) {
+		if (i == 0) {
+			g_devs[i].shm_path = shm_path;
+			if (g_devs[i].shm_phys)
+				g_devs[i].gdma_copy = amba_virt_host_gdma_copy;
+		} else {
+			snprintf(g_shm_paths[i], sizeof(g_shm_paths[i]), "/dev/shm/amba-virt-%u", i);
+			g_devs[i].shm_path = g_shm_paths[i];
 		}
-		return ret;
-	}
-	gdev.vsock_port = vsock_port;
 
-	if (gdev.shm_phys) {
-		ret = misc_register(&amba_virt_shm_miscdev);
+		ret = amba_virt_core_init_instance(&g_devs[i], true, i);
 		if (ret) {
-			pr_err("amba_virt: shared-window device failed %d\n", ret);
-			amba_virt_core_exit(&gdev);
-			if (cavalry_window_held) {
-				symbol_put(cavalry_user_window_get);
-				cavalry_window_held = false;
-			}
-			return ret;
+			pr_err("amba_virt: init instance %u failed %d\n", i, ret);
+			break;
 		}
-		ret = misc_register(&amba_virt_shm0_miscdev);
-		if (ret)
-			pr_warn("amba_virt: register shm0 failed %d (continuing)\n", ret);
-		ret = misc_register(&amba_virt_shm1_miscdev);
-		if (ret)
-			pr_warn("amba_virt: register shm1 failed %d (continuing)\n", ret);
+		g_devs[i].vsock_port = vsock_port + i;
+		ret = amba_virt_vsock_listen(&g_devs[i]);
+		if (ret) {
+			pr_warn("amba_virt: vsock listen for instance %u on port %u failed %d\n",
+				i, g_devs[i].vsock_port, ret);
+		}
+		amba_virt_attach_shm(&g_devs[i]);
+		g_active_instances++;
 	}
 
-	ret = amba_virt_vsock_listen(&gdev);
-	if (ret) {
-		pr_err("amba_virt: vsock listen failed %d\n", ret);
-		if (gdev.shm_phys) {
-			misc_deregister(&amba_virt_shm1_miscdev);
-			misc_deregister(&amba_virt_shm0_miscdev);
-			misc_deregister(&amba_virt_shm_miscdev);
-		}
-		amba_virt_core_exit(&gdev);
+	if (g_active_instances == 0) {
 		if (cavalry_window_held) {
 			symbol_put(cavalry_user_window_get);
 			cavalry_window_held = false;
@@ -340,32 +336,27 @@ static int __init amba_virt_host_init(void)
 		return ret;
 	}
 
-	/*
-	 * The backing file is created by the hypervisor when the HVM domain
-	 * starts, so at boot it usually does not exist yet. Loading must still
-	 * succeed: /dev/amba_virt has to be present before the NOHYPER
-	 * container is created, otherwise EVE injects nothing and the app comes
-	 * up silently missing the device. The window is picked up on first use.
-	 */
-	amba_virt_attach_shm(&gdev);
-	if (gdev.shm_phys)
-		pr_info("amba_virt host: physical shm %pa size %zu, vsock port %u\n",
-			&gdev.shm_phys, gdev.shm_size, vsock_port);
-	else
-		pr_info("amba_virt host: shm %s (%s), vsock port %u\n",
-			shm_path, gdev.shm_file ? "attached" : "pending",
-			vsock_port);
+	if (g_devs[0].shm_phys) {
+		ret = misc_register(&amba_virt_shm_miscdev);
+		if (ret)
+			pr_warn("amba_virt: register shm miscdev failed %d\n", ret);
+	}
+
+	pr_info("amba_virt host: %u instances active (/dev/amba_virt0..%u), vsock base port %u\n",
+		g_active_instances, g_active_instances - 1, vsock_port);
 	return 0;
 }
 
 static void __exit amba_virt_host_exit(void)
 {
-	if (gdev.shm_phys) {
-		misc_deregister(&amba_virt_shm1_miscdev);
-		misc_deregister(&amba_virt_shm0_miscdev);
+	unsigned int i;
+
+	if (g_devs[0].shm_phys) {
 		misc_deregister(&amba_virt_shm_miscdev);
 	}
-	amba_virt_core_exit(&gdev);
+	for (i = 0; i < g_active_instances; i++) {
+		amba_virt_core_exit_instance(&g_devs[i]);
+	}
 	if (cavalry_window_held)
 		symbol_put(cavalry_user_window_get);
 }

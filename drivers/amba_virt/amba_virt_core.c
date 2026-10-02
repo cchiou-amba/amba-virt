@@ -1116,13 +1116,24 @@ static char *amba_virt_devnode(const struct device *dev, umode_t *mode)
 	return NULL;
 }
 
-int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
+static dev_t g_devt_base = 0;
+static struct class *g_class = NULL;
+static int g_instance_count = 0;
+static DEFINE_MUTEX(g_class_mutex);
+
+#define AMBA_VIRT_MAX_MINORS 8
+
+int amba_virt_core_init_instance(struct amba_virt_dev *dev, bool is_host, unsigned int instance_id)
 {
-	int ret;
+	int ret = 0;
+
+	if (instance_id >= AMBA_VIRT_MAX_MINORS)
+		return -EINVAL;
 
 	dev->is_host = is_host;
+	dev->instance_id = instance_id;
 	dev->vsock_cid = AMBA_VIRT_VSOCK_CID;
-	dev->vsock_port = AMBA_VIRT_VSOCK_PORT;
+	dev->vsock_port = AMBA_VIRT_VSOCK_PORT + instance_id;
 	mutex_init(&dev->sock_lock);
 	mutex_init(&dev->send_lock);
 	mutex_init(&dev->recv_lock);
@@ -1134,46 +1145,79 @@ int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
 	INIT_LIST_HEAD(&dev->rx_queue);
 	memset(dev->conns, 0, sizeof(dev->conns));
 
-	ret = alloc_chrdev_region(&dev->devt, 0, 1, AMBA_VIRT_DEV_NAME);
-	if (ret)
-		return ret;
+	mutex_lock(&g_class_mutex);
+	if (!g_class) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+		g_class = class_create(THIS_MODULE, AMBA_VIRT_DEV_NAME);
+#else
+		g_class = class_create(AMBA_VIRT_DEV_NAME);
+#endif
+		if (IS_ERR(g_class)) {
+			ret = PTR_ERR(g_class);
+			g_class = NULL;
+			mutex_unlock(&g_class_mutex);
+			return ret;
+		}
+		g_class->devnode = amba_virt_devnode;
+	}
+
+	if (!g_devt_base) {
+		ret = alloc_chrdev_region(&g_devt_base, 0, AMBA_VIRT_MAX_MINORS, AMBA_VIRT_DEV_NAME);
+		if (ret) {
+			if (g_instance_count == 0) {
+				class_destroy(g_class);
+				g_class = NULL;
+			}
+			mutex_unlock(&g_class_mutex);
+			return ret;
+		}
+	}
+
+	dev->devt = MKDEV(MAJOR(g_devt_base), instance_id);
+	dev->class = g_class;
+	g_instance_count++;
+	mutex_unlock(&g_class_mutex);
+
 	cdev_init(&dev->cdev, &amba_virt_fops);
 	dev->cdev.owner = THIS_MODULE;
 	ret = cdev_add(&dev->cdev, dev->devt, 1);
 	if (ret)
-		goto err_unreg;
+		goto err_instance;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
-	dev->class = class_create(THIS_MODULE, AMBA_VIRT_DEV_NAME);
-#else
-	dev->class = class_create(AMBA_VIRT_DEV_NAME);
-#endif
-	if (IS_ERR(dev->class)) {
-		ret = PTR_ERR(dev->class);
-		dev->class = NULL;
-		goto err_cdev;
+	if (instance_id == 0) {
+		dev->device = device_create(g_class, NULL, dev->devt, NULL, AMBA_VIRT_DEV_NAME);
+	} else {
+		dev->device = device_create(g_class, NULL, dev->devt, NULL, "%s%u", AMBA_VIRT_DEV_NAME, instance_id);
 	}
-	dev->class->devnode = amba_virt_devnode;
-	dev->device = device_create(dev->class, NULL, dev->devt, NULL,
-				    AMBA_VIRT_DEV_NAME);
+
 	if (IS_ERR(dev->device)) {
 		ret = PTR_ERR(dev->device);
 		dev->device = NULL;
-		goto err_class;
+		goto err_cdev;
 	}
 	return 0;
 
-err_class:
-	class_destroy(dev->class);
-	dev->class = NULL;
 err_cdev:
 	cdev_del(&dev->cdev);
-err_unreg:
-	unregister_chrdev_region(dev->devt, 1);
+err_instance:
+	mutex_lock(&g_class_mutex);
+	g_instance_count--;
+	if (g_instance_count == 0) {
+		unregister_chrdev_region(g_devt_base, AMBA_VIRT_MAX_MINORS);
+		g_devt_base = 0;
+		class_destroy(g_class);
+		g_class = NULL;
+	}
+	mutex_unlock(&g_class_mutex);
 	return ret;
 }
 
-void amba_virt_core_exit(struct amba_virt_dev *dev)
+int amba_virt_core_init(struct amba_virt_dev *dev, bool is_host)
+{
+	return amba_virt_core_init_instance(dev, is_host, 0);
+}
+
+void amba_virt_core_exit_instance(struct amba_virt_dev *dev)
 {
 	int i;
 	struct amba_virt_rx_msg *msg, *tmp;
@@ -1217,24 +1261,37 @@ void amba_virt_core_exit(struct amba_virt_dev *dev)
 		dev->listen_sock = NULL;
 	}
 	if (dev->device) {
-		device_destroy(dev->class, dev->devt);
+		device_destroy(g_class, dev->devt);
 		dev->device = NULL;
-	}
-	if (dev->class) {
-		class_destroy(dev->class);
-		dev->class = NULL;
 	}
 	if (dev->devt) {
 		cdev_del(&dev->cdev);
-		unregister_chrdev_region(dev->devt, 1);
 		dev->devt = 0;
 	}
 	if (dev->shm_file) {
 		filp_close(dev->shm_file, NULL);
 		dev->shm_file = NULL;
 	}
-	/* Guest shm_iomem is pcim_iomap-managed by the PCI device. */
 	dev->shm_iomem = NULL;
+
+	mutex_lock(&g_class_mutex);
+	g_instance_count--;
+	if (g_instance_count == 0) {
+		if (g_devt_base) {
+			unregister_chrdev_region(g_devt_base, AMBA_VIRT_MAX_MINORS);
+			g_devt_base = 0;
+		}
+		if (g_class) {
+			class_destroy(g_class);
+			g_class = NULL;
+		}
+	}
+	mutex_unlock(&g_class_mutex);
+}
+
+void amba_virt_core_exit(struct amba_virt_dev *dev)
+{
+	amba_virt_core_exit_instance(dev);
 }
 
 #ifndef AMBA_VIRT_GUEST

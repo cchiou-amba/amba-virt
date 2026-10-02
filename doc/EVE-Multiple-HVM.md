@@ -157,7 +157,11 @@ EVE side (an extension of the N=1 patch, not a redesign):
 
 ## Decision
 
-Deferred. The N=1 patch is a strict subset of this work and none of it is
-throwaway: per-instance `shmpath` in `cbattr`, separate assignment groups, and
-ivshmem-aware overhead accounting are all required at N=1 and all generalise.
-The multi-instance module rewrite is the only genuinely new piece.
+Implemented and qualified. Multi-instance transport with per-minor character
+devices, isolated guest BAR partitions, CID-based vsock demultiplexing, and
+live camera tap distribution is physically qualified across dual HVM guests
+(Ubuntu YOLOX-S + Alpine YOLOX-S) in
+`plan/done/plan_multi_hvm_live_camera_yolo_resnet.md`. E4-r1 qualified the
+transport, E5-r4 qualified the devkit, and E7-r2 repeated the result on the pro
+board. E8-r1 supported functional stability but was not a verified ten-minute
+soak.

@@ -60,7 +60,22 @@ void cavalry_proxy_client_disconnect(uint32_t client_cid);
 int cavalry_proxy_start_drain(void);
 int cavalry_proxy_wait_drained(unsigned int timeout_ms);
 void cavalry_proxy_finish_drain(void);
-int cavalry_proxy_is_draining(void);
+int cavalry_proxy_get_handle_buffer(uint32_t handle_id,
+				    uint32_t client_cid,
+				    uint32_t session_id,
+				    void **out_virt,
+				    size_t *out_size);
+
+int cavalry_proxy_run_dag_with_handles(uint32_t dag_id,
+				       uint32_t in_handle_id,
+				       uint32_t out_handle_id,
+				       uint32_t client_cid,
+				       uint32_t session_id,
+				       uint32_t *out_ticks,
+				       uint32_t *out_rval,
+				       uint64_t *out_submit_ns,
+				       uint64_t *out_start_ns,
+				       uint64_t *out_finish_ns);
 
 #endif /* _CAVALRY_PROXY_H_ */
 

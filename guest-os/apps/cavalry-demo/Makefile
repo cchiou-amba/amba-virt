@@ -42,6 +42,7 @@ CFLAGS := -O2 -Wall \
 	-I$(ROOT_DIR)/drivers/cavalry/include/cavalry_v3 \
 	-I$(ROOT_DIR)/drivers/amba_virt/include \
 	-I$(ROOT_DIR)/drivers/amba_virt/include/uapi \
+	-I$(ROOT_DIR)/drivers/amba_virt/tools \
 	-I$(CAVALRY_DIR)/include \
 	-I$(MEM_DIR)/inc \
 	-I$(MEM_DIR)/src \
