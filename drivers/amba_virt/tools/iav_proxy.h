@@ -16,35 +16,14 @@
 #include <stddef.h>
 #include "iav_tap_abi.h"
 
-/* IAV Tap Proxy RPC opcodes */
-enum iav_tap_opcode {
-    IAV_TAP_OP_ATTACH         = 1,
-    IAV_TAP_OP_DETACH         = 2,
-    IAV_TAP_OP_RUN_LIVE_DAG   = 3,
-    IAV_TAP_OP_GET_STATUS     = 4,
-};
-
-struct iav_tap_rpc {
-    uint32_t opcode;         /* enum iav_tap_opcode */
-    int32_t  status;         /* 0 on success, -errno on error */
-    uint32_t client_cid;     /* Caller CID (or 0 for local host) */
-    uint32_t session_id;     /* Session token */
-    uint32_t dag_id;         /* Registered Path B DAG ID */
-    uint32_t in_handle_id;   /* Path B Input Handle ID */
-    uint32_t out_handle_id;  /* Path B Output Handle ID */
-    uint32_t active_seq;     /* Newest published sequence number */
-    uint32_t drop_count;     /* Frame drop count */
-    uint32_t exec_ticks;     /* VisORC hardware ticks */
-    uint32_t rval;           /* VisORC execution return code */
-    uint32_t width;          /* Frame width */
-    uint32_t height;         /* Frame height */
-    uint32_t pitch;          /* Frame pitch */
-    uint32_t fourcc;         /* Frame format */
-};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Lifecycle & Management */
 int iav_proxy_init(struct iav_tap_ring *ring);
 void iav_proxy_cleanup(void);
+void iav_proxy_set_bsb(int fd_iav, void *bsb_base, size_t bsb_len, int mjpeg_stream_id);
 
 int iav_proxy_attach(uint32_t client_cid, uint32_t session_id);
 int iav_proxy_detach(uint32_t client_cid, uint32_t session_id);
@@ -61,22 +40,22 @@ bool iav_proxy_slot_writable_locked(const struct iav_tap_slot *slot);
 void iav_proxy_note_published_locked(uint64_t seq);
 void iav_proxy_log_producer_loss(const char *reason, uint64_t first_seq, uint64_t last_seq);
 
-/* RPC Message Handling */
-int iav_proxy_handle_rpc(const struct iav_tap_rpc *req,
-                         struct iav_tap_rpc *resp,
-                         uint32_t client_cid);
+/* RPC Message Handling via Nanopb RpcEnvelope */
+int iav_proxy_handle_nanopb_rpc(const uint8_t *req_bytes,
+                                size_t req_len,
+                                uint8_t *resp_bytes,
+                                size_t max_resp_len,
+                                size_t *out_resp_len,
+                                uint32_t client_cid);
 
-/* Frame Binding & VisORC Step Execution */
-int iav_proxy_step_live_inference(uint32_t dag_id,
-                                  uint32_t in_handle_id,
-                                  uint32_t out_handle_id,
-                                  uint32_t client_cid,
-                                  uint32_t session_id,
-                                  uint64_t *out_seq,
-                                  uint32_t *out_ticks,
-                                  uint32_t *out_rval,
-                                  void *saved_input_copy,
-                                  void *saved_output_copy);
+/* Color conversion & Geometry helpers (for unit testing and pipeline processing) */
+int proxy_convert_nv12_to_yolox_rgb_640x640(const uint8_t *nv12_payload,
+                                            uint32_t width, uint32_t height, uint32_t pitch,
+                                            uint8_t *in_tensor);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _IAV_PROXY_H_ */
 

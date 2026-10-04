@@ -1,0 +1,7 @@
+amba_virt_demo
+amba_virt_demo-musl
+amba_virt_demo-alpine
+test_yolo
+test_yolo_arm64
+*.o
+*.bin

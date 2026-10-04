@@ -32,6 +32,25 @@
 #include "iav_proxy.h"
 #include "cavalry_proxy.h"
 
+#include <pb_decode.h>
+#include <pb_encode.h>
+#include "amba_virt.pb.h"
+
+#include <uapi/specific/iav_ioctl.h>
+
+static int g_fd_iav_bsb = -1;
+static uint8_t *g_bsb_base = NULL;
+static size_t g_bsb_len = 0;
+static int g_mjpeg_stream_id = 1;
+
+void iav_proxy_set_bsb(int fd_iav, void *bsb_base, size_t bsb_len, int mjpeg_stream_id)
+{
+    g_fd_iav_bsb = fd_iav;
+    g_bsb_base = (uint8_t *)bsb_base;
+    g_bsb_len = bsb_len;
+    g_mjpeg_stream_id = mjpeg_stream_id;
+}
+
 #define MAX_IAV_TAP_CLIENTS 8
 
 /* Standalone MD5 for Host Proxy Output Tensor Verification */
@@ -224,10 +243,15 @@ static void proxy_calc_md5(const void *buf, size_t size, char *out_hex)
  * Scales NV12 (Y + interleaved UV) camera frames into 1x3x640x640 Planar RGB.
  * Preserves 16:9 aspect ratio (640x360), pads remaining rows (360..639) with 114.
  */
-static void proxy_convert_nv12_to_yolox_rgb_640x640(const uint8_t *nv12_payload,
-                                                    uint32_t width, uint32_t height, uint32_t pitch,
-                                                    uint8_t *in_tensor)
+int proxy_convert_nv12_to_yolox_rgb_640x640(const uint8_t *nv12_payload,
+                                            uint32_t width, uint32_t height, uint32_t pitch,
+                                            uint8_t *in_tensor)
 {
+    if (!nv12_payload || !in_tensor)
+        return -EINVAL;
+    if (width == 0 || height == 0 || pitch < width)
+        return -EINVAL;
+
     memset(in_tensor, 114, 3 * 640 * 640);
 
     uint8_t *r_plane = in_tensor;
@@ -274,6 +298,8 @@ static void proxy_convert_nv12_to_yolox_rgb_640x640(const uint8_t *nv12_payload,
             b_plane[out_idx] = (uint8_t)(blue < 0 ? 0 : (blue > 255 ? 255 : blue));
         }
     }
+
+    return 0;
 }
 
 #define RESNET_INPUT_SIZE   224
@@ -294,8 +320,22 @@ static void proxy_convert_nv12_to_resnet_fp16_224(const uint8_t *nv12_payload,
 {
     uint16_t fp16_lut[256];
     for (int v = 0; v < 256; v++) {
+#if defined(__arm__) || defined(__aarch64__)
         __fp16 h = (__fp16)(float)v;
         memcpy(&fp16_lut[v], &h, sizeof(h));
+#else
+        if (v == 0) {
+            fp16_lut[v] = 0;
+        } else {
+            uint32_t f_bits;
+            float f_val = (float)v;
+            memcpy(&f_bits, &f_val, sizeof(f_bits));
+            uint32_t sign = (f_bits >> 16) & 0x8000;
+            int32_t exp = ((f_bits >> 23) & 0xFF) - 127 + 15;
+            uint32_t frac = (f_bits >> 13) & 0x03FF;
+            fp16_lut[v] = (uint16_t)(sign | (exp << 10) | frac);
+        }
+#endif
     }
 
     memset(in_tensor, 0, RESNET_INPUT_BYTES);
@@ -354,12 +394,14 @@ struct iav_tap_client {
     uint32_t cid;
     uint32_t session_id;
     uint64_t last_seq;
+    uint64_t drop_count;
     uint64_t consumed;
     uint64_t last_active_us;
 };
 
 static struct iav_tap_ring *g_tap_ring = NULL;
 static pthread_mutex_t g_tap_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_tap_cond = PTHREAD_COND_INITIALIZER;
 static struct iav_tap_client g_clients[MAX_IAV_TAP_CLIENTS];
 static uint32_t g_tap_cohort = 1;
 static uint64_t g_newest_seq = 0;
@@ -398,25 +440,8 @@ static int proxy_active_clients_locked(void)
 /* Return every published slot no active client still needs. Caller holds g_tap_mutex. */
 static void proxy_sweep_slots_locked(void)
 {
-    uint64_t floor_seq = UINT64_MAX;
-    bool any = false;
-
-    for (int i = 0; i < MAX_IAV_TAP_CLIENTS; i++) {
-        if (g_clients[i].in_use) {
-            any = true;
-            if (g_clients[i].last_seq < floor_seq)
-                floor_seq = g_clients[i].last_seq;
-        }
-    }
-
-    for (int i = 0; i < IAV_TAP_RING_SLOTS; i++) {
-        struct iav_tap_slot *slot = &g_tap_ring->slots[i];
-
-        if (slot->state != IAV_TAP_SLOT_PUBLISHED || slot->refcount != 0)
-            continue;
-        if (!any || slot->seq <= floor_seq)
-            slot->state = IAV_TAP_SLOT_EMPTY;
-    }
+    /* In 1-to-N decoupled broadcast, published slots remain published
+     * until overwritten by the producer ring wrap-around. */
 }
 
 static void proxy_drop_client_locked(int i, const char *reason)
@@ -468,8 +493,9 @@ bool iav_proxy_slot_writable_locked(const struct iav_tap_slot *slot)
 {
     if (slot->state == IAV_TAP_SLOT_EMPTY)
         return true;
-    return slot->state == IAV_TAP_SLOT_PUBLISHED && slot->refcount == 0 &&
-        proxy_active_clients_locked() == 0;
+    if (slot->state == IAV_TAP_SLOT_PUBLISHED && slot->refcount == 0)
+        return true;
+    return false;
 }
 
 /* Caller holds the ring lock. */
@@ -477,6 +503,7 @@ void iav_proxy_note_published_locked(uint64_t seq)
 {
     if (seq > g_newest_seq)
         g_newest_seq = seq;
+    pthread_cond_broadcast(&g_tap_cond);
 }
 
 void iav_proxy_log_producer_loss(const char *reason, uint64_t first_seq, uint64_t last_seq)
@@ -602,104 +629,24 @@ int iav_proxy_active_client_count(void)
     return cnt;
 }
 
-int iav_proxy_handle_rpc(const struct iav_tap_rpc *req,
-                         struct iav_tap_rpc *resp,
-                         uint32_t client_cid)
-{
-    if (!req || !resp) return -EINVAL;
 
-    memset(resp, 0, sizeof(*resp));
-    resp->opcode = req->opcode;
-    resp->client_cid = client_cid;
-    resp->session_id = req->session_id;
 
-    switch (req->opcode) {
-    case IAV_TAP_OP_ATTACH:
-        resp->status = iav_proxy_attach(client_cid, req->session_id);
-        break;
-
-    case IAV_TAP_OP_DETACH:
-        resp->status = iav_proxy_detach(client_cid, req->session_id);
-        break;
-
-    case IAV_TAP_OP_GET_STATUS:
-        pthread_mutex_lock(&g_tap_mutex);
-        if (g_tap_ring) {
-            resp->status = 0;
-            resp->width = g_tap_ring->active_width;
-            resp->height = g_tap_ring->active_height;
-            resp->pitch = g_tap_ring->active_pitch;
-            resp->fourcc = g_tap_ring->active_fourcc;
-            resp->drop_count = (uint32_t)g_tap_ring->drop_count;
-            resp->active_seq = (uint32_t)g_tap_ring->published_count;
-        } else {
-            resp->status = -ENODEV;
-        }
-        pthread_mutex_unlock(&g_tap_mutex);
-        break;
-
-    case IAV_TAP_OP_RUN_LIVE_DAG: {
-        uint64_t seq = 0;
-        uint32_t ticks = 0;
-        uint32_t rval = 0;
-        resp->status = iav_proxy_step_live_inference(req->dag_id,
-                                                    req->in_handle_id,
-                                                    req->out_handle_id,
-                                                    client_cid,
-                                                    req->session_id,
-                                                    &seq,
-                                                    &ticks,
-                                                    &rval,
-                                                    NULL,
-                                                    NULL);
-        resp->active_seq = (uint32_t)seq;
-        resp->exec_ticks = ticks;
-        resp->rval = rval;
-        break;
-    }
-
-    default:
-        resp->status = -ENOSYS;
-        break;
-    }
-
-    return 0;
-}
-
-/*
- * Step Live Inference:
- * 1. Select the oldest PUBLISHED frame newer than this client's last frame.
- *    Never hand back a frame the client already consumed.
- * 2. Hold the slot while transforming it into the Path B input handle.
- * 3. Release the slot before VisORC runs; it returns to EMPTY once every
- *    attached client has consumed it.
- * 4. Dispatch DAG execution to real /dev/cavalry under visorc_hw_mutex.
- */
-int iav_proxy_step_live_inference(uint32_t dag_id,
-                                  uint32_t in_handle_id,
-                                  uint32_t out_handle_id,
-                                  uint32_t client_cid,
-                                  uint32_t session_id,
-                                  uint64_t *out_seq,
-                                  uint32_t *out_ticks,
-                                  uint32_t *out_rval,
-                                  void *saved_input_copy,
-                                  void *saved_output_copy)
+static int iav_proxy_step_live_inference_internal(const ambarella_virt_v1_IavTapRunRequest *req,
+                                                  uint32_t client_cid,
+                                                  void *in_virt,
+                                                  size_t in_size,
+                                                  void *out_virt,
+                                                  size_t out_size,
+                                                  void *jpeg_virt,
+                                                  size_t jpeg_handle_size,
+                                                  ambarella_virt_v1_IavTapRunResponse *resp,
+                                                  char *err_detail,
+                                                  size_t err_detail_len)
 {
     if (!g_tap_ring) return -ENODEV;
 
-    /* 1. Retrieve handle input buffer pointer */
-    void *in_virt = NULL;
-    size_t in_size = 0;
-    int ret = cavalry_proxy_get_handle_buffer(in_handle_id, client_cid, session_id,
-                                             &in_virt, &in_size);
-    if (ret < 0) {
-        fprintf(stderr, "iav_proxy: failed to get input handle %u for cid %u (ret=%d)\n",
-                in_handle_id, client_cid, ret);
-        return ret;
-    }
-
     if (access("/tmp/iav_tap_pause", F_OK) == 0) {
+        resp->status = -EAGAIN;
         return -EAGAIN;
     }
 
@@ -711,7 +658,7 @@ int iav_proxy_step_live_inference(uint32_t dag_id,
     int self = -1;
     for (int i = 0; i < MAX_IAV_TAP_CLIENTS; i++) {
         if (g_clients[i].in_use && g_clients[i].cid == client_cid &&
-            g_clients[i].session_id == session_id) {
+            g_clients[i].session_id == req->session_id) {
             client = &g_clients[i];
             self = i;
             break;
@@ -719,137 +666,426 @@ int iav_proxy_step_live_inference(uint32_t dag_id,
     }
 
     if (!client) {
-        pthread_mutex_unlock(&g_tap_mutex);
-        return -ENOTCONN;
+        int free_slot = -1;
+        for (int i = 0; i < MAX_IAV_TAP_CLIENTS; i++) {
+            if (!g_clients[i].in_use) {
+                free_slot = i;
+                break;
+            }
+        }
+        if (free_slot < 0) {
+            pthread_mutex_unlock(&g_tap_mutex);
+            snprintf(err_detail, err_detail_len, "Max tap clients (%d) exceeded", MAX_IAV_TAP_CLIENTS);
+            return -EBUSY;
+        }
+        client = &g_clients[free_slot];
+        client->in_use = true;
+        client->cid = client_cid;
+        client->session_id = req->session_id;
+        client->consumed = 0;
+        client->drop_count = 0;
+        client->last_seq = g_newest_seq > 0 ? (g_newest_seq - 1) : 0;
+        self = free_slot;
     }
+
     client->last_active_us = now_us;
     proxy_evict_idle_locked(now_us, self);
 
     if (client->consumed == 0 && proxy_active_clients_locked() < (int)g_tap_cohort) {
         pthread_mutex_unlock(&g_tap_mutex);
+        resp->status = -EAGAIN;
         return -EAGAIN;
     }
 
     struct iav_tap_slot *target_slot = NULL;
-    for (int i = 0; i < IAV_TAP_RING_SLOTS; i++) {
-        struct iav_tap_slot *slot = &g_tap_ring->slots[i];
+    int wait_attempts = 0;
+    while (!target_slot && wait_attempts++ < 2) {
+        if (req->take_latest) {
+            for (int i = 0; i < IAV_TAP_RING_SLOTS; i++) {
+                struct iav_tap_slot *slot = &g_tap_ring->slots[i];
+                if (slot->state != IAV_TAP_SLOT_PUBLISHED)
+                    continue;
+                if (client->last_seq > 0 && slot->seq <= client->last_seq)
+                    continue;
+                if (!target_slot || slot->seq > target_slot->seq)
+                    target_slot = slot;
+            }
+            if (target_slot) {
+                if (client->last_seq > 0 && target_slot->seq > client->last_seq + 1) {
+                    client->drop_count += (target_slot->seq - (client->last_seq + 1));
+                }
+            }
+        } else {
+            if (client->last_seq == 0) {
+                /* Do not treat sequence 0 as a request for the oldest frame */
+                client->last_seq = g_newest_seq > 0 ? (g_newest_seq - 1) : 0;
+            }
+            for (int i = 0; i < IAV_TAP_RING_SLOTS; i++) {
+                struct iav_tap_slot *slot = &g_tap_ring->slots[i];
+                if (slot->state != IAV_TAP_SLOT_PUBLISHED || slot->seq <= client->last_seq)
+                    continue;
+                if (!target_slot || slot->seq < target_slot->seq)
+                    target_slot = slot;
+            }
+        }
 
-        if (slot->state != IAV_TAP_SLOT_PUBLISHED || slot->seq <= client->last_seq)
-            continue;
-        if (!target_slot || slot->seq < target_slot->seq)
-            target_slot = slot;
+        if (target_slot)
+            break;
+
+        /* Wait up to 40ms for the next 30 Hz sensor frame to arrive */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 40000000L; /* 40 ms */
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        int rc = pthread_cond_timedwait(&g_tap_cond, &g_tap_mutex, &ts);
+        if (rc != 0) {
+            break; /* Timed out */
+        }
     }
 
     if (!target_slot) {
+        resp->status = -EAGAIN;
+        resp->active_seq = client->last_seq;
+        resp->drop_count = client->drop_count + g_tap_ring->drop_count;
         pthread_mutex_unlock(&g_tap_mutex);
         return -EAGAIN;
     }
 
-    target_slot->state = IAV_TAP_SLOT_HELD;
     target_slot->refcount++;
     uint64_t captured_seq = target_slot->seq;
-    uint32_t nbytes = target_slot->nbytes;
+    uint32_t slot_w = target_slot->width;
+    uint32_t slot_h = target_slot->height;
+    uint32_t slot_pitch = target_slot->pitch;
+    uint32_t slot_fourcc = target_slot->fourcc;
 
     /* Fill tenant input handle with live camera frame */
-    int transform_ok = target_slot->width > 0 && target_slot->height > 0;
+    int transform_ok = slot_w > 0 && slot_h > 0;
     if (transform_ok && in_size == 3 * 640 * 640) {
-        proxy_convert_nv12_to_yolox_rgb_640x640(target_slot->payload,
-                                                target_slot->width,
-                                                target_slot->height,
-                                                target_slot->pitch,
-                                                (uint8_t *)in_virt);
+        if (proxy_convert_nv12_to_yolox_rgb_640x640(target_slot->payload,
+                                                    slot_w, slot_h, slot_pitch,
+                                                    (uint8_t *)in_virt) != 0) {
+            transform_ok = 0;
+        }
     } else if (transform_ok && in_size == RESNET_INPUT_BYTES) {
         proxy_convert_nv12_to_resnet_fp16_224(target_slot->payload,
-                                              target_slot->width,
-                                              target_slot->height,
-                                              target_slot->pitch,
+                                              slot_w, slot_h, slot_pitch,
                                               (uint16_t *)in_virt);
     } else {
         transform_ok = 0;
     }
+
     if (!transform_ok) {
-        uint32_t slot_w = target_slot->width, slot_h = target_slot->height;
         target_slot->refcount--;
-        target_slot->state = IAV_TAP_SLOT_PUBLISHED;
         pthread_mutex_unlock(&g_tap_mutex);
         proxy_host_log("[TAP_RUN_ERROR] seq=%llu cid=%u reason=no_transform in_size=%zu "
-                       "width=%u height=%u nbytes=%u\n",
+                       "width=%u height=%u\n",
                        (unsigned long long)captured_seq, client_cid, in_size,
-                       slot_w, slot_h, nbytes);
+                       slot_w, slot_h);
+        snprintf(err_detail, err_detail_len, "No transform for in_size %zu with %ux%u",
+                 in_size, slot_w, slot_h);
         return -EINVAL;
     }
-    if (saved_input_copy)
-        memcpy(saved_input_copy, in_virt, in_size);
+
+    /* Ingest DSP hardware-compressed JPEG into guest-owned handle if requested */
+    if (req->want_jpeg) {
+        if (target_slot->jpeg_size > 0) {
+            uint32_t hw_jpeg_size = target_slot->jpeg_size;
+            if (hw_jpeg_size > (uint32_t)req->jpeg_capacity || hw_jpeg_size > jpeg_handle_size) {
+                target_slot->refcount--;
+                pthread_mutex_unlock(&g_tap_mutex);
+                snprintf(err_detail, err_detail_len,
+                         "Hardware JPEG size %u exceeds capacity %u (handle size %zu)",
+                         hw_jpeg_size, req->jpeg_capacity, jpeg_handle_size);
+                return -ENOSPC;
+            }
+            memcpy(jpeg_virt, target_slot->jpeg_payload, hw_jpeg_size);
+            resp->jpeg_handle_id = req->jpeg_handle_id;
+            resp->jpeg_len = hw_jpeg_size;
+        } else {
+#ifdef BUILD_HOST_UNIT_TEST
+            /* Mock JPEG payload ONLY for hermetic host unit testing without /dev/iav */
+            static const uint8_t mock_jpeg[] = {
+                0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F',
+                0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+                0xFF, 0xDB, 0x00, 0x43, 0x00,
+                0x10, 0x0B, 0x0C, 0x0E, 0x0C, 0x0A, 0x10, 0x0E,
+                0x0D, 0x0E, 0x12, 0x11, 0x10, 0x13, 0x18, 0x28,
+                0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x04, 0x38, 0x07, 0x80, 0x01, 0x01, 0x22, 0x00,
+                0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+                0xAA, 0x55, 0xAA, 0x55,
+                0xFF, 0xD9
+            };
+            uint32_t mock_len = (uint32_t)sizeof(mock_jpeg);
+            if (mock_len > (uint32_t)req->jpeg_capacity || mock_len > jpeg_handle_size) {
+                target_slot->refcount--;
+                pthread_mutex_unlock(&g_tap_mutex);
+                snprintf(err_detail, err_detail_len,
+                         "Mock JPEG size %u exceeds capacity %u (handle size %zu)",
+                         mock_len, req->jpeg_capacity, jpeg_handle_size);
+                return -ENOSPC;
+            }
+            memcpy(jpeg_virt, mock_jpeg, mock_len);
+            resp->jpeg_handle_id = req->jpeg_handle_id;
+            resp->jpeg_len = mock_len;
+#else
+            /* Production live stream: NEVER emit fake mock JPEGs. If DSP hardware frame was not ready, return 0 */
+            resp->jpeg_handle_id = 0;
+            resp->jpeg_len = 0;
+#endif
+        }
+    } else {
+        resp->jpeg_handle_id = 0;
+        resp->jpeg_len = 0;
+    }
 
     /* Publish-then-copy contract: Drop refcount BEFORE DAG run */
     target_slot->refcount--;
-    target_slot->state = IAV_TAP_SLOT_PUBLISHED;
     client->last_seq = captured_seq;
     client->consumed++;
-    uint64_t ring_published = g_tap_ring->published_count;
+    uint64_t client_drops = client->drop_count;
     uint64_t ring_drops = g_tap_ring->drop_count;
+    uint64_t ring_published = g_tap_ring->published_count;
     uint64_t ring_missed = g_tap_ring->missed_count;
     proxy_sweep_slots_locked();
     pthread_mutex_unlock(&g_tap_mutex);
-
-    if (out_seq) *out_seq = captured_seq;
 
     /* 2. Execute registered DAG on hardware accelerator */
     uint32_t ticks = 0;
     uint32_t rval = 0;
     uint64_t sub_ns = 0, start_ns = 0, fin_ns = 0;
-    ret = cavalry_proxy_run_dag_with_handles(dag_id, in_handle_id, out_handle_id,
-                                             client_cid, session_id,
-                                             &ticks, &rval,
-                                             &sub_ns, &start_ns, &fin_ns);
+    int ret = cavalry_proxy_run_dag_with_handles(req->dag_id, req->in_handle_id, req->out_handle_id,
+                                                 client_cid, req->session_id,
+                                                 &ticks, &rval,
+                                                 &sub_ns, &start_ns, &fin_ns);
     if (ret < 0) {
         fprintf(stderr, "iav_proxy: cavalry_proxy_run_dag_with_handles failed (ret=%d)\n", ret);
         proxy_host_log("[TAP_RUN_ERROR] seq=%llu cid=%u session=%u dag_id=%u ret=%d rval=0x%x\n",
-                       (unsigned long long)captured_seq, client_cid, session_id, dag_id, ret, rval);
+                       (unsigned long long)captured_seq, client_cid, req->session_id,
+                       req->dag_id, ret, rval);
+        snprintf(err_detail, err_detail_len, "cavalry_proxy_run_dag_with_handles failed: %d", ret);
         return ret;
     }
 
-    if (out_ticks) *out_ticks = ticks;
-    if (out_rval) *out_rval = rval;
+    resp->status = 0;
+    resp->active_seq = captured_seq;
+    resp->drop_count = client_drops + ring_drops;
+    resp->exec_ticks = ticks;
+    resp->cavalry_rval = rval;
+    resp->width = slot_w;
+    resp->height = slot_h;
+    resp->pitch = slot_pitch;
+    resp->fourcc = slot_fourcc;
 
-    /* 3. Retrieve output handle buffer and compute output MD5 */
+    /* 3. Output MD5 and logging (enabled only when /tmp/iav_proxy_md5 exists) */
+    if (access("/tmp/iav_proxy_md5", F_OK) == 0) {
+        char host_md5[33] = {0};
+        if (out_virt && out_size > 0) {
+            proxy_calc_md5(out_virt, out_size, host_md5);
+        }
+        char in_md5[33] = {0};
+        if (in_virt && in_size > 0) {
+            proxy_calc_md5(in_virt, in_size, in_md5);
+        }
+
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        struct tm tm;
+        gmtime_r(&tv.tv_sec, &tm);
+        char ts_buf[64];
+        strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+        proxy_host_log("[TAP_HOST_RECORD] seq=%llu cid=%u session=%u input_md5=%s output_md5=%s "
+                       "in_size=%zu out_size=%zu ticks=%u rval=0x%x dag_id=%u in_handle=%u out_handle=%u "
+                       "published=%llu drops=%llu missed=%llu jpeg_len=%u "
+                       "submit_ns=%llu start_ns=%llu finish_ns=%llu timestamp=%s\n",
+                       (unsigned long long)captured_seq, client_cid, req->session_id, in_md5, host_md5,
+                       in_size, out_size, ticks, rval, req->dag_id, req->in_handle_id, req->out_handle_id,
+                       (unsigned long long)ring_published, (unsigned long long)resp->drop_count,
+                       (unsigned long long)ring_missed, resp->jpeg_len,
+                       (unsigned long long)sub_ns, (unsigned long long)start_ns,
+                       (unsigned long long)fin_ns, ts_buf);
+    }
+
+    return 0;
+}
+
+int iav_proxy_handle_nanopb_rpc(const uint8_t *req_bytes,
+                                size_t req_len,
+                                uint8_t *resp_bytes,
+                                size_t max_resp_len,
+                                size_t *out_resp_len,
+                                uint32_t client_cid)
+{
+    if (!req_bytes || !resp_bytes || !out_resp_len)
+        return -EINVAL;
+
+    pb_istream_t istream = pb_istream_from_buffer(req_bytes, req_len);
+    ambarella_virt_v1_RpcEnvelope req_env = ambarella_virt_v1_RpcEnvelope_init_zero;
+    ambarella_virt_v1_RpcEnvelope resp_env = ambarella_virt_v1_RpcEnvelope_init_zero;
+    const ambarella_virt_v1_IavTapRunRequest *req = NULL;
+    ambarella_virt_v1_IavTapRunResponse *resp = NULL;
+    void *in_virt = NULL;
+    size_t in_size = 0;
     void *out_virt = NULL;
     size_t out_size = 0;
-    char host_md5[33] = {0};
-    if (out_handle_id) {
-        if (cavalry_proxy_get_handle_buffer(out_handle_id, client_cid, session_id,
-                                            &out_virt, &out_size) == 0 && out_virt && out_size > 0) {
-            proxy_calc_md5(out_virt, out_size, host_md5);
-            if (saved_output_copy) {
-                memcpy(saved_output_copy, out_virt, out_size);
-            }
+    void *jpeg_virt = NULL;
+    size_t jpeg_handle_size = 0;
+    int ret = 0;
+
+    if (!pb_decode(&istream, ambarella_virt_v1_RpcEnvelope_fields, &req_env)) {
+        resp_env.api_major = 1;
+        resp_env.api_minor = 0;
+        resp_env.request_id = 0;
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -EBADMSG;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Protobuf decode failed: %s", PB_GET_ERROR(&istream));
+        goto encode_out;
+    }
+
+    resp_env.api_major = 1;
+    resp_env.api_minor = 0;
+    resp_env.request_id = req_env.request_id;
+
+    if (req_env.api_major != 1) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -EPROTONOSUPPORT;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Unsupported api_major %u (expected 1)", req_env.api_major);
+        goto encode_out;
+    }
+
+    if (req_env.which_body != ambarella_virt_v1_RpcEnvelope_iav_tap_run_request_tag) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -EINVAL;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Expected iav_tap_run_request body");
+        goto encode_out;
+    }
+
+    req = &req_env.body.iav_tap_run_request;
+
+    if (req->session_id == 0) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -EINVAL;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Invalid session_id 0");
+        goto encode_out;
+    }
+
+    if (req->in_handle_id == 0 || req->out_handle_id == 0 ||
+        req->in_handle_id == req->out_handle_id) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -EINVAL;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Invalid in/out handle ids (in=%u out=%u)", req->in_handle_id, req->out_handle_id);
+        goto encode_out;
+    }
+
+    /* Validate model input handle */
+    ret = cavalry_proxy_get_handle_buffer(req->in_handle_id, client_cid, req->session_id,
+                                          &in_virt, &in_size);
+    if (ret < 0 || !in_virt) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = ret < 0 ? ret : -EINVAL;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Failed to get in_handle_id %u for cid %u", req->in_handle_id, client_cid);
+        goto encode_out;
+    }
+
+    /* Requirement: Keep YOLOX input handle at 1,228,800 bytes */
+    if (in_size != 3 * 640 * 640 && in_size != RESNET_INPUT_BYTES) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -EINVAL;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Invalid in_handle size %zu (expected 1228800)", in_size);
+        goto encode_out;
+    }
+
+    /* Validate model output handle */
+    ret = cavalry_proxy_get_handle_buffer(req->out_handle_id, client_cid, req->session_id,
+                                          &out_virt, &out_size);
+    if (ret < 0 || !out_virt) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = ret < 0 ? ret : -EINVAL;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Failed to get out_handle_id %u for cid %u", req->out_handle_id, client_cid);
+        goto encode_out;
+    }
+
+    /* Validate JPEG destination handle if want_jpeg is requested */
+    if (req->want_jpeg) {
+        if (req->jpeg_handle_id == 0 ||
+            req->jpeg_handle_id == req->in_handle_id ||
+            req->jpeg_handle_id == req->out_handle_id) {
+            resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+            resp_env.body.error.status = -EINVAL;
+            snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                     "jpeg_handle_id %u must be distinct from DAG in/out ports (%u, %u)",
+                     req->jpeg_handle_id, req->in_handle_id, req->out_handle_id);
+            goto encode_out;
+        }
+
+        ret = cavalry_proxy_get_handle_buffer(req->jpeg_handle_id, client_cid, req->session_id,
+                                              &jpeg_virt, &jpeg_handle_size);
+        if (ret < 0 || !jpeg_virt) {
+            resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+            resp_env.body.error.status = ret < 0 ? ret : -EINVAL;
+            snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                     "Failed to get jpeg_handle_id %u for cid %u (ret=%d)",
+                     req->jpeg_handle_id, client_cid, ret);
+            goto encode_out;
+        }
+
+        if (req->jpeg_capacity == 0 || req->jpeg_capacity > jpeg_handle_size) {
+            resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+            resp_env.body.error.status = -EINVAL;
+            snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                     "jpeg_capacity %u exceeds handle buffer size %zu",
+                     req->jpeg_capacity, jpeg_handle_size);
+            goto encode_out;
         }
     }
 
-    char in_md5[33] = {0};
-    if (in_virt && in_size > 0) {
-        proxy_calc_md5(in_virt, in_size, in_md5);
+    if (!g_tap_ring) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = -ENODEV;
+        snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                 "Live camera tap ring not initialized");
+        goto encode_out;
     }
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    struct tm tm;
-    gmtime_r(&tv.tv_sec, &tm);
-    char ts_buf[64];
-    strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    /* Execute the live step */
+    resp_env.which_body = ambarella_virt_v1_RpcEnvelope_iav_tap_run_response_tag;
+    resp = &resp_env.body.iav_tap_run_response;
+    *resp = (ambarella_virt_v1_IavTapRunResponse)ambarella_virt_v1_IavTapRunResponse_init_zero;
 
-    /* 4. Log host tap execution paired to sequence */
-    proxy_host_log("[TAP_HOST_RECORD] seq=%llu cid=%u session=%u input_md5=%s output_md5=%s "
-                   "in_size=%zu out_size=%zu ticks=%u rval=0x%x dag_id=%u in_handle=%u out_handle=%u "
-                   "published=%llu drops=%llu missed=%llu "
-                   "submit_ts=%llu start_ts=%llu finish_ts=%llu timestamp=%s\n",
-                   (unsigned long long)captured_seq, client_cid, session_id, in_md5, host_md5,
-                   in_size, out_size, ticks, rval, dag_id, in_handle_id, out_handle_id,
-                   (unsigned long long)ring_published, (unsigned long long)ring_drops,
-                   (unsigned long long)ring_missed,
-                   (unsigned long long)sub_ns, (unsigned long long)start_ns,
-                   (unsigned long long)fin_ns, ts_buf);
+    ret = iav_proxy_step_live_inference_internal(req, client_cid, in_virt, in_size,
+                                                 out_virt, out_size,
+                                                 jpeg_virt, jpeg_handle_size,
+                                                 resp, resp_env.body.error.detail,
+                                                 sizeof(resp_env.body.error.detail));
+    if (ret < 0 && ret != -EAGAIN) {
+        resp_env.which_body = ambarella_virt_v1_RpcEnvelope_error_tag;
+        resp_env.body.error.status = ret;
+        if (resp_env.body.error.detail[0] == '\0') {
+            snprintf(resp_env.body.error.detail, sizeof(resp_env.body.error.detail),
+                     "Inference step failed with error %d", ret);
+        }
+        goto encode_out;
+    }
 
+encode_out: ;
+    pb_ostream_t ostream = pb_ostream_from_buffer(resp_bytes, max_resp_len);
+    if (!pb_encode(&ostream, ambarella_virt_v1_RpcEnvelope_fields, &resp_env)) {
+        fprintf(stderr, "iav_proxy: failed to encode RpcEnvelope response: %s\n",
+                PB_GET_ERROR(&ostream));
+        return -EIO;
+    }
+    *out_resp_len = ostream.bytes_written;
     return 0;
 }
 

@@ -219,7 +219,7 @@ static int amba_virt_shm1_open(struct inode *inode, struct file *filp)
 
 static int amba_virt_shm1_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return amba_virt_mmap_slice(&g_devs[1], vma, 1);
+	return amba_virt_mmap_slice(&g_devs[0], vma, 1);
 }
 
 static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -229,7 +229,7 @@ static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned l
 
 	switch (cmd) {
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&g_devs[1], 1, 0x40000000ULL, 0x40000000ULL, &dmabuf_fd);
+		ret = amba_virt_export_dmabuf_slice(&g_devs[0], 1, 0x40000000ULL, 0x40000000ULL, &dmabuf_fd);
 		if (ret)
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
@@ -340,6 +340,12 @@ static int __init amba_virt_host_init(void)
 		ret = misc_register(&amba_virt_shm_miscdev);
 		if (ret)
 			pr_warn("amba_virt: register shm miscdev failed %d\n", ret);
+		ret = misc_register(&amba_virt_shm0_miscdev);
+		if (ret)
+			pr_warn("amba_virt: register shm0 miscdev failed %d\n", ret);
+		ret = misc_register(&amba_virt_shm1_miscdev);
+		if (ret)
+			pr_warn("amba_virt: register shm1 miscdev failed %d\n", ret);
 	}
 
 	pr_info("amba_virt host: %u instances active (/dev/amba_virt0..%u), vsock base port %u\n",
@@ -352,6 +358,8 @@ static void __exit amba_virt_host_exit(void)
 	unsigned int i;
 
 	if (g_devs[0].shm_phys) {
+		misc_deregister(&amba_virt_shm1_miscdev);
+		misc_deregister(&amba_virt_shm0_miscdev);
 		misc_deregister(&amba_virt_shm_miscdev);
 	}
 	for (i = 0; i < g_active_instances; i++) {

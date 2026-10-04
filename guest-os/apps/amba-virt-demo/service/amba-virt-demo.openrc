@@ -1,0 +1,42 @@
+#!/sbin/openrc-run
+# amba-virt-demo.openrc
+#
+# Ambarella Virtualization Demo Hub Service (Alpine OpenRC)
+# Copyright (C) 2026, Ambarella International LLC
+
+name="amba-virt-demo"
+description="Ambarella Virtualization Demo Hub Edge AI Service"
+command="/usr/local/bin/amba_virt_demo"
+command_args="--bind 0.0.0.0:8081"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/amba-virt-demo.log"
+error_log="/var/log/amba-virt-demo.log"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    if [ -f /etc/amba-virt-demo.env ]; then
+        . /etc/amba-virt-demo.env
+    fi
+    command_args="--model ${AMBA_VIRT_DEMO_MODEL:-/opt/cavalry/n1-655_yolox_s_amba_optimized.bin} --bind ${AMBA_VIRT_DEMO_BIND:-0.0.0.0:8081}"
+
+    modprobe amba_virt 2>/dev/null || true
+    modprobe amba_cavalry 2>/dev/null || true
+
+    # Wait up to 30 seconds for /dev/cavalry and /dev/amba_virt to appear
+    local count=0
+    while ([ ! -c /dev/cavalry ] || [ ! -c /dev/amba_virt ]) && [ $count -lt 30 ]; do
+        modprobe amba_virt 2>/dev/null || true
+        modprobe amba_cavalry 2>/dev/null || true
+        sleep 1
+        count=$((count + 1))
+    done
+    if [ ! -c /dev/cavalry ] || [ ! -c /dev/amba_virt ]; then
+        eerror "/dev/cavalry or /dev/amba_virt device node not found"
+        return 1
+    fi
+}
+

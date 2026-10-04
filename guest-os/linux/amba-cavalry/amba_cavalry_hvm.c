@@ -44,9 +44,9 @@ static unsigned int g_preferred_offset = AMBA_VIRT_OFFSET_AUTO;
 module_param_named(preferred_offset, g_preferred_offset, uint, 0444);
 MODULE_PARM_DESC(preferred_offset, "Preferred BAR base offset, or 0xFFFFFFFF for AUTO");
 
-static int g_force_replace = 0;
+static int g_force_replace = 1;
 module_param_named(force_replace, g_force_replace, int, 0444);
-MODULE_PARM_DESC(force_replace, "Force replacement of existing Cavalry registration (default 0)");
+MODULE_PARM_DESC(force_replace, "Force replacement of existing Cavalry registration (default 1)");
 
 struct amba_cavalry_dev {
 	struct miscdevice misc;

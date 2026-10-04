@@ -174,7 +174,7 @@ dmesg | grep -E "no active user|empty ISO cfg" && die "3A message dropped by ker
 grep -aE "Can't find file:.*os08a10\.rgb\.(linear\.liso\.adj|aeb)_param" "$OUT/aaa.log" &&
     die "3A fell back to default ADJ/AEB tables"
 
-ENC_FRAMES=${ENC_FRAMES:-900}
+ENC_FRAMES=${ENC_FRAMES:-90}
 echo "=== 12. Encode $ENC_FRAMES frames and capture the bitstream ==="
 # test_stream must be running before the stream is enabled, or it misses
 # the session. -f is a filename prefix; -s is the statistics interval.
@@ -185,11 +185,12 @@ kill -0 "$STREAM_PID" 2>/dev/null || die "test_stream exited before encode"
 run test_encode -A -h 1080p -b 0 -e -d "$ENC_FRAMES"
 echo "encode rc=$?"
 i=0
-while kill -0 "$STREAM_PID" 2>/dev/null && [ "$i" -lt $((ENC_FRAMES / 30 + 15)) ]; do
+while kill -0 "$STREAM_PID" 2>/dev/null && [ "$i" -lt $((ENC_FRAMES / 30 + 10)) ]; do
     sleep 1
     i=$((i + 1))
 done
-kill "$STREAM_PID" 2>/dev/null || true
+kill -9 "$STREAM_PID" 2>/dev/null || true
+pkill -9 -f test_stream 2>/dev/null || true
 wait "$STREAM_PID" 2>/dev/null || true
 ls -la "$OUT"/video* 2>/dev/null || echo "no bitstream file"
 cat "$OUT/test_stream.log"

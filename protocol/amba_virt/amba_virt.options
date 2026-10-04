@@ -1,0 +1,10 @@
+/*
+ * protocol/amba_virt/amba_virt.options
+ *
+ * Ambarella Virtualization Nanopb Field Options.
+ * Enforces static bounds on all variable fields.
+ *
+ * Copyright (C) 2026, Ambarella International LLC.
+ */
+
+ambarella.virt.v1.RpcError.detail max_size:128

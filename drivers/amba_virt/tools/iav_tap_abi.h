@@ -17,6 +17,7 @@ extern "C" {
 
 #define IAV_TAP_RING_SLOTS          4
 #define IAV_TAP_MAX_PAYLOAD_SIZE    (1920 * 1080 * 3 / 2) /* 1080p YUV420 */
+#define IAV_TAP_MAX_JPEG_SIZE       (512 * 1024)          /* 512 KB MJPEG frame */
 
 enum iav_tap_slot_state {
     IAV_TAP_SLOT_EMPTY     = 0,
@@ -39,6 +40,8 @@ struct iav_tap_slot {
     uint32_t fourcc;
     uint32_t nbytes;
     uint64_t copy_time_us;
+    uint32_t jpeg_size;
+    uint8_t  jpeg_payload[IAV_TAP_MAX_JPEG_SIZE] __attribute__((aligned(4096)));
     uint8_t  payload[IAV_TAP_MAX_PAYLOAD_SIZE] __attribute__((aligned(4096)));
 };
 

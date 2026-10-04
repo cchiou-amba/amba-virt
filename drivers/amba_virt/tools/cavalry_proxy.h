@@ -11,6 +11,10 @@
 #include <stddef.h>
 #include "amba_virt.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define CAVALRY_POOL_BASE        0x02000000U    /* 32 MiB */
 #define CAVALRY_POOL_SIZE        0x3E000000U    /* 992 MiB (extends to 1 GiB) */
 #define CAVALRY_RPC_ARENA_OFFSET 0x01F00000U    /* 31 MiB (1 MiB control arena) */
@@ -50,6 +54,9 @@ int cavalry_proxy_set_tenant_bounds(uint32_t cid, uint32_t pool_base,
 void cavalry_proxy_set_enforce_path_b(int enforce);
 int cavalry_proxy_get_enforce_path_b(void);
 
+void cavalry_proxy_set_eve_xen_dir(const char *dir);
+int cavalry_proxy_sync_eve_cids(void);
+
 int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 			     struct amba_virt_cavalry_rpc *resp,
 			     uint32_t client_cid);
@@ -76,6 +83,10 @@ int cavalry_proxy_run_dag_with_handles(uint32_t dag_id,
 				       uint64_t *out_submit_ns,
 				       uint64_t *out_start_ns,
 				       uint64_t *out_finish_ns);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _CAVALRY_PROXY_H_ */
 

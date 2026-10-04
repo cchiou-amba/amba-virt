@@ -225,6 +225,7 @@ static int conn_rx_worker(void *data)
 {
 	struct amba_virt_conn *conn = data;
 	struct amba_virt_dev *dev = conn->dev;
+	struct socket *my_sock = conn->sock;
 	u8 *buf;
 	int ret;
 
@@ -266,16 +267,16 @@ static int conn_rx_worker(void *data)
 	pr_info("amba_virt: rx worker exiting for CID %u\n", conn->cid);
 
 	mutex_lock(&dev->conn_lock);
-	if (conn->sock) {
+	if (conn->sock == my_sock) {
 		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
 		sock_release(conn->sock);
 		conn->sock = NULL;
 	}
-	if (conn->rx_thread) {
+	if (conn->rx_thread == current) {
 		put_task_struct(conn->rx_thread);
 		conn->rx_thread = NULL;
+		conn->in_use = false;
 	}
-	conn->in_use = false;
 	mutex_unlock(&dev->conn_lock);
 	return 0;
 }
@@ -339,18 +340,14 @@ static int accept_one(void *data)
 			continue;
 		}
 
+		struct task_struct *old_t = NULL;
+		struct socket *old_sock = NULL;
+
 		if (dev->conns[slot].in_use) {
-			if (dev->conns[slot].rx_thread) {
-				struct task_struct *old_t = dev->conns[slot].rx_thread;
-				dev->conns[slot].rx_thread = NULL;
-				kthread_stop(old_t);
-				put_task_struct(old_t);
-			}
-			if (dev->conns[slot].sock) {
-				kernel_sock_shutdown(dev->conns[slot].sock, SHUT_RDWR);
-				sock_release(dev->conns[slot].sock);
-				dev->conns[slot].sock = NULL;
-			}
+			old_t = dev->conns[slot].rx_thread;
+			dev->conns[slot].rx_thread = NULL;
+			old_sock = dev->conns[slot].sock;
+			dev->conns[slot].sock = NULL;
 			dev->conns[slot].in_use = false;
 		}
 
@@ -368,6 +365,15 @@ static int accept_one(void *data)
 			dev->conns[slot].rx_thread = NULL;
 		}
 		mutex_unlock(&dev->conn_lock);
+
+		if (old_sock) {
+			kernel_sock_shutdown(old_sock, SHUT_RDWR);
+			sock_release(old_sock);
+		}
+		if (old_t) {
+			kthread_stop(old_t);
+			put_task_struct(old_t);
+		}
 
 		pr_info("amba_virt: accepted vsock connection from CID %u on slot %d\n",
 			peer_cid, slot);

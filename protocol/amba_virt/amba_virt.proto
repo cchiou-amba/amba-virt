@@ -1,0 +1,54 @@
+/*
+ * protocol/amba_virt/amba_virt.proto
+ *
+ * Ambarella Virtualization Cross-Domain Control Protocol.
+ * Authoritative schema for vsock and rpmsg control messaging.
+ *
+ * Copyright (C) 2026, Ambarella International LLC.
+ */
+
+syntax = "proto3";
+
+package ambarella.virt.v1;
+
+message RpcEnvelope {
+  uint32 api_major = 1;
+  uint32 api_minor = 2;
+  fixed64 request_id = 3;
+
+  oneof body {
+    IavTapRunRequest iav_tap_run_request = 10;
+    IavTapRunResponse iav_tap_run_response = 11;
+    RpcError error = 100;
+  }
+}
+
+message IavTapRunRequest {
+  uint32 session_id = 1;
+  uint32 dag_id = 2;
+  uint32 in_handle_id = 3;
+  uint32 out_handle_id = 4;
+  bool want_jpeg = 5;
+  uint32 jpeg_handle_id = 6;
+  uint32 jpeg_capacity = 7;
+  bool take_latest = 8;
+}
+
+message IavTapRunResponse {
+  int32 status = 1;
+  fixed64 active_seq = 2;
+  fixed64 drop_count = 3;
+  uint32 exec_ticks = 4;
+  uint32 cavalry_rval = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  uint32 pitch = 8;
+  fixed32 fourcc = 9;
+  uint32 jpeg_handle_id = 10;
+  uint32 jpeg_len = 11;
+}
+
+message RpcError {
+  int32 status = 1;
+  string detail = 2;
+}

@@ -9,6 +9,7 @@
  * Copyright (C) 2026, Ambarella International LLC
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -224,10 +225,121 @@ int cavalry_proxy_unregister_tenant(uint32_t cid)
 	return -ENOENT;
 }
 
+static const char *g_eve_xen_dir = "/run/domainmgr/xen";
+
+void cavalry_proxy_set_eve_xen_dir(const char *dir)
+{
+	g_eve_xen_dir = dir ? dir : "/run/domainmgr/xen";
+}
+
+static void cavalry_proxy_sync_eve_cids_locked(void)
+{
+	DIR *dir = opendir(g_eve_xen_dir);
+	struct dirent *ent;
+
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir)) != NULL) {
+		char path[512];
+		FILE *f;
+		char line[512];
+		int is_ubuntu = 0, is_alpine = 0;
+		uint32_t cid = 0;
+
+		if (strncmp(ent->d_name, "xen", 3) != 0 || !strstr(ent->d_name, ".cfg"))
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", g_eve_xen_dir, ent->d_name);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+
+		while (fgets(line, sizeof(line), f)) {
+			if (strstr(line, "6b43e816-fbba-4abf-a2df-81964577931c"))
+				is_ubuntu = 1;
+			if (strstr(line, "2721e105-6011-4b5e-81c6-3b18f4cec9e3"))
+				is_alpine = 1;
+			char *p = strstr(line, "guest-cid");
+			if (p) {
+				char *q = strchr(p, '"');
+				if (q)
+					cid = (uint32_t)strtoul(q + 1, NULL, 10);
+			}
+		}
+		fclose(f);
+
+		if (cid > 0) {
+			if (is_ubuntu) {
+				if (g_tenants[0].in_use && g_tenants[0].cid != cid) {
+					printf("cavalry_proxy: synced Ubuntu tenant 0 CID %u -> %u\n",
+					       g_tenants[0].cid, cid);
+					g_tenants[0].cid = cid;
+				} else if (!g_tenants[0].in_use) {
+					g_tenants[0].cid = cid;
+					g_tenants[0].tenant_idx = 0;
+					g_tenants[0].window_fd = g_window_fd;
+					g_tenants[0].shm_map = g_shm_map;
+					g_tenants[0].shm_size = 0x40000000U;
+					g_tenants[0].phys_base = g_phys_base;
+					g_tenants[0].slice_offset = 0;
+					g_tenants[0].cavalry_pool_base = CAVALRY_POOL_BASE;
+					g_tenants[0].cavalry_pool_size = CAVALRY_POOL_SIZE;
+					g_tenants[0].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
+					g_tenants[0].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
+					g_tenants[0].in_use = 1;
+					printf("cavalry_proxy: auto-bound Ubuntu tenant 0 CID %u\n", cid);
+				}
+			}
+			if (is_alpine) {
+				if (g_tenants[1].in_use && g_tenants[1].cid != cid) {
+					printf("cavalry_proxy: synced Alpine tenant 1 CID %u -> %u\n",
+					       g_tenants[1].cid, cid);
+					g_tenants[1].cid = cid;
+				} else if (!g_tenants[1].in_use) {
+					uint32_t slice_off = 0x40000000U;
+					g_tenants[1].cid = cid;
+					g_tenants[1].tenant_idx = 1;
+					g_tenants[1].window_fd = g_window_fd;
+					g_tenants[1].shm_map = (g_shm_map != MAP_FAILED && slice_off < g_shm_size) ?
+								(g_shm_map + slice_off) : g_shm_map;
+					g_tenants[1].shm_size = 0x40000000U;
+					g_tenants[1].phys_base = g_phys_base + slice_off;
+					g_tenants[1].slice_offset = slice_off;
+					g_tenants[1].cavalry_pool_base = CAVALRY_POOL_BASE;
+					g_tenants[1].cavalry_pool_size = CAVALRY_POOL_SIZE;
+					g_tenants[1].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
+					g_tenants[1].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
+					g_tenants[1].in_use = 1;
+					printf("cavalry_proxy: auto-bound Alpine tenant 1 CID %u\n", cid);
+				}
+			}
+		}
+	}
+	closedir(dir);
+}
+
+int cavalry_proxy_sync_eve_cids(void)
+{
+	pthread_mutex_lock(&g_tenant_mutex);
+	cavalry_proxy_sync_eve_cids_locked();
+	pthread_mutex_unlock(&g_tenant_mutex);
+	return 0;
+}
+
 struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid)
 {
 	int i;
 	pthread_mutex_lock(&g_tenant_mutex);
+	for (i = 0; i < MAX_TENANTS; i++) {
+		if (g_tenants[i].in_use && g_tenants[i].cid == cid) {
+			pthread_mutex_unlock(&g_tenant_mutex);
+			return &g_tenants[i];
+		}
+	}
+
+	/* Dynamic resync with EVE domain configs in case guest rebooted */
+	cavalry_proxy_sync_eve_cids_locked();
+
 	for (i = 0; i < MAX_TENANTS; i++) {
 		if (g_tenants[i].in_use && g_tenants[i].cid == cid) {
 			pthread_mutex_unlock(&g_tenant_mutex);

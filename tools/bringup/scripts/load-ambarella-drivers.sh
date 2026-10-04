@@ -272,25 +272,32 @@ for udev in ffe0018000.uart ffe0019000.uart; do
 done
 
 # 6. Start amba-virt-server supervisor if binary present
-SERVER_BIN=""
-if [ -x "$PERSIST_DIR/bin/amba-virt-server" ]; then
-    SERVER_BIN="$PERSIST_DIR/bin/amba-virt-server"
-elif [ -x "/usr/local/bin/amba-virt-server" ]; then
-    SERVER_BIN="/usr/local/bin/amba-virt-server"
-fi
+if [ -x "$PERSIST_DIR/bin/amba-virt-server-daemon.sh" ]; then
+    if ! pgrep -f amba-virt-server-daemon.sh >/dev/null 2>&1; then
+        echo "Starting amba-virt-server-daemon supervisor..."
+        "$PERSIST_DIR/bin/amba-virt-server-daemon.sh" >/dev/null 2>&1 < /dev/null &
+    fi
+else
+    SERVER_BIN=""
+    if [ -x "$PERSIST_DIR/bin/amba-virt-server" ]; then
+        SERVER_BIN="$PERSIST_DIR/bin/amba-virt-server"
+    elif [ -x "/usr/local/bin/amba-virt-server" ]; then
+        SERVER_BIN="/usr/local/bin/amba-virt-server"
+    fi
 
-if [ -n "$SERVER_BIN" ]; then
-    mkdir -p "$PERSIST_DIR/log"
-    if ! pidof amba-virt-server >/dev/null 2>&1; then
-        echo "Starting amba-virt-server supervisor..."
-        (
-            while true; do
-                if [ -x "$SERVER_BIN" ]; then
-                    "$SERVER_BIN" >> "$PERSIST_DIR/log/amba-virt-server.log" 2>&1 || true
-                fi
-                sleep 2
-            done
-        ) >/dev/null 2>&1 < /dev/null &
+    if [ -n "$SERVER_BIN" ]; then
+        mkdir -p "$PERSIST_DIR/log"
+        if ! pidof amba-virt-server >/dev/null 2>&1; then
+            echo "Starting amba-virt-server supervisor..."
+            (
+                while true; do
+                    if [ -x "$SERVER_BIN" ]; then
+                        "$SERVER_BIN" >> "$PERSIST_DIR/log/amba-virt-server.log" 2>&1 || true
+                    fi
+                    sleep 2
+                done
+            ) >/dev/null 2>&1 < /dev/null &
+        fi
     fi
 fi
 

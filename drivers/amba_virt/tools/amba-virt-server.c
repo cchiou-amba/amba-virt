@@ -49,6 +49,8 @@ static struct iav_tap_ring g_server_tap_ring;
 static int g_fd_iav = -1;
 static uint8_t *g_dsp_base = MAP_FAILED;
 static size_t g_dsp_len = 0;
+static uint8_t *g_bsb_base = MAP_FAILED;
+static size_t g_bsb_len = 0;
 static pthread_t g_tap_thread;
 static volatile int g_tap_running = 0;
 
@@ -142,6 +144,39 @@ static void *server_tap_producer_thread(void *arg)
 		memcpy(slot->payload, g_dsp_base + y_offset, y_bytes);
 		memcpy(slot->payload + y_bytes, g_dsp_base + uv_offset, uv_bytes);
 
+		/* Query DSP hardware-encoded MJPEG frame from Stream 1 */
+		slot->jpeg_size = 0;
+		if (g_fd_iav >= 0 && g_bsb_base != MAP_FAILED) {
+			struct iav_querydesc qdesc;
+			int qret = -1;
+			for (int retry = 0; retry < 3; retry++) {
+				memset(&qdesc, 0, sizeof(qdesc));
+				qdesc.qid = IAV_DESC_FRAME;
+				qdesc.arg.frame.id = 1;
+				qdesc.arg.frame.time_ms = (retry == 0) ? 40 : 15;
+
+				qret = ioctl(g_fd_iav, IAV_IOC_QUERY_DESC, &qdesc);
+				if (qret == 0) {
+					uint32_t hw_jpeg_size = qdesc.arg.frame.size;
+					unsigned long bsb_offset = qdesc.arg.frame.data_addr_offset;
+
+					if (bsb_offset + hw_jpeg_size <= g_bsb_len &&
+					    hw_jpeg_size <= IAV_TAP_MAX_JPEG_SIZE) {
+						memcpy(slot->jpeg_payload, g_bsb_base + bsb_offset, hw_jpeg_size);
+						slot->jpeg_size = hw_jpeg_size;
+					}
+					break;
+				}
+			}
+			if (qret != 0) {
+				static int s_warn_cnt = 0;
+				if (s_warn_cnt++ < 5) {
+					fprintf(stderr, "amba-virt-server: MJPEG frame query timeout after retries (errno=%d %s)\n",
+						errno, strerror(errno));
+				}
+			}
+		}
+
 		iav_proxy_ring_lock();
 		slot->seq = seq;
 		slot->generation++;
@@ -196,6 +231,54 @@ static void server_init_iav_tap(void)
 
 	memset(&g_server_tap_ring, 0, sizeof(g_server_tap_ring));
 	iav_proxy_init(&g_server_tap_ring);
+
+	/* Map Bitstream Buffer (BSB) for hardware MJPEG frame capture */
+	struct iav_querymem qmem_bsb;
+	memset(&qmem_bsb, 0, sizeof(qmem_bsb));
+	qmem_bsb.mid = IAV_MEM_PARTITION;
+	qmem_bsb.arg.partition.pid = IAV_PART_BSB;
+	if (ioctl(g_fd_iav, IAV_IOC_QUERY_MEMBLOCK, &qmem_bsb) == 0) {
+		g_bsb_len = qmem_bsb.arg.partition.mem.length;
+		g_bsb_base = (uint8_t *)mmap(NULL, g_bsb_len, PROT_READ, MAP_SHARED,
+					    g_fd_iav, qmem_bsb.arg.partition.mem.addr);
+		if (g_bsb_base != MAP_FAILED) {
+			printf("amba-virt-server: IAV BSB memory mapped (%zu MB)\n",
+			       g_bsb_len / (1024 * 1024));
+		} else {
+			perror("mmap IAV_PART_BSB in server");
+			g_bsb_base = MAP_FAILED;
+			g_bsb_len = 0;
+		}
+	} else {
+		perror("IAV_IOC_QUERY_MEMBLOCK (IAV_PART_BSB) in server");
+	}
+
+	/* Configure Stream 1 as hardware MJPEG from Canvas 0 (1920x1080) */
+	struct iav_stream_cfg scfg;
+	memset(&scfg, 0, sizeof(scfg));
+	scfg.id = 1;
+	scfg.cid = IAV_STMCFG_FORMAT;
+	scfg.arg.format.type = IAV_STREAM_TYPE_MJPEG;
+	scfg.arg.format.enc_src_id = 0;
+	scfg.arg.format.enc_win.width = 1920;
+	scfg.arg.format.enc_win.height = 1080;
+	scfg.arg.format.duration = 0;
+	if (ioctl(g_fd_iav, IAV_IOC_SET_STREAM_CONFIG, &scfg) == 0) {
+		printf("amba-virt-server: Stream 1 configured as MJPEG 1920x1080\n");
+	}
+
+	struct iav_mjpeg_cfg mcfg;
+	memset(&mcfg, 0, sizeof(mcfg));
+	mcfg.id = 1;
+	mcfg.quality = 80;
+	ioctl(g_fd_iav, IAV_IOC_SET_MJPEG_CONFIG, &mcfg);
+
+	uint32_t start_mask = (1 << 1);
+	if (ioctl(g_fd_iav, IAV_IOC_START_ENCODE, start_mask) == 0) {
+		printf("amba-virt-server: Stream 1 hardware MJPEG encode started\n");
+	}
+
+	iav_proxy_set_bsb(g_fd_iav, (g_bsb_base != MAP_FAILED) ? g_bsb_base : NULL, g_bsb_len, 1);
 
 	g_tap_running = 1;
 	if (pthread_create(&g_tap_thread, NULL, server_tap_producer_thread, NULL) == 0) {
@@ -429,23 +512,22 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 		}
 		tx->len = sizeof(*out) + sizeof(*cav_resp);
 	} else if (in->type == AMBA_VIRT_MSG_IAV_TAP_REQ) {
-		struct iav_tap_rpc *tap_req;
-		struct iav_tap_rpc *tap_resp;
+		const uint8_t *req_payload = rx->data + sizeof(*in);
+		size_t req_len = (rx->len > sizeof(*in)) ? (rx->len - sizeof(*in)) : 0;
 
-		if (rx->len < sizeof(*in) + sizeof(*tap_req)) {
-			fprintf(stderr, "short iav tap rpc %u (expected >= %zu)\n",
-				rx->len, sizeof(*in) + sizeof(*tap_req));
-			return;
-		}
-		tap_req = (struct iav_tap_rpc *)(rx->data + sizeof(*in));
 		out = (struct amba_virt_msg *)tx->data;
 		memset(out, 0, sizeof(*out));
 		out->type = AMBA_VIRT_MSG_IAV_TAP_RESP;
 		out->seq = in->seq;
-		tap_resp = (struct iav_tap_rpc *)(tx->data + sizeof(*out));
 
-		iav_proxy_handle_rpc(tap_req, tap_resp, rx->client_cid);
-		tx->len = sizeof(*out) + sizeof(*tap_resp);
+		uint8_t *resp_payload = tx->data + sizeof(*out);
+		size_t max_resp_len = sizeof(tx->data) - sizeof(*out);
+		size_t resp_len = 0;
+
+		iav_proxy_handle_nanopb_rpc(req_payload, req_len,
+					    resp_payload, max_resp_len, &resp_len,
+					    rx->client_cid);
+		tx->len = sizeof(*out) + resp_len;
 	} else if (in->type == AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ) {
 		struct amba_virt_dev_bounds_req *b_req;
 		struct amba_virt_dev_bounds_resp *b_resp;
