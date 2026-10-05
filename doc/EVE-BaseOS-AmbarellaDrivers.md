@@ -203,9 +203,6 @@ make eve-kernel-headers
 
 # Compile and cryptographically sign all out-of-tree drivers
 make drivers
-
-# Or use the standalone helper script:
-./scripts/build_kmod_out_of_tree.sh
 ```
 This automatically compiles `amba_virt.ko`, `amba_pci_platform.ko` (and proprietary modules such as `cavalry.ko` when present), signs each binary with `build/certs/signing_key.pem`, and stages them to `build/modules/`.
 
@@ -330,7 +327,7 @@ EVE-OS enforces kernel module signature verification (`CONFIG_MODULE_SIG_FORCE=y
 | Property | Development Mode | Production Mode |
 |---|---|---|
 | **Driver Location** | `/persist/modules/` (deployed live via SSH) | `/lib/modules/<ver>/extra/` (baked in `rootfs.img`) |
-| **Driver Build** | Host filesystem via `scripts/build_kmod_out_of_tree.sh` | Inside Docker container via `Dockerfile.ambarella` |
+| **Driver Build** | Host filesystem via `make drivers` | Inside Docker container via `Dockerfile.ambarella` |
 | **Signing Key** | Local persistent key (`eve-kernel/certs/signing_key.pem`) | Ephemeral key generated dynamically inside Docker |
 | **Signing Action** | Host script runs `scripts/sign-file sha256 <key> <cert> <.ko>` | Kernel `modules_install` automatically signs inside Docker |
 | **Private Key Lifetime** | Persisted on host (`.gitignore`d) for repeated signing | Destroyed immediately when Docker container exits |

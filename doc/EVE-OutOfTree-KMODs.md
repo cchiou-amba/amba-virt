@@ -29,8 +29,8 @@ To reconcile these security guarantees with the need for fast developer turnarou
 | (cavalry, amba_virt)               |      | (cavalry, amba_virt)                    |
 |                 |                  |      |                    |                    |
 |                 v                  |      |                    v                    |
-| Host Build Script                  |      | Docker BuildKit External Contexts       |
-| (build_kmod_out_of_tree.sh)        |      | (--build-context)                       |
+| Host Build Target                  |      | Docker BuildKit External Contexts       |
+| (make drivers)                     |      | (--build-context)                       |
 |        |                           |      |                    |                    |
 |        v                           |      |                    v                    |
 | Host sign-file (sha256)            |      | Ephemeral Single-Use Key (kbuild)       |
@@ -208,14 +208,11 @@ Because `CONFIG_MODULE_SIG_FORCE=y` is enforced by the kernel:
 
 ### 4.2 Building Out-of-Tree on the Host
 
-The top-level `make drivers` target and `scripts/build_kmod_out_of_tree.sh` automate compilation and cryptographic signing:
+The top-level `make drivers` target automates compilation and cryptographic signing:
 
 ```bash
 # Compile and sign all available out-of-tree drivers against extracted headers
 make drivers
-
-# Or run the standalone helper:
-./scripts/build_kmod_out_of_tree.sh
 ```
 
 Under the hood:
@@ -307,7 +304,7 @@ In the Ambarella EVE fork, `pkg/storage-init` is enhanced with a native boot hoo
 ### Pitfall 3: Invalid Module Format (`version magic mismatch`)
 - **Symptom**: `insmod: can't insert 'cavalry.ko': invalid module format` (dmesg: `version magic '...ac6b5c0e15b0...' should be '...310c92224386...'`).
 - **Root Cause**: The running kernel on the target board was updated (e.g. via OTA or partition flip), but the modules in `/persist/modules/` were compiled against an older commit.
-- **Fix**: Run `./scripts/build_kmod_out_of_tree.sh` against the updated kernel source tree, then redeploy with `deploy_and_insmod.sh`.
+- **Fix**: Run `make drivers` against the updated kernel source tree, then redeploy with `deploy_and_insmod.sh`.
 
 ### Pitfall 4: Container Missing Assigned Adapter
 - **Symptom**: Application container fails to access `/dev/cavalry` even though the module is loaded.
