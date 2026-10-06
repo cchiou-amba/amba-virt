@@ -271,11 +271,14 @@ static int conn_rx_worker(void *data)
 		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
 		sock_release(conn->sock);
 		conn->sock = NULL;
-	}
-	if (conn->rx_thread == current) {
-		put_task_struct(conn->rx_thread);
-		conn->rx_thread = NULL;
-		conn->in_use = false;
+		if (conn->rx_thread == current) {
+			put_task_struct(conn->rx_thread);
+			conn->rx_thread = NULL;
+			conn->in_use = false;
+			mutex_unlock(&dev->conn_lock);
+			amba_virt_slice_unbind_cid(conn->cid);
+			return 0;
+		}
 	}
 	mutex_unlock(&dev->conn_lock);
 	return 0;
@@ -634,10 +637,17 @@ int amba_virt_export_dmabuf_slice(struct amba_virt_dev *dev,
 	if (!dev->shm_phys || !dev->shm_size)
 		return -ENODEV;
 
+	if (dev->is_host) {
+		struct amba_virt_slice_desc desc;
+		if (amba_virt_slice_get_desc(slice_idx, &desc) == 0) {
+			if (!size)
+				size = desc.slice_size;
+			if (!offset && slice_idx > 0)
+				offset = desc.offset;
+		}
+	}
 	if (!size)
-		size = 0x40000000UL; /* Default 1 GiB */
-	if (!offset && slice_idx > 0)
-		offset = (size_t)slice_idx * size;
+		size = dev->shm_size;
 
 	if (offset + size > dev->shm_size)
 		return -EINVAL;
@@ -709,8 +719,8 @@ int amba_virt_mmap_slice(struct amba_virt_dev *dev,
 			 unsigned int slice_idx)
 {
 	unsigned long size = vma->vm_end - vma->vm_start;
-	size_t slice_size = 0x40000000UL; /* 1 GiB per slice */
-	size_t slice_offset = (size_t)slice_idx * slice_size;
+	size_t slice_size = 0;
+	size_t slice_offset = 0;
 	u64 offset;
 
 	if (!dev)
@@ -718,6 +728,16 @@ int amba_virt_mmap_slice(struct amba_virt_dev *dev,
 	amba_virt_attach_shm(dev);
 	if (!dev->shm_phys)
 		return -ENODEV;
+
+	if (dev->is_host) {
+		struct amba_virt_slice_desc desc;
+		if (amba_virt_slice_get_desc(slice_idx, &desc) == 0) {
+			slice_size = desc.slice_size;
+			slice_offset = desc.offset;
+		}
+	}
+	if (!slice_size)
+		return -EINVAL;
 
 	if (slice_offset >= dev->shm_size)
 		return -EINVAL;
@@ -917,6 +937,76 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		}
 		mutex_unlock(&dev->conn_lock);
 		return sent > 0 ? 0 : -ENOTCONN;
+	}
+
+	case AMBA_VIRT_IOC_ENUM_SLICES:
+	{
+		struct amba_virt_slice_list list;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		amba_virt_slice_get_list(&list);
+		if (copy_to_user((void __user *)arg, &list, sizeof(list)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case AMBA_VIRT_IOC_GET_SLICE:
+	{
+		struct amba_virt_slice_desc desc;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&desc, (void __user *)arg, sizeof(desc)))
+			return -EFAULT;
+		ret = amba_virt_slice_get_desc(desc.index, &desc);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &desc, sizeof(desc)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case AMBA_VIRT_IOC_BIND_SLICE:
+	{
+		struct amba_virt_slice_bind bind;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&bind, (void __user *)arg, sizeof(bind)))
+			return -EFAULT;
+		ret = amba_virt_slice_bind(bind.cid, bind.nonce, &bind.slice);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &bind, sizeof(bind)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case AMBA_VIRT_IOC_GET_BINDINGS:
+	{
+		struct amba_virt_binding_list blist;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		amba_virt_slice_get_bindings(&blist);
+		if (copy_to_user((void __user *)arg, &blist, sizeof(blist)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case AMBA_VIRT_IOC_UNBIND_SLICE:
+	{
+		struct amba_virt_slice_unbind unbind;
+
+		if (!dev->is_host)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&unbind, (void __user *)arg, sizeof(unbind)))
+			return -EFAULT;
+		if (unbind.cid <= 2)
+			return -EINVAL;
+		amba_virt_slice_unbind_cid(unbind.cid);
+		return 0;
 	}
 
 	case AMBA_VIRT_IOC_SEND:

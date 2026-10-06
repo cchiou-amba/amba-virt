@@ -25,12 +25,27 @@
 #include <unistd.h>
 
 #include "amba_virt.h"
+#include "amba_virt_slice.h"
 #include "cavalry_proxy.h"
 #include "cavalry_ioctl.h"
 
 #define MAX_SLICES               512
+#define MAX_HARDWARE_SLICES      8
 #define MAX_DAG_CNT_CAP          128
 #define CAVALRY_DEV_NODE         "/dev/cavalry"
+
+struct cavalry_hw_slice_slot {
+	uint32_t index;
+	uint32_t usable_size;
+	uint64_t offset;
+	uint64_t phys;
+	uint64_t slice_size;
+	uint64_t nonce;
+	uint32_t bound_cid;
+	int active;
+};
+
+static struct cavalry_hw_slice_slot g_hw_slices[MAX_HARDWARE_SLICES];
 
 struct cavalry_slice_entry {
 	uint32_t bar_offset;
@@ -181,12 +196,35 @@ int cavalry_proxy_get_enforce_path_b(void)
 	return g_enforce_path_b;
 }
 
+int cavalry_proxy_pool_size_for_usable(size_t usable_size, uint32_t *out_size)
+{
+	uint64_t room;
+
+	if (!out_size)
+		return -EINVAL;
+	if ((uint64_t)usable_size <= CAVALRY_POOL_BASE)
+		return -EINVAL;
+
+	room = (uint64_t)usable_size - CAVALRY_POOL_BASE;
+	if (room > CAVALRY_POOL_SIZE)
+		room = CAVALRY_POOL_SIZE;
+	if (room == 0)
+		return -EINVAL;
+
+	*out_size = (uint32_t)room;
+	return 0;
+}
+
 int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 				  int window_fd, unsigned char *shm_map,
 				  size_t shm_size, uint64_t phys_base,
 				  uint32_t slice_offset)
 {
+	uint32_t pool_size;
+
 	if (tenant_idx >= MAX_TENANTS)
+		return -EINVAL;
+	if (cavalry_proxy_pool_size_for_usable(shm_size, &pool_size) < 0)
 		return -EINVAL;
 
 	pthread_mutex_lock(&g_tenant_mutex);
@@ -198,7 +236,7 @@ int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 	g_tenants[tenant_idx].phys_base = phys_base;
 	g_tenants[tenant_idx].slice_offset = slice_offset;
 	g_tenants[tenant_idx].cavalry_pool_base = CAVALRY_POOL_BASE;
-	g_tenants[tenant_idx].cavalry_pool_size = CAVALRY_POOL_SIZE;
+	g_tenants[tenant_idx].cavalry_pool_size = pool_size;
 	g_tenants[tenant_idx].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
 	g_tenants[tenant_idx].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
 	g_tenants[tenant_idx].in_use = 1;
@@ -216,6 +254,11 @@ int cavalry_proxy_unregister_tenant(uint32_t cid)
 	for (i = 0; i < MAX_TENANTS; i++) {
 		if (g_tenants[i].in_use && g_tenants[i].cid == cid) {
 			g_tenants[i].in_use = 0;
+			g_tenants[i].cid = 0;
+			if (i < MAX_HARDWARE_SLICES) {
+				g_hw_slices[i].bound_cid = 0;
+				g_hw_slices[i].nonce = 0;
+			}
 			pthread_mutex_unlock(&g_tenant_mutex);
 			cavalry_proxy_client_disconnect(cid);
 			return 0;
@@ -223,107 +266,6 @@ int cavalry_proxy_unregister_tenant(uint32_t cid)
 	}
 	pthread_mutex_unlock(&g_tenant_mutex);
 	return -ENOENT;
-}
-
-static const char *g_eve_xen_dir = "/run/domainmgr/xen";
-
-void cavalry_proxy_set_eve_xen_dir(const char *dir)
-{
-	g_eve_xen_dir = dir ? dir : "/run/domainmgr/xen";
-}
-
-static void cavalry_proxy_sync_eve_cids_locked(void)
-{
-	DIR *dir = opendir(g_eve_xen_dir);
-	struct dirent *ent;
-
-	if (!dir)
-		return;
-
-	while ((ent = readdir(dir)) != NULL) {
-		char path[512];
-		FILE *f;
-		char line[512];
-		int is_ubuntu = 0, is_alpine = 0;
-		uint32_t cid = 0;
-
-		if (strncmp(ent->d_name, "xen", 3) != 0 || !strstr(ent->d_name, ".cfg"))
-			continue;
-		snprintf(path, sizeof(path), "%s/%s", g_eve_xen_dir, ent->d_name);
-		f = fopen(path, "r");
-		if (!f)
-			continue;
-
-		while (fgets(line, sizeof(line), f)) {
-			if (strstr(line, "6b43e816-fbba-4abf-a2df-81964577931c"))
-				is_ubuntu = 1;
-			if (strstr(line, "2721e105-6011-4b5e-81c6-3b18f4cec9e3"))
-				is_alpine = 1;
-			char *p = strstr(line, "guest-cid");
-			if (p) {
-				char *q = strchr(p, '"');
-				if (q)
-					cid = (uint32_t)strtoul(q + 1, NULL, 10);
-			}
-		}
-		fclose(f);
-
-		if (cid > 0) {
-			if (is_ubuntu) {
-				if (g_tenants[0].in_use && g_tenants[0].cid != cid) {
-					printf("cavalry_proxy: synced Ubuntu tenant 0 CID %u -> %u\n",
-					       g_tenants[0].cid, cid);
-					g_tenants[0].cid = cid;
-				} else if (!g_tenants[0].in_use) {
-					g_tenants[0].cid = cid;
-					g_tenants[0].tenant_idx = 0;
-					g_tenants[0].window_fd = g_window_fd;
-					g_tenants[0].shm_map = g_shm_map;
-					g_tenants[0].shm_size = 0x40000000U;
-					g_tenants[0].phys_base = g_phys_base;
-					g_tenants[0].slice_offset = 0;
-					g_tenants[0].cavalry_pool_base = CAVALRY_POOL_BASE;
-					g_tenants[0].cavalry_pool_size = CAVALRY_POOL_SIZE;
-					g_tenants[0].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
-					g_tenants[0].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
-					g_tenants[0].in_use = 1;
-					printf("cavalry_proxy: auto-bound Ubuntu tenant 0 CID %u\n", cid);
-				}
-			}
-			if (is_alpine) {
-				if (g_tenants[1].in_use && g_tenants[1].cid != cid) {
-					printf("cavalry_proxy: synced Alpine tenant 1 CID %u -> %u\n",
-					       g_tenants[1].cid, cid);
-					g_tenants[1].cid = cid;
-				} else if (!g_tenants[1].in_use) {
-					uint32_t slice_off = 0x40000000U;
-					g_tenants[1].cid = cid;
-					g_tenants[1].tenant_idx = 1;
-					g_tenants[1].window_fd = g_window_fd;
-					g_tenants[1].shm_map = (g_shm_map != MAP_FAILED && slice_off < g_shm_size) ?
-								(g_shm_map + slice_off) : g_shm_map;
-					g_tenants[1].shm_size = 0x40000000U;
-					g_tenants[1].phys_base = g_phys_base + slice_off;
-					g_tenants[1].slice_offset = slice_off;
-					g_tenants[1].cavalry_pool_base = CAVALRY_POOL_BASE;
-					g_tenants[1].cavalry_pool_size = CAVALRY_POOL_SIZE;
-					g_tenants[1].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
-					g_tenants[1].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
-					g_tenants[1].in_use = 1;
-					printf("cavalry_proxy: auto-bound Alpine tenant 1 CID %u\n", cid);
-				}
-			}
-		}
-	}
-	closedir(dir);
-}
-
-int cavalry_proxy_sync_eve_cids(void)
-{
-	pthread_mutex_lock(&g_tenant_mutex);
-	cavalry_proxy_sync_eve_cids_locked();
-	pthread_mutex_unlock(&g_tenant_mutex);
-	return 0;
 }
 
 struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid)
@@ -336,44 +278,138 @@ struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid)
 			return &g_tenants[i];
 		}
 	}
-
-	/* Dynamic resync with EVE domain configs in case guest rebooted */
-	cavalry_proxy_sync_eve_cids_locked();
-
-	for (i = 0; i < MAX_TENANTS; i++) {
-		if (g_tenants[i].in_use && g_tenants[i].cid == cid) {
-			pthread_mutex_unlock(&g_tenant_mutex);
-			return &g_tenants[i];
-		}
-	}
-
-	/* Dynamic auto-registration for connecting guest */
-	for (i = 0; i < MAX_TENANTS; i++) {
-		if (!g_tenants[i].in_use) {
-			uint32_t slice_sz = 0x40000000U; /* 1 GiB */
-			uint32_t slice_off = i * slice_sz;
-			g_tenants[i].cid = cid;
-			g_tenants[i].tenant_idx = i;
-			g_tenants[i].window_fd = g_window_fd;
-			g_tenants[i].shm_map = (g_shm_map != MAP_FAILED && slice_off < g_shm_size) ?
-						(g_shm_map + slice_off) : g_shm_map;
-			g_tenants[i].shm_size = slice_sz;
-			g_tenants[i].phys_base = g_phys_base + slice_off;
-			g_tenants[i].slice_offset = slice_off;
-			g_tenants[i].cavalry_pool_base = CAVALRY_POOL_BASE;
-			g_tenants[i].cavalry_pool_size = CAVALRY_POOL_SIZE;
-			g_tenants[i].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
-			g_tenants[i].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
-			g_tenants[i].in_use = 1;
-			printf("cavalry_proxy: auto-registered tenant slot %d for cid=%u (slice_off=0x%08x, phys=0x%lx)\n",
-			       i, cid, slice_off, (unsigned long)g_tenants[i].phys_base);
-			pthread_mutex_unlock(&g_tenant_mutex);
-			return &g_tenants[i];
-		}
-	}
-
 	pthread_mutex_unlock(&g_tenant_mutex);
 	return NULL;
+}
+
+int cavalry_proxy_restore_bindings(const struct amba_virt_binding_list *list,
+				   unsigned char *window_map, size_t window_size)
+{
+	uint32_t i;
+
+	if (!list)
+		return -EINVAL;
+
+	for (i = 0; i < list->count && i < 8; i++) {
+		const struct amba_virt_slice_binding *entry = &list->entries[i];
+		unsigned char *submap = NULL;
+		int ret;
+
+		if (entry->cid <= 2)
+			return -EINVAL;
+		if (window_map &&
+		    entry->slice.offset + entry->slice.slice_size <= window_size)
+			submap = window_map + entry->slice.offset;
+
+		ret = cavalry_proxy_register_tenant(entry->cid, entry->slice.index, -1,
+						    submap, entry->slice.usable_size,
+						    entry->slice.phys,
+						    (uint32_t)entry->slice.offset);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
+int cavalry_proxy_get_all_tenants(struct cavalry_tenant_ctx *out_tenants, int max_tenants)
+{
+	int count = 0;
+	pthread_mutex_lock(&g_tenant_mutex);
+	for (int i = 0; i < MAX_TENANTS && count < max_tenants; i++) {
+		if (g_tenants[i].in_use && g_tenants[i].cid > 2) {
+			out_tenants[count++] = g_tenants[i];
+		}
+	}
+	pthread_mutex_unlock(&g_tenant_mutex);
+	return count;
+}
+
+void cavalry_proxy_set_slice_nonce(uint32_t slice_idx, uint64_t nonce)
+{
+	pthread_mutex_lock(&g_tenant_mutex);
+	if (slice_idx < MAX_HARDWARE_SLICES) {
+		g_hw_slices[slice_idx].nonce = nonce;
+		g_hw_slices[slice_idx].active = 1;
+		if (nonce == 0) {
+			g_hw_slices[slice_idx].bound_cid = 0;
+		}
+	}
+	pthread_mutex_unlock(&g_tenant_mutex);
+}
+
+int cavalry_proxy_bind_slice(uint32_t cid, uint64_t nonce, struct amba_virt_slice_desc *out_desc)
+{
+	int match_idx = -1;
+	uint32_t i;
+
+	if (cid <= 2)
+		return -EINVAL;
+	if (nonce == 0 || !out_desc)
+		return -ENOENT;
+
+	pthread_mutex_lock(&g_tenant_mutex);
+
+	/* Check if CID is already bound to any slice */
+	for (i = 0; i < MAX_HARDWARE_SLICES; i++) {
+		if (g_hw_slices[i].bound_cid == cid) {
+			pthread_mutex_unlock(&g_tenant_mutex);
+			return -EBUSY;
+		}
+	}
+
+	/* Find slice matching nonce */
+	for (i = 0; i < MAX_HARDWARE_SLICES; i++) {
+		if (g_hw_slices[i].active && g_hw_slices[i].nonce == nonce) {
+			match_idx = (int)i;
+			break;
+		}
+	}
+
+	if (match_idx < 0) {
+		pthread_mutex_unlock(&g_tenant_mutex);
+		return -ENOENT;
+	}
+
+	/* Check if slice is already bound to another CID */
+	if (g_hw_slices[match_idx].bound_cid != 0 && g_hw_slices[match_idx].bound_cid != cid) {
+		pthread_mutex_unlock(&g_tenant_mutex);
+		return -EBUSY;
+	}
+
+	g_hw_slices[match_idx].bound_cid = cid;
+
+	out_desc->index = g_hw_slices[match_idx].index;
+	out_desc->usable_size = g_hw_slices[match_idx].usable_size;
+	out_desc->offset = g_hw_slices[match_idx].offset;
+	out_desc->phys = g_hw_slices[match_idx].phys;
+	out_desc->slice_size = g_hw_slices[match_idx].slice_size;
+
+	/* Register tenant context */
+	g_tenants[match_idx].cid = cid;
+	g_tenants[match_idx].tenant_idx = match_idx;
+	g_tenants[match_idx].window_fd = g_window_fd;
+	g_tenants[match_idx].shm_map = (g_shm_map != MAP_FAILED &&
+					out_desc->offset + out_desc->slice_size <= g_shm_size) ?
+				       (g_shm_map + out_desc->offset) : g_shm_map;
+	g_tenants[match_idx].shm_size = out_desc->usable_size;
+	g_tenants[match_idx].phys_base = out_desc->phys;
+	g_tenants[match_idx].slice_offset = (uint32_t)out_desc->offset;
+	g_tenants[match_idx].cavalry_pool_base = CAVALRY_POOL_BASE;
+	g_tenants[match_idx].cavalry_pool_size = (out_desc->usable_size > CAVALRY_POOL_BASE) ?
+						 (out_desc->usable_size - CAVALRY_POOL_BASE) : 0;
+	if (g_tenants[match_idx].cavalry_pool_size > CAVALRY_POOL_SIZE)
+		g_tenants[match_idx].cavalry_pool_size = CAVALRY_POOL_SIZE;
+	g_tenants[match_idx].rpc_arena_offset = CAVALRY_RPC_ARENA_OFFSET;
+	g_tenants[match_idx].rpc_arena_size = CAVALRY_RPC_ARENA_SIZE;
+	g_tenants[match_idx].in_use = 1;
+
+	pthread_mutex_unlock(&g_tenant_mutex);
+
+	printf("cavalry_proxy: bound slice idx=%u to cid=%u (phys=0x%lx, off=0x%lx, usable=%u)\n",
+	       match_idx, cid, (unsigned long)out_desc->phys,
+	       (unsigned long)out_desc->offset, out_desc->usable_size);
+
+	return 0;
 }
 
 int cavalry_proxy_set_tenant_bounds(uint32_t cid, uint32_t pool_base,
@@ -737,6 +773,21 @@ int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size
 
 	memset(g_slices, 0, sizeof(g_slices));
 	memset(g_tenants, 0, sizeof(g_tenants));
+	memset(g_hw_slices, 0, sizeof(g_hw_slices));
+
+	struct amba_virt_slice_list geom_list;
+	if (amba_virt_slice_compute_geometry(phys_base, shm_size, 4096, 2, &geom_list) == 0) {
+		for (uint32_t s = 0; s < geom_list.count && s < MAX_HARDWARE_SLICES; s++) {
+			g_hw_slices[s].index = geom_list.slices[s].index;
+			g_hw_slices[s].usable_size = geom_list.slices[s].usable_size;
+			g_hw_slices[s].offset = geom_list.slices[s].offset;
+			g_hw_slices[s].phys = geom_list.slices[s].phys;
+			g_hw_slices[s].slice_size = geom_list.slices[s].slice_size;
+			g_hw_slices[s].nonce = 0;
+			g_hw_slices[s].bound_cid = 0;
+			g_hw_slices[s].active = 1;
+		}
+	}
 
 	g_fd_cav = open(CAVALRY_DEV_NODE, O_RDWR);
 	if (g_fd_cav < 0) {
@@ -1863,6 +1914,14 @@ int cavalry_proxy_start_drain(void)
 	return 0;
 }
 
+int cavalry_proxy_is_draining(void)
+{
+	pthread_mutex_lock(&g_drain_mutex);
+	int d = g_draining;
+	pthread_mutex_unlock(&g_drain_mutex);
+	return d;
+}
+
 int cavalry_proxy_wait_drained(unsigned int timeout_ms)
 {
 	struct timespec ts;
@@ -1900,15 +1959,6 @@ void cavalry_proxy_finish_drain(void)
 	}
 	pthread_mutex_unlock(&g_visorc_hw_mutex);
 }
-
-int cavalry_proxy_is_draining(void)
-{
-	pthread_mutex_lock(&g_drain_mutex);
-	int d = g_draining;
-	pthread_mutex_unlock(&g_drain_mutex);
-	return d;
-}
-
 
 
 /*

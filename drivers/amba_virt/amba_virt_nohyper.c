@@ -114,11 +114,205 @@ static int amba_virt_host_gdma_copy(struct amba_virt_dev *dev,
 	return ret;
 }
 
+#include "amba_virt_slice.h"
+#include <linux/random.h>
+#include <linux/io.h>
+
+struct amba_virt_slice_state {
+	struct amba_virt_slice_desc desc;
+	u64 nonce;
+	u32 bound_cid;
+	int open_count;
+};
+
+static struct amba_virt_slice_list g_slice_list;
+static struct amba_virt_slice_state g_slice_states[8];
+static DEFINE_MUTEX(g_slice_lock);
+
+static void amba_virt_write_slice_claim(unsigned int slice_idx,
+					const struct amba_virt_slice_desc *desc,
+					u64 nonce)
+{
+	phys_addr_t claim_phys = desc->phys + desc->usable_size;
+	void *va;
+
+	va = memremap(claim_phys, PAGE_SIZE, MEMREMAP_WT);
+	if (!va)
+		va = memremap(claim_phys, PAGE_SIZE, MEMREMAP_WB);
+	if (va) {
+		struct amba_virt_slice_claim claim;
+		memset(&claim, 0, sizeof(claim));
+		claim.magic = AMBA_VIRT_SLICE_CLAIM_MAGIC;
+		claim.index = slice_idx;
+		claim.usable_size = desc->usable_size;
+		claim.reserved = 0;
+		claim.nonce = nonce;
+		memcpy(va, &claim, sizeof(claim));
+		if (PAGE_SIZE > sizeof(claim))
+			memcpy((char *)va + PAGE_SIZE - sizeof(claim), &claim, sizeof(claim));
+		dma_wmb();
+		memunmap(va);
+	} else {
+		pr_err("amba_virt: failed to memremap claim page at 0x%llx\n",
+		       (unsigned long long)claim_phys);
+	}
+}
+
+int amba_virt_slice_get_list(struct amba_virt_slice_list *out_list)
+{
+	mutex_lock(&g_slice_lock);
+	memcpy(out_list, &g_slice_list, sizeof(*out_list));
+	mutex_unlock(&g_slice_lock);
+	return 0;
+}
+
+int amba_virt_slice_get_desc(unsigned int slice_idx, struct amba_virt_slice_desc *out_desc)
+{
+	int ret = -ENOENT;
+
+	mutex_lock(&g_slice_lock);
+	if (slice_idx < g_slice_list.count) {
+		*out_desc = g_slice_states[slice_idx].desc;
+		ret = 0;
+	}
+	mutex_unlock(&g_slice_lock);
+	return ret;
+}
+
+int amba_virt_slice_bind(u32 cid, u64 nonce, struct amba_virt_slice_desc *out_desc)
+{
+	int ret = -ENOENT;
+	unsigned int i, j;
+
+	if (cid <= 2)
+		return -EINVAL;
+	if (nonce == 0)
+		return -ENOENT;
+
+	mutex_lock(&g_slice_lock);
+	for (i = 0; i < g_slice_list.count; i++) {
+		if (g_slice_states[i].nonce == nonce) {
+			if (g_slice_states[i].bound_cid != 0 && g_slice_states[i].bound_cid != cid) {
+				ret = -EBUSY;
+				goto out_unlock;
+			}
+			for (j = 0; j < g_slice_list.count; j++) {
+				if (j != i && g_slice_states[j].bound_cid == cid) {
+					ret = -EBUSY;
+					goto out_unlock;
+				}
+			}
+			g_slice_states[i].bound_cid = cid;
+			if (out_desc)
+				*out_desc = g_slice_states[i].desc;
+			ret = 0;
+			goto out_unlock;
+		}
+	}
+
+out_unlock:
+	mutex_unlock(&g_slice_lock);
+	return ret;
+}
+
+int amba_virt_slice_get_bindings(struct amba_virt_binding_list *out_list)
+{
+	unsigned int i;
+
+	memset(out_list, 0, sizeof(*out_list));
+	mutex_lock(&g_slice_lock);
+	for (i = 0; i < g_slice_list.count && out_list->count < 8; i++) {
+		if (g_slice_states[i].bound_cid != 0) {
+			struct amba_virt_slice_binding *entry;
+
+			entry = &out_list->entries[out_list->count++];
+			entry->cid = g_slice_states[i].bound_cid;
+			entry->slice = g_slice_states[i].desc;
+		}
+	}
+	mutex_unlock(&g_slice_lock);
+	return 0;
+}
+
+void amba_virt_slice_unbind_cid(u32 cid)
+{
+	unsigned int i;
+
+	if (cid == 0)
+		return;
+
+	mutex_lock(&g_slice_lock);
+	for (i = 0; i < g_slice_list.count; i++) {
+		if (g_slice_states[i].bound_cid == cid) {
+			g_slice_states[i].bound_cid = 0;
+		}
+	}
+	mutex_unlock(&g_slice_lock);
+}
+
+int amba_virt_slice_open(unsigned int slice_idx)
+{
+	int ret = 0;
+
+	mutex_lock(&g_slice_lock);
+	if (slice_idx < g_slice_list.count) {
+		struct amba_virt_slice_state *s = &g_slice_states[slice_idx];
+		s->open_count++;
+		if (s->open_count == 1) {
+			u64 nonce;
+			do {
+				nonce = get_random_u64();
+			} while (nonce == 0);
+			s->nonce = nonce;
+			s->bound_cid = 0;
+			amba_virt_write_slice_claim(slice_idx, &s->desc, nonce);
+		}
+	} else {
+		ret = -ENODEV;
+	}
+	mutex_unlock(&g_slice_lock);
+	return ret;
+}
+
+void amba_virt_slice_release(unsigned int slice_idx)
+{
+	mutex_lock(&g_slice_lock);
+	if (slice_idx < g_slice_list.count) {
+		struct amba_virt_slice_state *s = &g_slice_states[slice_idx];
+		s->open_count--;
+		if (s->open_count <= 0) {
+			s->open_count = 0;
+			s->nonce = 0;
+			s->bound_cid = 0;
+		}
+	}
+	mutex_unlock(&g_slice_lock);
+}
+
+static int amba_virt_shm_open_idx(struct file *filp, unsigned int slice_idx)
+{
+	struct amba_virt_slice_desc desc;
+	int ret;
+
+	filp->private_data = (void *)(uintptr_t)slice_idx;
+	ret = amba_virt_slice_open(slice_idx);
+	if (ret)
+		return ret;
+	if (amba_virt_slice_get_desc(slice_idx, &desc) == 0)
+		i_size_write(file_inode(filp), desc.slice_size);
+	return 0;
+}
+
+static int amba_virt_shm_release_idx(struct inode *inode, struct file *filp)
+{
+	unsigned int slice_idx = (unsigned int)(uintptr_t)filp->private_data;
+	amba_virt_slice_release(slice_idx);
+	return 0;
+}
+
 static int amba_virt_shm_open(struct inode *inode, struct file *filp)
 {
-	filp->private_data = (void *)0;
-	i_size_write(file_inode(filp), 0x40000000ULL);
-	return 0;
+	return amba_virt_shm_open_idx(filp, 0);
 }
 
 static int amba_virt_shm_mmap(struct file *filp, struct vm_area_struct *vma)
@@ -126,14 +320,23 @@ static int amba_virt_shm_mmap(struct file *filp, struct vm_area_struct *vma)
 	return amba_virt_mmap_slice(&g_devs[0], vma, 0);
 }
 
-static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+static long amba_virt_shm_ioctl_idx(struct file *filp, unsigned int cmd, unsigned long arg, unsigned int slice_idx)
 {
 	int dmabuf_fd = -1;
+	struct amba_virt_slice_desc desc;
 	int ret;
 
+	ret = amba_virt_slice_get_desc(slice_idx, &desc);
+	if (ret)
+		return ret;
+
 	switch (cmd) {
+	case AMBA_VIRT_IOC_GET_SLICE:
+		if (copy_to_user((void __user *)arg, &desc, sizeof(desc)))
+			return -EFAULT;
+		return 0;
 	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&g_devs[0], 0, 0, 0x40000000ULL, &dmabuf_fd);
+		ret = amba_virt_export_dmabuf_slice(&g_devs[0], slice_idx, desc.offset, desc.slice_size, &dmabuf_fd);
 		if (ret)
 			return ret;
 		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
@@ -146,9 +349,15 @@ static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 	}
 }
 
+static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	return amba_virt_shm_ioctl_idx(filp, cmd, arg, 0);
+}
+
 static const struct file_operations amba_virt_shm_fops = {
 	.owner = THIS_MODULE,
 	.open = amba_virt_shm_open,
+	.release = amba_virt_shm_release_idx,
 	.mmap = amba_virt_shm_mmap,
 	.unlocked_ioctl = amba_virt_shm_ioctl,
 	.compat_ioctl = amba_virt_shm_ioctl,
@@ -164,9 +373,7 @@ static struct miscdevice amba_virt_shm_miscdev = {
 
 static int amba_virt_shm0_open(struct inode *inode, struct file *filp)
 {
-	filp->private_data = (void *)0;
-	i_size_write(file_inode(filp), 0x40000000ULL);
-	return 0;
+	return amba_virt_shm_open_idx(filp, 0);
 }
 
 static int amba_virt_shm0_mmap(struct file *filp, struct vm_area_struct *vma)
@@ -176,27 +383,13 @@ static int amba_virt_shm0_mmap(struct file *filp, struct vm_area_struct *vma)
 
 static long amba_virt_shm0_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	int dmabuf_fd = -1;
-	int ret;
-
-	switch (cmd) {
-	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&g_devs[0], 0, 0, 0x40000000ULL, &dmabuf_fd);
-		if (ret)
-			return ret;
-		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
-			close_fd(dmabuf_fd);
-			return -EFAULT;
-		}
-		return 0;
-	default:
-		return -ENOTTY;
-	}
+	return amba_virt_shm_ioctl_idx(filp, cmd, arg, 0);
 }
 
 static const struct file_operations amba_virt_shm0_fops = {
 	.owner = THIS_MODULE,
 	.open = amba_virt_shm0_open,
+	.release = amba_virt_shm_release_idx,
 	.mmap = amba_virt_shm0_mmap,
 	.unlocked_ioctl = amba_virt_shm0_ioctl,
 	.compat_ioctl = amba_virt_shm0_ioctl,
@@ -212,9 +405,7 @@ static struct miscdevice amba_virt_shm0_miscdev = {
 
 static int amba_virt_shm1_open(struct inode *inode, struct file *filp)
 {
-	filp->private_data = (void *)1;
-	i_size_write(file_inode(filp), 0x40000000ULL);
-	return 0;
+	return amba_virt_shm_open_idx(filp, 1);
 }
 
 static int amba_virt_shm1_mmap(struct file *filp, struct vm_area_struct *vma)
@@ -224,27 +415,13 @@ static int amba_virt_shm1_mmap(struct file *filp, struct vm_area_struct *vma)
 
 static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	int dmabuf_fd = -1;
-	int ret;
-
-	switch (cmd) {
-	case AMBA_VIRT_IOC_EXPORT_DMABUF:
-		ret = amba_virt_export_dmabuf_slice(&g_devs[0], 1, 0x40000000ULL, 0x40000000ULL, &dmabuf_fd);
-		if (ret)
-			return ret;
-		if (copy_to_user((void __user *)arg, &dmabuf_fd, sizeof(dmabuf_fd))) {
-			close_fd(dmabuf_fd);
-			return -EFAULT;
-		}
-		return 0;
-	default:
-		return -ENOTTY;
-	}
+	return amba_virt_shm_ioctl_idx(filp, cmd, arg, 1);
 }
 
 static const struct file_operations amba_virt_shm1_fops = {
 	.owner = THIS_MODULE,
 	.open = amba_virt_shm1_open,
+	.release = amba_virt_shm_release_idx,
 	.mmap = amba_virt_shm1_mmap,
 	.unlocked_ioctl = amba_virt_shm1_ioctl,
 	.compat_ioctl = amba_virt_shm1_ioctl,
@@ -337,6 +514,24 @@ static int __init amba_virt_host_init(void)
 	}
 
 	if (g_devs[0].shm_phys) {
+		unsigned int s_idx;
+		memset(&g_slice_list, 0, sizeof(g_slice_list));
+		memset(g_slice_states, 0, sizeof(g_slice_states));
+		ret = amba_virt_slice_compute_geometry(g_devs[0].shm_phys,
+						       g_devs[0].shm_size,
+						       PAGE_SIZE, 2, &g_slice_list);
+		if (!ret && g_slice_list.count > 0) {
+			for (s_idx = 0; s_idx < g_slice_list.count; s_idx++) {
+				g_slice_states[s_idx].desc = g_slice_list.slices[s_idx];
+			}
+			pr_info("amba_virt: published %u slices (slice_size=%llu, usable_size=%u)\n",
+				g_slice_list.count,
+				(unsigned long long)g_slice_list.slices[0].slice_size,
+				g_slice_list.slices[0].usable_size);
+		} else {
+			pr_warn("amba_virt: slice geometry computation failed (%d)\n", ret);
+		}
+
 		ret = misc_register(&amba_virt_shm_miscdev);
 		if (ret)
 			pr_warn("amba_virt: register shm miscdev failed %d\n", ret);

@@ -455,6 +455,82 @@ struct amba_virt_push_msg {
 #define AMBA_VIRT_IOC_PUSH \
 	_IOW(AMBA_VIRT_IOC_MAGIC, 0x21, struct amba_virt_push_msg)
 
+/* Dynamic Shared-Memory Slice Claim & Binding Protocol */
+#define AMBA_VIRT_SLICE_CLAIM_MAGIC	0x414d5343u /* 'AMSC' */
+
+struct amba_virt_slice_claim {
+	__u32 magic;
+	__u32 index;
+	__u32 usable_size;
+	__u32 reserved;
+	__u64 nonce;
+};
+
+struct amba_virt_slice_desc {
+	__u32 index;
+	__u32 usable_size;
+	__u64 offset;
+	__u64 phys;
+	__u64 slice_size;
+};
+
+struct amba_virt_slice_list {
+	__u32 count;
+	struct amba_virt_slice_desc slices[8];
+};
+
+struct amba_virt_slice_binding {
+	__u32 cid;
+	__u32 reserved;
+	struct amba_virt_slice_desc slice;
+};
+
+struct amba_virt_binding_list {
+	__u32 count;
+	__u32 reserved;
+	struct amba_virt_slice_binding entries[8];
+};
+
+struct amba_virt_slice_unbind {
+	__u32 cid;
+	__u32 reserved;
+};
+
+struct amba_virt_slice_claim_req {
+	__u64 nonce;
+};
+
+struct amba_virt_slice_bind {
+	__u32 cid;
+	__u32 reserved;
+	__u64 nonce;
+	struct amba_virt_slice_desc slice; /* output */
+};
+
+struct amba_virt_slice_claim_resp {
+	__s32 status;
+	__u32 index;
+	__u32 usable_size;
+	__u32 reserved;
+	__u64 offset;
+	__u64 phys;
+	__u64 slice_size;
+};
+
+#define AMBA_VIRT_MSG_SLICE_CLAIM_REQ	80u
+#define AMBA_VIRT_MSG_SLICE_CLAIM_RESP	81u
+
+#define AMBA_VIRT_IOC_ENUM_SLICES \
+	_IOR(AMBA_VIRT_IOC_MAGIC, 0x0a, struct amba_virt_slice_list)
+#define AMBA_VIRT_IOC_GET_SLICE \
+	_IOR(AMBA_VIRT_IOC_MAGIC, 0x0b, struct amba_virt_slice_desc)
+#define AMBA_VIRT_IOC_BIND_SLICE \
+	_IOWR(AMBA_VIRT_IOC_MAGIC, 0x0c, struct amba_virt_slice_bind)
+#define AMBA_VIRT_IOC_GET_BINDINGS \
+	_IOR(AMBA_VIRT_IOC_MAGIC, 0x0d, struct amba_virt_binding_list)
+#define AMBA_VIRT_IOC_UNBIND_SLICE \
+	_IOW(AMBA_VIRT_IOC_MAGIC, 0x0e, struct amba_virt_slice_unbind)
+
 /* ---- Virtual Peripheral DMA Protocol Structures ---- */
 
 #define AMBA_VIRT_DMA_DIR_MEM_TO_DEV	1u

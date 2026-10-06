@@ -102,6 +102,28 @@ int amba_virt_register_state_notifier(struct notifier_block *nb);
 int amba_virt_unregister_state_notifier(struct notifier_block *nb);
 void amba_virt_dispatch_state_event(struct amba_virt_dev_state_event *evt);
 
+struct amba_virt_slice_list;
+struct amba_virt_slice_desc;
+struct amba_virt_binding_list;
+
+#ifdef AMBA_VIRT_GUEST
+static inline int amba_virt_slice_get_list(struct amba_virt_slice_list *out_list) { return -ENOTTY; }
+static inline int amba_virt_slice_get_desc(unsigned int slice_idx, struct amba_virt_slice_desc *out_desc) { return -ENOTTY; }
+static inline int amba_virt_slice_bind(u32 cid, u64 nonce, struct amba_virt_slice_desc *out_desc) { return -ENOTTY; }
+static inline int amba_virt_slice_get_bindings(struct amba_virt_binding_list *out_list) { return -ENOTTY; }
+static inline void amba_virt_slice_unbind_cid(u32 cid) { }
+static inline int amba_virt_slice_open(unsigned int slice_idx) { return 0; }
+static inline void amba_virt_slice_release(unsigned int slice_idx) { }
+#else
+int amba_virt_slice_get_list(struct amba_virt_slice_list *out_list);
+int amba_virt_slice_get_desc(unsigned int slice_idx, struct amba_virt_slice_desc *out_desc);
+int amba_virt_slice_bind(u32 cid, u64 nonce, struct amba_virt_slice_desc *out_desc);
+int amba_virt_slice_get_bindings(struct amba_virt_binding_list *out_list);
+void amba_virt_slice_unbind_cid(u32 cid);
+int amba_virt_slice_open(unsigned int slice_idx);
+void amba_virt_slice_release(unsigned int slice_idx);
+#endif
+
 extern const struct file_operations amba_virt_fops;
 
 #endif

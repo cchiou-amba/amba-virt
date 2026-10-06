@@ -159,12 +159,16 @@ Direction is **guest → host CID 2**. Do **not** use port **2000** (EVE
 VComLink). The transport uses port **5555**. EVE does not publish guest CID↔UUID;
 the container must not connect to a guest CID.
 
-**One ivshmem window per HVM/NOHYPER pair.** Cavalry, DMA, SD/eMMC, and later
-frontends share that BAR. Do not add a second `amba_shm` per driver. Control
-stays on vsock; bulk is `shm_off` / `shm_len` into the window. A later host
-allocator partitions offsets; Cavalry takes most of the pool by quota.
-Several HVMs would need several windows:
-[EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (deferred).
+**One ivshmem window on the host.** The driver splits it into two slices
+(`amba_virt_shm` / `amba_virt_shm0`, and `amba_virt_shm1`). Each HVM maps the
+slice QEMU gave it as BAR 2. Cavalry, DMA, and later frontends share that
+slice. Do not add a second `amba_shm` per driver. Control stays on vsock.
+Bulk is an offset and length into the slice. The guest claims the slice by
+sending the nonce from the claim page, after loading
+`vmw_vsock_virtio_transport`. The server binds that guest CID only when the
+nonce matches, and it clamps the Cavalry pool to the usable slice. A second
+window per HVM remains deferred:
+[EVE-Multiple-HVM.md](EVE-Multiple-HVM.md).
 
 The window is guest staging, not host AMA. N1-655 `cavalry_reserved` is 12 GB
 on the host; the VP DMA-reads those HPAs. The proxy copies or token-rewrites

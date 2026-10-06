@@ -41,12 +41,16 @@ int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size
 int cavalry_proxy_reopen(void);
 void cavalry_proxy_cleanup(void);
 
+int cavalry_proxy_pool_size_for_usable(size_t usable_size, uint32_t *out_size);
 int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 				  int window_fd, unsigned char *shm_map,
 				  size_t shm_size, uint64_t phys_base,
 				  uint32_t slice_offset);
+int cavalry_proxy_restore_bindings(const struct amba_virt_binding_list *list,
+				   unsigned char *window_map, size_t window_size);
 int cavalry_proxy_unregister_tenant(uint32_t cid);
 struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid);
+int cavalry_proxy_get_all_tenants(struct cavalry_tenant_ctx *out_tenants, int max_tenants);
 int cavalry_proxy_set_tenant_bounds(uint32_t cid, uint32_t pool_base,
 				    uint32_t pool_size, uint32_t rpc_arena_offset,
 				    uint32_t rpc_arena_size);
@@ -56,6 +60,8 @@ int cavalry_proxy_get_enforce_path_b(void);
 
 void cavalry_proxy_set_eve_xen_dir(const char *dir);
 int cavalry_proxy_sync_eve_cids(void);
+int cavalry_proxy_bind_slice(uint32_t cid, uint64_t nonce, struct amba_virt_slice_desc *out_desc);
+void cavalry_proxy_set_slice_nonce(uint32_t slice_idx, uint64_t nonce);
 
 int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 			     struct amba_virt_cavalry_rpc *resp,
@@ -65,6 +71,7 @@ int cavalry_proxy_close_session(uint32_t client_cid, uint32_t session_id);
 void cavalry_proxy_client_disconnect(uint32_t client_cid);
 
 int cavalry_proxy_start_drain(void);
+int cavalry_proxy_is_draining(void);
 int cavalry_proxy_wait_drained(unsigned int timeout_ms);
 void cavalry_proxy_finish_drain(void);
 int cavalry_proxy_get_handle_buffer(uint32_t handle_id,

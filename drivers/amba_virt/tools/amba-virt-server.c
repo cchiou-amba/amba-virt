@@ -29,6 +29,7 @@
 #include <sys/socket.h>
 
 #include "amba_virt.h"
+#include "amba_virt_slice.h"
 #include "amba_virt_test.h"
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
@@ -299,6 +300,103 @@ struct server_ctx {
 };
 
 static struct server_ctx g_ctx;
+static struct amba_virt_slice_list g_active_slices;
+static int g_geometry_matched = 0;
+static int g_pool_ready = 0;
+
+int server_get_geometry_info(uint64_t *window_phys, uint64_t *window_bytes, uint32_t *slices, int *matched)
+{
+	if (window_phys) *window_phys = g_ctx.info.shm_phys;
+	if (window_bytes) *window_bytes = g_ctx.info.shm_size;
+	if (slices) *slices = g_active_slices.count;
+	if (matched) *matched = g_geometry_matched;
+	return 0;
+}
+
+static void server_check_geometry(int fd, const struct amba_virt_info *info)
+{
+	struct amba_virt_slice_list computed;
+	struct amba_virt_slice_list enumerated;
+	int ret;
+
+	g_geometry_matched = 0;
+	memset(&g_active_slices, 0, sizeof(g_active_slices));
+	memset(&computed, 0, sizeof(computed));
+	memset(&enumerated, 0, sizeof(enumerated));
+
+	if (!info->shm_size || !info->shm_phys)
+		return;
+
+	ret = amba_virt_slice_compute_geometry(info->shm_phys, info->shm_size, 4096, 2, &computed);
+	if (ret < 0 || computed.count == 0)
+		return;
+
+	if (ioctl(fd, AMBA_VIRT_IOC_ENUM_SLICES, &enumerated) < 0)
+		return;
+
+	if (amba_virt_slice_compare_list(&computed, &enumerated)) {
+		g_active_slices = enumerated;
+		g_geometry_matched = 1;
+		printf("amba-virt-server: geometry=match slices=%u\n", g_active_slices.count);
+	} else {
+		printf("amba-virt-server: geometry=reject (enumerated does not match window geometry)\n");
+	}
+}
+
+static void server_unbind_cid(int fd, uint32_t cid)
+{
+	struct amba_virt_slice_unbind unbind;
+
+	memset(&unbind, 0, sizeof(unbind));
+	unbind.cid = cid;
+	if (ioctl(fd, AMBA_VIRT_IOC_UNBIND_SLICE, &unbind) < 0)
+		fprintf(stderr, "unbind cid %u: %s\n", cid, strerror(errno));
+}
+
+static void server_restore_bindings(int fd, unsigned char *map, const struct amba_virt_info *info)
+{
+	struct amba_virt_binding_list bindings;
+	uint32_t i;
+
+	memset(&bindings, 0, sizeof(bindings));
+	if (ioctl(fd, AMBA_VIRT_IOC_GET_BINDINGS, &bindings) < 0) {
+		perror("GET_BINDINGS");
+		return;
+	}
+
+	if (cavalry_proxy_restore_bindings(&bindings, map == MAP_FAILED ? NULL : map,
+					   info->shm_size) < 0) {
+		fprintf(stderr, "amba-virt-server: failed to restore slice bindings\n");
+		return;
+	}
+
+	for (i = 0; i < bindings.count && i < 8; i++) {
+		const struct amba_virt_slice_binding *entry = &bindings.entries[i];
+		int pool_ret;
+
+		pool_ret = virt_mem_pool_register_tenant(entry->cid, entry->slice.index,
+							 entry->slice.usable_size,
+							 entry->slice.usable_size);
+		if (pool_ret < 0) {
+			fprintf(stderr, "amba-virt-server: pool restore cid %u failed: %d\n",
+				entry->cid, pool_ret);
+			cavalry_proxy_unregister_tenant(entry->cid);
+		}
+	}
+}
+
+static void server_apply_geometry(int fd, unsigned char *map, struct amba_virt_info *info)
+{
+	server_check_geometry(fd, info);
+	if (!g_geometry_matched || g_active_slices.count == 0)
+		return;
+
+	if (!g_pool_ready) {
+		virt_mem_pool_init(g_active_slices.slices[0].usable_size);
+		g_pool_ready = 1;
+	}
+	server_restore_bindings(fd, map, info);
+}
 
 int server_broadcast_dev_state(uint32_t dev_id, uint32_t state, uint32_t reason_code, uint32_t host_mod_mask)
 {
@@ -336,6 +434,10 @@ static void on_backend_module_state_change(uint32_t new_mod_mask)
 
 	if (new_mod_mask & 0x00000002) {
 		cavalry_proxy_reopen();
+		if (g_ctx.fd >= 0) {
+			ioctl(g_ctx.fd, AMBA_VIRT_IOC_GET_INFO, &g_ctx.info);
+			server_apply_geometry(g_ctx.fd, g_ctx.map, &g_ctx.info);
+		}
 	}
 
 	for (size_t i = 0; i < DRIVER_MATRIX_COUNT; i++) {
@@ -584,11 +686,17 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 
 		b_resp->status = virt_mem_pool_release_device_bounds(rx->client_cid, b_req->dev_type);
 		if (b_req->dev_type == AMBA_VIRT_DEV_TYPE_CAVALRY) {
-			cavalry_proxy_set_tenant_bounds(rx->client_cid,
-							CAVALRY_POOL_BASE,
-							CAVALRY_POOL_SIZE,
-							CAVALRY_RPC_ARENA_OFFSET,
-							CAVALRY_RPC_ARENA_SIZE);
+			struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(rx->client_cid);
+			uint32_t pool_size = 0;
+
+			if (tenant &&
+			    cavalry_proxy_pool_size_for_usable(tenant->shm_size, &pool_size) == 0) {
+				cavalry_proxy_set_tenant_bounds(rx->client_cid,
+								CAVALRY_POOL_BASE,
+								pool_size,
+								CAVALRY_RPC_ARENA_OFFSET,
+								CAVALRY_RPC_ARENA_SIZE);
+			}
 		}
 
 		tx->len = sizeof(*out) + sizeof(*b_resp);
@@ -721,6 +829,76 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 
 		virt_dma_handle_request(rx->client_cid, d_req, d_resp);
 		tx->len = sizeof(*out) + sizeof(*d_resp);
+	} else if (in->type == AMBA_VIRT_MSG_SLICE_CLAIM_REQ) {
+		struct amba_virt_slice_claim_req claim_req;
+		struct amba_virt_slice_claim_resp claim_resp;
+		struct amba_virt_slice_bind bind;
+		int bind_ret;
+
+		memset(&claim_resp, 0, sizeof(claim_resp));
+		if (rx->len < sizeof(*in) + sizeof(claim_req)) {
+			claim_resp.status = -EINVAL;
+		} else if (!g_geometry_matched) {
+			claim_resp.status = -ENODEV;
+		} else {
+			memcpy(&claim_req, rx->data + sizeof(*in), sizeof(claim_req));
+			memset(&bind, 0, sizeof(bind));
+			bind.cid = rx->client_cid;
+			bind.nonce = claim_req.nonce;
+			bind_ret = ioctl(fd, AMBA_VIRT_IOC_BIND_SLICE, &bind);
+			if (bind_ret < 0) {
+				claim_resp.status = -errno;
+			} else {
+				if (bind.slice.index >= g_active_slices.count ||
+				    bind.slice.offset != g_active_slices.slices[bind.slice.index].offset ||
+				    bind.slice.phys != g_active_slices.slices[bind.slice.index].phys ||
+				    bind.slice.slice_size != g_active_slices.slices[bind.slice.index].slice_size ||
+				    bind.slice.usable_size != g_active_slices.slices[bind.slice.index].usable_size) {
+					fprintf(stderr, "Slice claim descriptor mismatch for CID %u index %u\n",
+						rx->client_cid, bind.slice.index);
+					claim_resp.status = -EINVAL;
+					server_unbind_cid(fd, rx->client_cid);
+				} else {
+					uint32_t idx = bind.slice.index;
+					uint64_t off = bind.slice.offset;
+					uint64_t sz = bind.slice.slice_size;
+					uint32_t usable = bind.slice.usable_size;
+					unsigned char *submap = (map != MAP_FAILED && off + sz <= info->shm_size) ?
+								(map + off) : (unsigned char *)MAP_FAILED;
+					int reg_ret;
+					int pool_ret;
+
+					reg_ret = cavalry_proxy_register_tenant(rx->client_cid, idx, -1, submap, usable,
+										bind.slice.phys, (uint32_t)off);
+					if (reg_ret < 0) {
+						claim_resp.status = reg_ret;
+						server_unbind_cid(fd, rx->client_cid);
+					} else {
+						pool_ret = virt_mem_pool_register_tenant(rx->client_cid, idx, usable, usable);
+						if (pool_ret < 0) {
+							cavalry_proxy_unregister_tenant(rx->client_cid);
+							server_unbind_cid(fd, rx->client_cid);
+							claim_resp.status = pool_ret;
+						} else {
+							claim_resp.status = 0;
+							claim_resp.index = bind.slice.index;
+							claim_resp.usable_size = bind.slice.usable_size;
+							claim_resp.offset = bind.slice.offset;
+							claim_resp.phys = bind.slice.phys;
+							claim_resp.slice_size = bind.slice.slice_size;
+						}
+					}
+				}
+			}
+		}
+
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_SLICE_CLAIM_RESP;
+		out->seq = in->seq;
+		out->shm_len = sizeof(claim_resp);
+		memcpy(tx->data + sizeof(*out), &claim_resp, sizeof(claim_resp));
+		tx->len = sizeof(*out) + sizeof(claim_resp);
 	} else {
 		fprintf(stderr, "unknown type %u\n", in->type);
 	}
@@ -1044,8 +1222,6 @@ int main(int argc, char **argv)
 	unsigned char *map = MAP_FAILED;
 	int fd;
 	int enforce_path_b = 0;
-	struct cli_tenant cli_tenants[MAX_CLI_TENANTS];
-	int num_cli_tenants = 0;
 	int opt;
 
 	static struct option long_options[] = {
@@ -1066,23 +1242,9 @@ int main(int argc, char **argv)
 		case 'b':
 			enforce_path_b = 1;
 			break;
-		case 't': {
-			uint32_t cid = 0, idx = 0;
-			if (sscanf(optarg, "%u:%u", &cid, &idx) == 2 ||
-			    sscanf(optarg, "%u=%u", &idx, &cid) == 2) {
-				if (num_cli_tenants < MAX_CLI_TENANTS) {
-					cli_tenants[num_cli_tenants].cid = cid;
-					cli_tenants[num_cli_tenants].tenant_idx = idx;
-					num_cli_tenants++;
-				} else {
-					fprintf(stderr, "Too many static tenants (max %d)\n", MAX_CLI_TENANTS);
-				}
-			} else {
-				fprintf(stderr, "Invalid tenant format '%s' (expected <cid>:<tenant_idx>)\n", optarg);
-				return 1;
-			}
+		case 't':
+			/* Ignored per Section 3.3 / 7.5 */
 			break;
-		}
 		case 'c': {
 			int cohort = atoi(optarg);
 			if (cohort < 1) {
@@ -1139,7 +1301,11 @@ int main(int argc, char **argv)
 
 	server_init_iav_tap();
 
-	virt_mem_pool_init(0x40000000U); /* 1 GiB default BAR */
+	g_ctx.fd = fd;
+	g_ctx.map = map;
+	g_ctx.info = info;
+	server_apply_geometry(fd, map, &info);
+
 	virt_acl_init();
 	virt_dma_broker_init();
 	virt_admin_ipc_start(NULL);
@@ -1150,21 +1316,6 @@ int main(int argc, char **argv)
 		printf("amba-virt-server: Enforcing Path-B-only policy (legacy Path A disabled)\n");
 	}
 
-	for (int i = 0; i < num_cli_tenants; i++) {
-		uint32_t cid = cli_tenants[i].cid;
-		uint32_t idx = cli_tenants[i].tenant_idx;
-		uint32_t slice_sz = 0x40000000U; /* 1 GiB */
-		uint32_t slice_off = idx * slice_sz;
-		unsigned char *submap = (map != MAP_FAILED && slice_off < info.shm_size) ?
-					(map + slice_off) : MAP_FAILED;
-		cavalry_proxy_register_tenant(cid, idx, -1, submap, slice_sz,
-					      info.shm_phys + slice_off, slice_off);
-		virt_mem_pool_register_tenant(cid, idx, slice_sz, slice_sz);
-	}
-
-	g_ctx.fd = fd;
-	g_ctx.map = map;
-	g_ctx.info = info;
 	g_ctx.tcp_port = info.vsock_port ? (uint16_t)info.vsock_port : 5555;
 
 	pthread_t tcp_tid;

@@ -25,6 +25,7 @@ int main(void)
 	printf("=== Starting virt_query unit test suite ===\n");
 
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(15, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 	virt_acl_init();
 
 	/* Setup CID 15 with STANDARD role + PEERS & TOPO, CID 20 with UNTRUSTED role */

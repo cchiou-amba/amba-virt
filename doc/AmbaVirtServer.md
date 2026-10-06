@@ -311,6 +311,12 @@ When variable-sized descriptors (e.g. `struct cavalry_run_dags` or model registr
 #### Kernel-Authenticated Identity
 Vhost-vsock binds an immutable Context ID (CID) to each guest VM at domain creation. When a connection is received on Port 5555, `amba-virt-server` extracts the caller's CID via `getpeername()`. Because this CID is provided directly by the host Linux kernel, it is impossible for guest userspace or guest kernel code to forge.
 
+The host driver publishes two slices of the one attached window. The guest reads the claim page at the end of its slice and sends that nonce as message 80. It loads `vmw_vsock_virtio_transport` before the claim. A transport error or host `-ENODEV` retries the same nonce once a second, up to 15 times. `-ENOENT` and `-EBUSY` fail the probe immediately. The server publishes the tenant through `cavalry_proxy_register_tenant()`, which clamps the Cavalry pool to the usable slice. If that usable size does not extend past the pool base, the claim is refused and ioctl `0x0e` clears the CID just bound.
+
+`AMBA_VIRT_IOC_GET_BINDINGS` returns each bound CID with its slice descriptor. After the geometry check matches, and before the receive loop, the server restores those tenants. Handles, DAGs, and sessions stay in the server process and are not restored. A vsock worker that exits clears the CID only when it still owns that connection.
+
+`amba-virt-ctl status` prints one line, `geometry=match` or `geometry=reject`, then one `BIND` line per published tenant.
+
 #### Granular Capability Bitmask
 ```c
 #define AMBA_VIRT_CAP_NONE              0x00000000U

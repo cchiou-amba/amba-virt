@@ -24,6 +24,7 @@ static void test_auto_offset(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* 1. Allocate GDMA 64 MiB AUTO */
 	memset(&req, 0, sizeof(req));
@@ -67,6 +68,7 @@ static void test_collision_and_suggested_offset(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* 1. Register GDMA at [0x0, 0x04000000) (64 MiB) */
 	memset(&req, 0, sizeof(req));
@@ -112,6 +114,7 @@ static void test_quota_exceeded_exact_fails(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* Set tenant quota to 512 MiB */
 	ret = virt_mem_pool_set_quota(TEST_CID, 512);
@@ -142,6 +145,7 @@ static void test_quota_exceeded_best_effort_clamps(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* Set tenant quota to 512 MiB */
 	ret = virt_mem_pool_set_quota(TEST_CID, 512);
@@ -187,6 +191,7 @@ static void test_duplicate_registration(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* Register Cavalry */
 	memset(&req, 0, sizeof(req));
@@ -224,6 +229,7 @@ static void test_bar_overflow(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024); /* 1 GiB BAR */
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* Request 1536 MiB -> Exceeds BAR, must return -ERANGE / BAR_OVERFLOW */
 	memset(&req, 0, sizeof(req));
@@ -265,6 +271,7 @@ static void test_invalid_alignment_and_unknown_dev(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* Unknown device type */
 	memset(&req, 0, sizeof(req));
@@ -298,6 +305,7 @@ static void test_dynamic_extents(void)
 
 	printf("Running %s...", __func__);
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 
 	/* Alloc 16 MiB extent */
 	memset(&mreq, 0, sizeof(mreq));

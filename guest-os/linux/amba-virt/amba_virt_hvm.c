@@ -8,6 +8,8 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/io.h>
+#include <linux/delay.h>
+#include <linux/kmod.h>
 
 #include <amba_virt.h>
 #include "amba_virt_kernel.h"
@@ -15,6 +17,8 @@
 
 #define IVSHMEM_VENDOR	0x1af4
 #define IVSHMEM_DEVICE	0x1110
+#define AMBA_VIRT_CLAIM_ATTEMPTS	15
+#define AMBA_VIRT_CLAIM_RETRY_MS	1000
 
 #define AMBA_VIRT_DMA32_WINDOW_SIZE	0x1000000ULL /* 16 MiB */
 
@@ -25,6 +29,13 @@ struct amba_virt_pci_window {
 	void __iomem		*iomem;
 	size_t			size;
 };
+
+static bool amba_virt_claim_retryable(int err)
+{
+	return err == -ECONNRESET || err == -ECONNREFUSED || err == -ENOTCONN ||
+	       err == -ETIMEDOUT || err == -EAGAIN || err == -EPIPE ||
+	       err == -EHOSTUNREACH || err == -ENODEV;
+}
 
 static struct amba_virt_pci_window bulk_win;
 static struct amba_virt_pci_window dma32_win;
@@ -176,24 +187,104 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 		return -ENOMEM;
 	}
 
-	memset(&gdev, 0, sizeof(gdev));
-	gdev.shm_phys = start;
-	gdev.shm_size = (size_t)len;
-	gdev.shm_iomem = bulk_win.iomem;
+	/* Read claim page from bulk BAR */
+	{
+		struct amba_virt_slice_claim claim;
+		bool claim_ok = false;
+		int retry;
 
-	ret = amba_virt_core_init(&gdev, false);
-	if (ret) {
-		iounmap(bulk_win.iomem);
-		bulk_win.iomem = NULL;
-		pci_release_region(pdev, bar);
-		pci_disable_device(pdev);
-		memset(&bulk_win, 0, sizeof(bulk_win));
-		return ret;
+		for (retry = 0; retry < 8; retry++) {
+			memcpy_fromio(&claim, bulk_win.iomem + len - sizeof(claim), sizeof(claim));
+			if (claim.magic == AMBA_VIRT_SLICE_CLAIM_MAGIC) {
+				claim_ok = true;
+				break;
+			}
+			if (len >= PAGE_SIZE) {
+				memcpy_fromio(&claim, bulk_win.iomem + len - PAGE_SIZE, sizeof(claim));
+				if (claim.magic == AMBA_VIRT_SLICE_CLAIM_MAGIC) {
+					claim_ok = true;
+					break;
+				}
+			}
+			msleep(100);
+		}
+
+		if (!claim_ok) {
+			dev_err(&pdev->dev, "slice claim magic mismatch (0x%08x)\n", claim.magic);
+			iounmap(bulk_win.iomem);
+			bulk_win.iomem = NULL;
+			pci_release_region(pdev, bar);
+			pci_disable_device(pdev);
+			memset(&bulk_win, 0, sizeof(bulk_win));
+			return -EAGAIN;
+		}
+
+		memset(&gdev, 0, sizeof(gdev));
+		gdev.shm_phys = start;
+		gdev.shm_size = (size_t)len;
+		gdev.shm_iomem = bulk_win.iomem;
+
+		ret = amba_virt_core_init(&gdev, false);
+		if (ret) {
+			iounmap(bulk_win.iomem);
+			bulk_win.iomem = NULL;
+			pci_release_region(pdev, bar);
+			pci_disable_device(pdev);
+			memset(&bulk_win, 0, sizeof(bulk_win));
+			return ret;
+		}
+
+		/* Send nonce claim request over vsock RPC */
+		{
+			struct {
+				struct amba_virt_msg msg;
+				struct amba_virt_slice_claim_req req;
+			} rpc_req;
+			struct {
+				struct amba_virt_msg msg;
+				struct amba_virt_slice_claim_resp resp;
+			} rpc_resp;
+			u32 resp_len = sizeof(rpc_resp);
+
+			memset(&rpc_req, 0, sizeof(rpc_req));
+			rpc_req.msg.type = AMBA_VIRT_MSG_SLICE_CLAIM_REQ;
+			rpc_req.msg.shm_len = sizeof(rpc_req.req);
+			rpc_req.req.nonce = claim.nonce;
+			request_module("vmw_vsock_virtio_transport");
+
+			for (retry = 0; retry < AMBA_VIRT_CLAIM_ATTEMPTS; retry++) {
+				memset(&rpc_resp, 0, sizeof(rpc_resp));
+				resp_len = sizeof(rpc_resp);
+				ret = amba_virt_rpc(&rpc_req, sizeof(rpc_req), &rpc_resp,
+						    &resp_len, 5000);
+				if (!ret && rpc_resp.resp.status != 0)
+					ret = rpc_resp.resp.status < 0 ? rpc_resp.resp.status : -EPERM;
+				if (!ret || !amba_virt_claim_retryable(ret))
+					break;
+				dev_info(&pdev->dev, "slice claim retry %d/%d: %d\n",
+					 retry + 1, AMBA_VIRT_CLAIM_ATTEMPTS, ret);
+				msleep(AMBA_VIRT_CLAIM_RETRY_MS);
+			}
+			if (ret) {
+				dev_err(&pdev->dev, "slice claim RPC failed: %d\n", ret);
+				amba_virt_core_exit(&gdev);
+				iounmap(bulk_win.iomem);
+				bulk_win.iomem = NULL;
+				pci_release_region(pdev, bar);
+				pci_disable_device(pdev);
+				memset(&bulk_win, 0, sizeof(bulk_win));
+				memset(&gdev, 0, sizeof(gdev));
+				return ret;
+			}
+
+			bulk_win.size = rpc_resp.resp.usable_size;
+			gdev.shm_size = rpc_resp.resp.usable_size;
+		}
 	}
 
 	pci_set_drvdata(pdev, &bulk_win);
 	dev_info(&pdev->dev, "amba_virt guest: bulk window BAR%d phys 0x%llx size %zu\n",
-		 bar, (unsigned long long)start, (size_t)len);
+		 bar, (unsigned long long)start, bulk_win.size);
 	return 0;
 }
 
@@ -255,6 +346,7 @@ static void __exit amba_virt_guest_exit(void)
 module_init(amba_virt_guest_init);
 module_exit(amba_virt_guest_exit);
 
+MODULE_SOFTDEP("pre: vmw_vsock_virtio_transport");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("amba_virt guest (ivshmem PCI + vsock)");
 MODULE_AUTHOR("amba-virt");

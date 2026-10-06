@@ -17,6 +17,8 @@
 int virt_admin_ipc_start(const char *sock_path);
 void virt_admin_ipc_stop(void);
 
+int server_get_geometry_info(uint64_t *window_phys, uint64_t *window_bytes, uint32_t *slices, int *matched);
+
 #endif /* _VIRT_ADMIN_IPC_H_ */
 
 /*

@@ -29,6 +29,15 @@ static int g_admin_running = 0;
 static int g_admin_server_fd = -1;
 static char g_admin_sock_path[256];
 
+__attribute__((weak)) int server_get_geometry_info(uint64_t *window_phys, uint64_t *window_bytes, uint32_t *slices, int *matched)
+{
+	if (window_phys) *window_phys = 0;
+	if (window_bytes) *window_bytes = 0;
+	if (slices) *slices = 0;
+	if (matched) *matched = 0;
+	return 0;
+}
+
 static void handle_client(int client_fd)
 {
 	char req_buf[VIRT_ADMIN_MAX_BUF];
@@ -57,9 +66,32 @@ static void handle_client(int client_fd)
 	if (sscanf(req_buf, "%63s", cmd) != 1) {
 		snprintf(resp_buf, sizeof(resp_buf), "ERR INVALID_CMD\n");
 	} else if (strcmp(cmd, "STATUS") == 0) {
-		snprintf(resp_buf, sizeof(resp_buf),
-			 "OK proto=3 role=admin default_bar=1024MB sock=%s\n",
-			 g_admin_sock_path);
+		uint64_t win_phys = 0, win_bytes = 0;
+		uint32_t slices = 0;
+		int matched = 0;
+		int off = 0;
+
+		server_get_geometry_info(&win_phys, &win_bytes, &slices, &matched);
+		off += snprintf(resp_buf + off, sizeof(resp_buf) - off,
+				"OK window_phys=0x%llx window_bytes=%llu slices=%u geometry=%s\n",
+				(unsigned long long)win_phys,
+				(unsigned long long)win_bytes,
+				slices,
+				matched ? "match" : "reject");
+
+		struct cavalry_tenant_ctx tenants[MAX_TENANTS];
+		int n_tenants = cavalry_proxy_get_all_tenants(tenants, MAX_TENANTS);
+		for (int i = 0; i < n_tenants; i++) {
+			off += snprintf(resp_buf + off, sizeof(resp_buf) - off,
+					"BIND cid=%u index=%u offset=0x%llx phys=0x%llx usable=%zu\n",
+					tenants[i].cid,
+					tenants[i].tenant_idx,
+					(unsigned long long)tenants[i].slice_offset,
+					(unsigned long long)tenants[i].phys_base,
+					tenants[i].shm_size);
+			if ((size_t)off >= sizeof(resp_buf) - 128)
+				break;
+		}
 	} else if (strcmp(cmd, "LIST_GUESTS") == 0) {
 		struct virt_acl_entry entries[VIRT_ACL_MAX_RULES];
 		int count = virt_acl_get_all_entries(entries, VIRT_ACL_MAX_RULES);

@@ -86,7 +86,7 @@ guest-os/
 │   └── include/uapi/           # Local UAPI headers symlink
 ├── linux/                       # Linux guest kernel drivers (EL1 monolithic)
 │   ├── amba-virt/              # Core transport driver (amba_virt.ko)
-│   │   ├── amba_virt_hvm.c     # Guest PCI driver (ivshmem discovery & IRQ)
+│   │   ├── amba_virt_hvm.c     # Guest PCI driver (ivshmem, vsock claim)
 │   │   ├── amba_virt_core.c    # Character device & IOCTL handlers
 │   │   └── Makefile            # Out-of-tree kbuild Makefile
 │   └── amba-cavalry/           # Cavalry NPU proxy frontend (amba_cavalry.ko)

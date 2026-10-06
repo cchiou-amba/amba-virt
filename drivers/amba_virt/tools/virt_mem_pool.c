@@ -63,7 +63,7 @@ int virt_mem_pool_register_tenant(uint32_t cid, uint32_t tenant_idx,
 	int i;
 
 	if (!g_pool_initialized)
-		virt_mem_pool_init(VIRT_MEM_DEFAULT_BAR_SIZE);
+		return -EINVAL;
 
 	pthread_mutex_lock(&g_pool_mutex);
 
@@ -132,7 +132,7 @@ struct virt_tenant_pool *virt_mem_pool_get_tenant(uint32_t cid)
 	int i;
 
 	if (!g_pool_initialized)
-		virt_mem_pool_init(VIRT_MEM_DEFAULT_BAR_SIZE);
+		return NULL;
 
 	pthread_mutex_lock(&g_pool_mutex);
 	for (i = 0; i < VIRT_MEM_MAX_TENANTS; i++) {
@@ -141,25 +141,6 @@ struct virt_tenant_pool *virt_mem_pool_get_tenant(uint32_t cid)
 			return &g_tenant_pools[i];
 		}
 	}
-
-	/* Auto-register connecting CID */
-	for (i = 0; i < VIRT_MEM_MAX_TENANTS; i++) {
-		if (!g_tenant_pools[i].in_use) {
-			pthread_mutex_lock(&g_tenant_pools[i].lock);
-			g_tenant_pools[i].cid = cid;
-			g_tenant_pools[i].tenant_idx = i;
-			g_tenant_pools[i].bar_size = g_default_bar_size;
-			g_tenant_pools[i].quota_max = g_default_bar_size;
-			g_tenant_pools[i].quota_min = 0;
-			g_tenant_pools[i].allocated_bytes = 0;
-			g_tenant_pools[i].high_water_mark = 0;
-			g_tenant_pools[i].in_use = 1;
-			pthread_mutex_unlock(&g_tenant_pools[i].lock);
-			pthread_mutex_unlock(&g_pool_mutex);
-			return &g_tenant_pools[i];
-		}
-	}
-
 	pthread_mutex_unlock(&g_pool_mutex);
 	return NULL;
 }

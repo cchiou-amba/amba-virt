@@ -51,12 +51,13 @@ int main(void)
 	printf("=== Starting virt_admin_ipc unit test suite ===\n");
 
 	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(15, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
 	virt_acl_init();
 	virt_admin_ipc_start(TEST_SOCK);
 
 	/* 1. Test STATUS */
 	send_cmd("STATUS\n", resp, sizeof(resp));
-	assert(strncmp(resp, "OK proto=3", 10) == 0);
+	assert(strncmp(resp, "OK window_phys=", 15) == 0);
 	printf("STATUS command: PASS\n");
 
 	/* 2. Set rule for CID 15 and test LIST_GUESTS */
