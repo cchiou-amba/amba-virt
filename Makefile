@@ -75,7 +75,8 @@ endif
 	drivers $(OOT_DRIVERS) nohyper nohyper-apps everything clean distclean \
 	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
-	guest guest-all guest-ubuntu guest-alpine guest-qnx guest-qnx-image \
+	guest guest-all guest-ubuntu guest-ubuntu-image guest-ubuntu-install \
+	guest-alpine guest-qnx guest-qnx-image \
 	guest-windows clean-guest distclean-guest \
 	u-boot host-mkimage host_mkimage u-boot-pkg u-boot-package clean-uboot
 
@@ -105,6 +106,8 @@ help:
 	@echo "  clean-uboot         Clean U-Boot and host_mkimage build outputs"
 	@echo "  guest               Build all HVM guest side artifacts"
 	@echo "  guest-ubuntu        Build Ubuntu 24.04 HVM driver & client"
+	@echo "  guest-ubuntu-image  Build lean Ubuntu 24.04 ARM64 HVM QCOW2 image"
+	@echo "  guest-ubuntu-install Deploy & qualify Ubuntu 24.04 HVM image on EVE nodes"
 	@echo "  guest-alpine        Build Alpine 3.20 HVM driver & client"
 	@echo "  guest-qnx           Build QNX 8.0 HVM resource manager & client"
 	@echo "  guest-qnx-image     Build bootable QNX 8.0 QCOW2 disk image"
@@ -372,6 +375,21 @@ guest-all:
 
 guest-ubuntu:
 	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=ubuntu
+
+guest-ubuntu-image:
+	@$(ROOT_DIR)/guest-os/ubuntu/ubuntu-build/build.sh
+
+guest-ubuntu-install:
+	@if [ -z "$$ZCLI_TOKEN" ]; then \
+		echo "Error: ZCLI_TOKEN is unset in environment. Export ZCLI_TOKEN before running." >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(ROOT_DIR)/guest-os/ubuntu/ubuntu-build/output/dist/ubuntu-24.04-arm64-cloudimg.qcow2" ]; then \
+		echo "Error: Final QCOW2 image not found at guest-os/ubuntu/ubuntu-build/output/dist/ubuntu-24.04-arm64-cloudimg.qcow2." >&2; \
+		echo "Run 'make guest-ubuntu-image' first." >&2; \
+		exit 1; \
+	fi
+	@$(ROOT_DIR)/guest-os/ubuntu/ubuntu-build/deploy.sh
 
 guest-alpine:
 	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=alpine

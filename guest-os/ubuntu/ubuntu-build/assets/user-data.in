@@ -1,0 +1,65 @@
+#cloud-config
+hostname: ubuntu
+
+users:
+  - name: ubuntu
+    lock_passwd: false
+    passwd: "$6$BeSMUrCS5emSRhNJ$nPR4L5N12GoyIjAk/jBuNG3siGyYHljy4F7guZLLN3T3Lcmp0aovKRCVUwj9Cghm0KxEU6jDNFeST09NdUDjt."
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
+    shell: /bin/bash
+
+chpasswd:
+  expire: false
+  users:
+    - name: ubuntu
+      password: ubuntu
+      type: text
+
+write_files:
+  - path: /etc/systemd/system/amba-image-provision.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Ambarella Image Provisioning Service
+      After=cloud-final.service
+      Wants=cloud-final.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/provision-image.sh
+      StandardOutput=journal+console
+      StandardError=journal+console
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/grow-rootfs.sh
+    permissions: '0755'
+    encoding: b64
+    content: @GROW_ROOTFS_SH_B64@
+
+  - path: /etc/systemd/system/grow-rootfs.service
+    permissions: '0644'
+    encoding: b64
+    content: @GROW_ROOTFS_SERVICE_B64@
+
+  - path: /etc/systemd/system/ssh-hostkeys.service
+    permissions: '0644'
+    encoding: b64
+    content: @SSH_HOSTKEYS_SERVICE_B64@
+
+  - path: /tmp/assets/01-ambarella.yaml
+    permissions: '0644'
+    encoding: b64
+    content: @NETPLAN_YAML_B64@
+
+  - path: /usr/local/sbin/provision-image.sh
+    permissions: '0755'
+    encoding: b64
+    content: @PROVISION_IMAGE_SH_B64@
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable --no-block amba-image-provision.service
+  - systemctl start --no-block amba-image-provision.service
