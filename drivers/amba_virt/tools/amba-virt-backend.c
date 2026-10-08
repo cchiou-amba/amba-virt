@@ -28,20 +28,16 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/utsname.h>
 
 #include "amba_virt.h"
 #include "virt_driver_matrix.h"
 
 #define DEFAULT_PORT          5556
 #define DEFAULT_TOKEN_PATH    "/persist/etc/amba-virt-backend.token"
-#define DEFAULT_MODULES_DIR   "/persist/modules"
-#define DEFAULT_FIRMWARE_DIR  "/persist/firmware"
-#define DEFAULT_LOG_PATH      "/persist/log/amba-virt-backend.log"
 
 static int g_port = DEFAULT_PORT;
 static char g_token_path[256] = DEFAULT_TOKEN_PATH;
-static char g_modules_dir[256] = DEFAULT_MODULES_DIR;
-static char g_firmware_dir[256] = DEFAULT_FIRMWARE_DIR;
 static char g_expected_token[BACKEND_TOKEN_MAX_LEN] = {0};
 
 static FILE *g_log_fp = NULL;
@@ -156,15 +152,50 @@ static int init_token(void)
 	return 0;
 }
 
-static int do_insmod(const char *module_name)
+static bool is_valid_module_basename(const char *name)
+{
+	if (!name)
+		return false;
+	size_t len = strlen(name);
+	if (len == 0 || len > BACKEND_MODULE_MAX_NAME_LEN)
+		return false;
+	if (len < 4 || strcmp(name + len - 3, ".ko") != 0)
+		return false;
+	if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL || strstr(name, "..") != NULL)
+		return false;
+	return true;
+}
+
+static bool is_valid_param_str(const char *params)
+{
+	if (!params)
+		return true;
+	size_t len = strlen(params);
+	if (len > BACKEND_MODULE_MAX_PARAM_LEN)
+		return false;
+	for (size_t i = 0; i < len; i++) {
+		char c = params[i];
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '_' || c == '=' ||
+		      c == '.' || c == ',' || c == ' ')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static int do_insmod(const char *module_name, const char *params)
 {
 	char path[512];
-	snprintf(path, sizeof(path), "%s/%s", g_modules_dir, module_name);
+	int fd = -1;
+	struct utsname uts;
 
-	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (uname(&uts) == 0) {
+		snprintf(path, sizeof(path), "/lib/modules/%s/extra/%s", uts.release, module_name);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+	}
 	if (fd < 0) {
-		/* Try current directory or standard /lib/modules */
-		snprintf(path, sizeof(path), "./%s", module_name);
+		snprintf(path, sizeof(path), "/persist/modules/%s", module_name);
 		fd = open(path, O_RDONLY | O_CLOEXEC);
 	}
 
@@ -173,8 +204,8 @@ static int do_insmod(const char *module_name)
 		return -ENOENT;
 	}
 
-	/* finit_module syscall: syscall(__NR_finit_module, fd, param_values, flags) */
-	int ret = (int)syscall(SYS_finit_module, fd, "", 0);
+	const char *p = (params && params[0] != '\0') ? params : "";
+	int ret = (int)syscall(SYS_finit_module, fd, p, 0);
 	close(fd);
 
 	if (ret < 0) {
@@ -211,25 +242,6 @@ static int do_rmmod(const char *module_name)
 	}
 
 	log_event("EVT-011", "Successfully unloaded module %s", base_name);
-	return 0;
-}
-
-static int execute_cascade_load(uint32_t target_mask)
-{
-	int ret = 0;
-	for (size_t i = 0; i < DRIVER_MATRIX_COUNT; i++) {
-		if (target_mask & g_driver_matrix[i].module_mask) {
-			/* First resolve prerequisites */
-			if (g_driver_matrix[i].prerequisite_mask) {
-				ret = execute_cascade_load(g_driver_matrix[i].prerequisite_mask);
-				if (ret < 0)
-					return ret;
-			}
-			ret = do_insmod(g_driver_matrix[i].module_name);
-			if (ret < 0 && ret != -EEXIST)
-				return ret;
-		}
-	}
 	return 0;
 }
 
@@ -396,24 +408,293 @@ static void handle_client_connection(int client_fd)
 			safe_write(client_fd, &mask, sizeof(mask));
 			log_event("EVT-004", "Reported full module status mask=0x%08x", mask);
 		} else if (hdr.msg_type == BACKEND_OP_MODULE_LOAD) {
-			char mod_name[64] = {0};
-			if (hdr.len > 0 && hdr.len < sizeof(mod_name)) {
-				safe_read(client_fd, mod_name, hdr.len);
+			if (hdr.len > BACKEND_MODULE_LOAD_MAX_PAYLOAD) {
+				char discard[256];
+				uint32_t to_drain = hdr.len;
+				while (to_drain > 0) {
+					size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : to_drain;
+					if (safe_read(client_fd, discard, chunk) != (ssize_t)chunk)
+						break;
+					to_drain -= chunk;
+				}
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_LOAD_RESP,
+					.seq = hdr.seq,
+					.len = 0,
+					.status = -EMSGSIZE,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				continue;
 			}
-			uint32_t target_mask = 0;
-			for (size_t i = 0; i < DRIVER_MATRIX_COUNT; i++) {
-				if (strcmp(g_driver_matrix[i].module_name, mod_name) == 0) {
-					target_mask = g_driver_matrix[i].module_mask;
+
+			char payload[BACKEND_MODULE_LOAD_MAX_PAYLOAD + 1];
+			memset(payload, 0, sizeof(payload));
+			if (hdr.len > 0) {
+				if (safe_read(client_fd, payload, hdr.len) != (ssize_t)hdr.len) {
 					break;
 				}
 			}
-			int status = target_mask ? execute_cascade_load(target_mask) : do_insmod(mod_name);
+
+			char mod_name[64] = {0};
+			char mod_params[256] = {0};
+			int status = 0;
+
+			const char *first_nul = memchr(payload, '\0', hdr.len);
+			if (!first_nul) {
+				if (hdr.len > BACKEND_MODULE_MAX_NAME_LEN) {
+					status = -EINVAL;
+				} else {
+					memcpy(mod_name, payload, hdr.len);
+					mod_name[hdr.len] = '\0';
+				}
+			} else {
+				size_t name_len = (size_t)(first_nul - payload);
+				if (name_len > BACKEND_MODULE_MAX_NAME_LEN) {
+					status = -EINVAL;
+				} else {
+					memcpy(mod_name, payload, name_len);
+					mod_name[name_len] = '\0';
+
+					const char *param_start = first_nul + 1;
+					size_t remaining = hdr.len - (name_len + 1);
+					const char *second_nul = memchr(param_start, '\0', remaining);
+					size_t param_len = second_nul ? (size_t)(second_nul - param_start) : remaining;
+
+					if (param_len > BACKEND_MODULE_MAX_PARAM_LEN) {
+						status = -EINVAL;
+					} else if (param_len > 0) {
+						memcpy(mod_params, param_start, param_len);
+						mod_params[param_len] = '\0';
+					}
+				}
+			}
+
+			if (status == 0) {
+				if (!is_valid_module_basename(mod_name) || !is_valid_param_str(mod_params)) {
+					status = -EINVAL;
+				}
+			}
+
+			if (status == 0) {
+				status = do_insmod(mod_name, mod_params);
+			}
+
 			struct backend_msg_hdr resp = {
 				.magic = BACKEND_MSG_MAGIC,
 				.msg_type = BACKEND_OP_MODULE_LOAD_RESP,
 				.seq = hdr.seq,
 				.len = 0,
 				.status = status,
+			};
+			safe_write(client_fd, &resp, sizeof(resp));
+		} else if (hdr.msg_type == BACKEND_OP_MODULE_STORE) {
+			if (hdr.len == 0) {
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+					.seq = hdr.seq,
+					.len = 0,
+					.status = -EINVAL,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				continue;
+			}
+
+			char name_buf[64] = {0};
+			size_t name_read = 0;
+			bool found_nul = false;
+
+			while (name_read < sizeof(name_buf) && name_read < hdr.len) {
+				char c;
+				if (safe_read(client_fd, &c, 1) != 1)
+					break;
+				name_buf[name_read++] = c;
+				if (c == '\0') {
+					found_nul = true;
+					break;
+				}
+			}
+
+			if (!found_nul || !is_valid_module_basename(name_buf)) {
+				uint32_t to_drain = hdr.len - name_read;
+				char discard[512];
+				while (to_drain > 0) {
+					size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : to_drain;
+					if (safe_read(client_fd, discard, chunk) != (ssize_t)chunk)
+						break;
+					to_drain -= chunk;
+				}
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+					.seq = hdr.seq,
+					.len = 0,
+					.status = -EINVAL,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				continue;
+			}
+
+			size_t name_len_with_nul = strlen(name_buf) + 1;
+			if (hdr.len == (uint32_t)name_len_with_nul) {
+				/* Probe request */
+				struct utsname uts;
+				char image_path[512];
+				bool image_present = false;
+				if (uname(&uts) == 0) {
+					snprintf(image_path, sizeof(image_path), "/lib/modules/%s/extra/%s",
+						 uts.release, name_buf);
+					struct stat st;
+					if (stat(image_path, &st) == 0 && S_ISREG(st.st_mode)) {
+						image_present = true;
+					}
+				}
+				uint8_t disp = image_present ? BACKEND_MODULE_IMAGE_PRESENT : BACKEND_MODULE_UPLOAD_REQUIRED;
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+					.seq = hdr.seq,
+					.len = 1,
+					.status = 0,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				safe_write(client_fd, &disp, sizeof(disp));
+				continue;
+			}
+
+			/* Upload request */
+			uint64_t file_bytes = (uint64_t)hdr.len - name_len_with_nul;
+			if (file_bytes > BACKEND_MODULE_STORE_MAX_SIZE) {
+				char discard[65536];
+				uint64_t to_drain = file_bytes;
+				while (to_drain > 0) {
+					size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : (size_t)to_drain;
+					if (safe_read(client_fd, discard, chunk) != (ssize_t)chunk)
+						break;
+					to_drain -= chunk;
+				}
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+					.seq = hdr.seq,
+					.len = 0,
+					.status = -EMSGSIZE,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				continue;
+			}
+
+			struct utsname uts;
+			char image_path[512];
+			bool image_present = false;
+			if (uname(&uts) == 0) {
+				snprintf(image_path, sizeof(image_path), "/lib/modules/%s/extra/%s",
+					 uts.release, name_buf);
+				struct stat st;
+				if (stat(image_path, &st) == 0 && S_ISREG(st.st_mode)) {
+					image_present = true;
+				}
+			}
+
+			if (image_present) {
+				char discard[65536];
+				uint64_t to_drain = file_bytes;
+				while (to_drain > 0) {
+					size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : (size_t)to_drain;
+					if (safe_read(client_fd, discard, chunk) != (ssize_t)chunk)
+						break;
+					to_drain -= chunk;
+				}
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+					.seq = hdr.seq,
+					.len = 0,
+					.status = 0,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				continue;
+			}
+
+			mkdir("/persist", 0755);
+			mkdir("/persist/modules", 0755);
+
+			char tmp_path[512];
+			snprintf(tmp_path, sizeof(tmp_path), "/persist/modules/.tmp_%s_XXXXXX", name_buf);
+			int tmp_fd = mkstemp(tmp_path);
+			if (tmp_fd < 0) {
+				char discard[65536];
+				uint64_t to_drain = file_bytes;
+				while (to_drain > 0) {
+					size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : (size_t)to_drain;
+					if (safe_read(client_fd, discard, chunk) != (ssize_t)chunk)
+						break;
+					to_drain -= chunk;
+				}
+				struct backend_msg_hdr resp = {
+					.magic = BACKEND_MSG_MAGIC,
+					.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+					.seq = hdr.seq,
+					.len = 0,
+					.status = -errno,
+				};
+				safe_write(client_fd, &resp, sizeof(resp));
+				continue;
+			}
+
+			char stream_buf[65536];
+			uint64_t remaining = file_bytes;
+			int store_err = 0;
+
+			while (remaining > 0) {
+				size_t chunk = remaining > sizeof(stream_buf) ? sizeof(stream_buf) : (size_t)remaining;
+				ssize_t n = safe_read(client_fd, stream_buf, chunk);
+				if (n != (ssize_t)chunk) {
+					store_err = -EIO;
+					break;
+				}
+				if (store_err == 0) {
+					size_t written = 0;
+					while (written < (size_t)n) {
+						ssize_t wn = write(tmp_fd, stream_buf + written, (size_t)n - written);
+						if (wn <= 0) {
+							if (wn < 0 && errno == EINTR)
+								continue;
+							store_err = -EIO;
+							break;
+						}
+						written += wn;
+					}
+				}
+				remaining -= chunk;
+			}
+
+			if (store_err == 0) {
+				if (fchmod(tmp_fd, 0644) < 0 || fsync(tmp_fd) < 0) {
+					store_err = -errno;
+				}
+			}
+			close(tmp_fd);
+
+			char final_path[512];
+			snprintf(final_path, sizeof(final_path), "/persist/modules/%s", name_buf);
+
+			if (store_err == 0) {
+				if (rename(tmp_path, final_path) < 0) {
+					store_err = -errno;
+					unlink(tmp_path);
+				}
+			} else {
+				unlink(tmp_path);
+			}
+
+			struct backend_msg_hdr resp = {
+				.magic = BACKEND_MSG_MAGIC,
+				.msg_type = BACKEND_OP_MODULE_STORE_RESP,
+				.seq = hdr.seq,
+				.len = 0,
+				.status = store_err,
 			};
 			safe_write(client_fd, &resp, sizeof(resp));
 		} else if (hdr.msg_type == BACKEND_OP_MODULE_UNLOAD) {
@@ -447,25 +728,7 @@ static void handle_client_connection(int client_fd)
 		} else if (hdr.msg_type == BACKEND_OP_FIRMWARE_VERSIONS) {
 			struct backend_firmware_resp fw_resp;
 			memset(&fw_resp, 0, sizeof(fw_resp));
-			fw_resp.count = 2;
-
-			strncpy(fw_resp.entries[0].name, "cavalry.bin", 31);
-			char fw_path[512];
-			snprintf(fw_path, sizeof(fw_path), "%s/cavalry.bin", g_firmware_dir);
-			struct stat st;
-			if (stat(fw_path, &st) == 0) {
-				fw_resp.entries[0].present = 1;
-				fw_resp.entries[0].size = (uint32_t)st.st_size;
-				strncpy(fw_resp.entries[0].sha256, "a1b2c3d4e5f6...", 63);
-			}
-
-			strncpy(fw_resp.entries[1].name, "orccode.bin", 31);
-			snprintf(fw_path, sizeof(fw_path), "%s/orccode.bin", g_firmware_dir);
-			if (stat(fw_path, &st) == 0) {
-				fw_resp.entries[1].present = 1;
-				fw_resp.entries[1].size = (uint32_t)st.st_size;
-				strncpy(fw_resp.entries[1].sha256, "e5f6a7b8c9d0...", 63);
-			}
+			fw_resp.count = 0;
 
 			struct backend_msg_hdr resp = {
 				.magic = BACKEND_MSG_MAGIC,
@@ -476,7 +739,7 @@ static void handle_client_connection(int client_fd)
 			};
 			safe_write(client_fd, &resp, sizeof(resp));
 			safe_write(client_fd, &fw_resp, sizeof(fw_resp));
-			log_event("EVT-040", "Reported firmware inventory status");
+			log_event("EVT-040", "Reported firmware inventory status (none managed by Dom0)");
 		}
 	}
 
@@ -490,15 +753,13 @@ int main(int argc, char **argv)
 	static struct option long_options[] = {
 		{"port",         required_argument, 0, 'p'},
 		{"token-file",   required_argument, 0, 't'},
-		{"modules-dir",  required_argument, 0, 'm'},
-		{"firmware-dir", required_argument, 0, 'f'},
 		{"log-file",     required_argument, 0, 'l'},
 		{"help",         no_argument,       0, 'h'},
 		{0, 0, 0, 0}
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "p:t:m:f:l:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:t:l:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'p':
 			g_port = atoi(optarg);
@@ -506,24 +767,14 @@ int main(int argc, char **argv)
 		case 't':
 			strncpy(g_token_path, optarg, sizeof(g_token_path) - 1);
 			break;
-		case 'm':
-			strncpy(g_modules_dir, optarg, sizeof(g_modules_dir) - 1);
-			break;
-		case 'f':
-			strncpy(g_firmware_dir, optarg, sizeof(g_firmware_dir) - 1);
-			break;
 		case 'l':
 			g_log_fp = fopen(optarg, "a");
 			break;
 		case 'h':
 		default:
-			printf("Usage: %s [--port <port>] [--token-file <path>] [--modules-dir <path>] [--firmware-dir <path>]\n", argv[0]);
+			printf("Usage: %s [--port <port>] [--token-file <path>] [--log-file <path>]\n", argv[0]);
 			return 0;
 		}
-	}
-
-	if (!g_log_fp) {
-		g_log_fp = fopen(DEFAULT_LOG_PATH, "a");
 	}
 
 	signal(SIGPIPE, SIG_IGN);

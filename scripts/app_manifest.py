@@ -155,8 +155,16 @@ echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/root_login.conf
 
 ssh-keygen -A
 /usr/sbin/sshd
-echo "`date` - /etc/init.sh ends" >> /var/log/init.sh.log
-exec sleep infinity
+
+while true; do
+    if [ -x /usr/bin/amba-virt-server ]; then
+        /usr/bin/amba-virt-server
+        sleep 2
+    else
+        echo "`date` - /usr/bin/amba-virt-server is not executable" >> /var/log/init.sh.log
+        exec sleep infinity
+    fi
+done
 """
 
     cloud_config = """#cloud-config

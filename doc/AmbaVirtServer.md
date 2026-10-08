@@ -1042,11 +1042,27 @@ Outputs:
 - `build/bin/amba-virt-server`: Daemon and arbitration proxy.
 - `build/bin/amba-virt-ctl`: Dom0 command-line administration tool.
 
-### 14.2 Launching the Server Daemon
+### 14.2 Launching the Server Daemon & Startup Sequence
+
+The server daemon accepts an optional `-m <config-path>` argument specifying the module configuration file to load before opening the virtualization character device:
+
 ```bash
 # Run server in background inside NOHYPER container:
-./amba-virt-server > /tmp/amba-virt-server.log 2>&1 &
+amba-virt-server -m /etc/amba-virt/modules.conf > /tmp/amba-virt-server.log 2>&1 &
 ```
+
+#### Module Configuration Grammar (`modules.conf`)
+- Blank lines and lines starting with `#` are ignored.
+- Each directive line specifies: `<basename>[ <params>]`
+  - `<basename>`: Single non-empty `*.ko` filename, at most 63 bytes, with no `/`, `\`, or `..`.
+  - `<params>`: Optional module parameters string, at most 255 bytes, passed directly to `finit_module`.
+
+#### Server Startup Sequence
+1. **Backend IPC Connection**: Connects to `amba-virt-backend` on Dom0 TCP port 5556, polling up to 10 seconds for backend availability.
+2. **Module Negotiation & Loading**: If a module configuration file exists (via `-m` or default), parses the file and executes the Section 2.8 two-stage probe/upload protocol for each entry. The backend loads image copies from `/lib/modules/<release>/extra/` or stores uploaded packages in `/persist/modules/` before inserting them with parameters.
+3. **Character Device Polling**: Polls for `/dev/amba_virt` up to 30 seconds until the driver character device is registered by the kernel. The server does not wait on `/dev/amba_virt_shm`; `/dev/amba_virt` is the single authoritative node opened by the server.
+4. **Device Open & Memory Mapping**: Opens `/dev/amba_virt`, queries device capabilities via `ioctl(AMBA_VIRT_IOC_GET_INFO)`, and maps the ivshmem shared DRAM window.
+5. **Service Initialization**: Starts the vsock listener on CID 2 port 5555 and enters the main event loop.
 
 ### 14.3 Diagnostic & Error Recovery Triage
 

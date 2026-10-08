@@ -14,7 +14,7 @@ CFLAGS ?= -O2 -Wall -Wextra -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/ua
 LDFLAGS ?= -static
 
 TARGETS := amba-virt-server amba-virt-ctl amba-virt-backend iav_frame_tap iav_proxy_test
-SERVER_SRCS := amba-virt-server.c cavalry_proxy.c amba_virt_slice.c iav_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_query.c virt_backend_client.c virt_dma_broker.c hmac_sha256.c
+SERVER_SRCS := amba-virt-server.c cavalry_proxy.c amba_virt_slice.c iav_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_query.c virt_backend_client.c virt_dma_broker.c hmac_sha256.c virt_module_loader.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 NANOPB_OBJS := pb_common.o pb_encode.o pb_decode.o amba_virt.pb.o
 
@@ -35,7 +35,7 @@ NNCTRL_CFLAGS := -I../../../guest-os/userspace/cavalry_mem/inc \
 	-I../../../guest-os/userspace/nnctrl/cavalry_v3/src \
 	-I../../../guest-os/userspace/nnctrl/cavalry_v3/dep/ambacnn
 
-TESTS := test_virt_mem_pool test_admin_ipc test_virt_query test_virt_driver_matrix test_backend_ipc test_drain_protocol test_boundary_stress test_state_desync test_fuzz_corruption test_security_exploits test_hardware_safety test_virt_dma_acl test_virt_uart test_virt_dma_broker test_hmac_sha256 test_host_iav_proxy test_host_cavalry_eve_sync
+TESTS := test_virt_mem_pool test_admin_ipc test_virt_query test_virt_driver_matrix test_virt_module_loader test_backend_ipc test_drain_protocol test_boundary_stress test_state_desync test_fuzz_corruption test_security_exploits test_hardware_safety test_virt_dma_acl test_virt_uart test_virt_dma_broker test_hmac_sha256 test_host_iav_proxy test_host_cavalry_eve_sync
 
 .PHONY: all clean test
 
@@ -77,6 +77,7 @@ test: $(TESTS)
 	./test_admin_ipc
 	./test_virt_query
 	./test_virt_driver_matrix
+	./test_virt_module_loader
 	./test_backend_ipc
 	./test_drain_protocol
 	./test_boundary_stress
@@ -104,6 +105,9 @@ test_virt_query: test_virt_query.c virt_query.c virt_mem_pool.c virt_acl.c caval
 
 test_virt_driver_matrix: test_virt_driver_matrix.c
 	gcc $(TEST_CFLAGS) -o $@ $^
+
+test_virt_module_loader: test_virt_module_loader.c virt_module_loader.c virt_backend_client.c
+	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
 
 test_backend_ipc: test_backend_ipc.c virt_backend_client.c
 	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread

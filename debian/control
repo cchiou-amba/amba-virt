@@ -1,0 +1,13 @@
+Source: amba-virt-server
+Section: utils
+Priority: optional
+Maintainer: Ambarella International LLC <cchiou@ambarella.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+
+Package: amba-virt-server
+Architecture: arm64
+Depends: ${misc:Depends}
+Description: Ambarella hardware-accelerator virtualization server
+ amba-virt-server coordinates hardware-accelerator virtualization,
+ kernel module loading via amba-virt-backend, and client sessions.

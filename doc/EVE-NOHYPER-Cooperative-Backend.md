@@ -65,12 +65,13 @@ The Ambarella edge virtualization platform (`amba-virt`) implements a 3-tier coo
 | |                                                                                                   | |
 | |   +───────────────────────────────────────────────────────────────────────────────────────────+   | |
 | |   | amba-virt-backend (Bare-Metal Helper & Execution Daemon)                                  |   | |
-| |   | - Autostarted via /persist/bin/load-ambarella-drivers.sh (Backoff: 5 crashes/60s -> 30s)  |   | |
-| |   | - Startup Self-Test (/persist/modules, /persist/firmware, /proc/modules validation)       |   | |
-| |   | - Module Lifecycle (insmod, rmmod, cascade loader)                                        |   | |
+| |   | - Shipped in EVE image at /usr/bin/amba-virt-backend (autostarted via Dom0 /etc/init.d/)  |   | |
+| |   | - Listens on TCP port 5556, single authenticated session                                  |   | |
+| |   | - Module Lifecycle (loads from image /lib/modules/.../extra/ or /persist/modules/)        |   | |
+| |   | - Two-stage module store protocol (BACKEND_OP_MODULE_STORE probe/upload)                  |   | |
+| |   | - Parameterised module insertion (finit_module with parameter strings)                    |   | |
 | |   | - Hardware Reset Executor (VisORC NPU reset register write)                               |   | |
 | |   | - Procfs Watcher Thread (/proc/modules polling pushing BACKEND_EVENT_MODULE_CHANGED)      |   | |
-| |   | - Firmware Inventory & Verification Service (BACKEND_OP_FIRMWARE_VERSIONS)                |   | |
 | |   +───────────────────────────────────────────────────────────────────────────────────────────+   | |
 | +───────────────────────────────────────────────────────────────────────────────────────────────────+ |
 +───────────────────────────────────────────────────────────────────────────────────────────────────────+
@@ -80,7 +81,8 @@ The Ambarella edge virtualization platform (`amba-virt`) implements a 3-tier coo
 
 ## 2. Component Protocols & Lifecycle
 
-### 2.1 Token-Based Authentication
+### 2.1 Token-Based Authentication & Image Location
+- `amba-virt-backend` is built into the EVE image and installed at `/usr/bin/amba-virt-backend` (part of `pkg/dom0-ztools`). Dom0 autostarts it via `/etc/init.d/020-amba-virt-backend`. It does not reside in `/persist/bin`.
 - `amba-virt-backend` binds to port 5556 on the internal container bridge.
 - On startup, it reads or creates a cryptographically random token in `/persist/etc/amba-virt-backend.token` (`0600`).
 - `amba-virt-server` mounts `/persist/etc` and sends `BACKEND_MSG_AUTH_REQ` within 2 seconds.
@@ -93,6 +95,37 @@ When unloading backing host drivers:
 3. `cavalry_proxy` begins a 200ms graceful drain waiting for in-flight DAGs.
 4. If requests drain $\le 200\text{ms}$, local descriptors close cleanly.
 5. If in-flight requests hang $> 200\text{ms}$, server sends `BACKEND_OP_HARDWARE_RESET` to halt the VisORC accelerator before `delete_module()` is invoked.
+
+### 2.3 Module-Load Payload Split (`BACKEND_OP_MODULE_LOAD`)
+Opcode: `BACKEND_OP_MODULE_LOAD` (`0x07`).
+- **Name-Only (Legacy)**: If the payload contains no `NUL`, the payload is treated as the module name and parameters are empty.
+- **Parameterised Load**: If the payload contains a `NUL`:
+  - Bytes before the first `NUL` define the module name (at most 63 bytes, no slashes).
+  - Bytes after the first `NUL` up to `hdr.len` (truncated at a second `NUL`) define the parameter string (at most 255 bytes, restricted to `[A-Za-z0-9_ =.,]`).
+- The backend invokes `finit_module(fd, params, 0)`.
+- If the module already exists in the kernel (`-EEXIST`), it is treated as a success.
+- Payloads exceeding 320 bytes (`BACKEND_MODULE_LOAD_MAX_PAYLOAD`) are rejected with `-EMSGSIZE` and their wire bytes drained to maintain socket framing.
+- The backend executes only the named module; cascade loading is disabled to prevent dropping explicit parameters.
+
+### 2.4 Two-Stage Module Store Protocol (`BACKEND_OP_MODULE_STORE`)
+To transfer out-of-tree kernel modules from NOHYPER Debian packages to the host kernel without manual staging:
+1. **Probe (Stage 1)**: The client sends `BACKEND_OP_MODULE_STORE` (`0x11`) with payload `<basename>` (no file bytes).
+   - If `/lib/modules/<release>/extra/<basename>` exists in the immutable EVE image, backend responds with disposition `0x00` (`ALREADY_PRESENT_IMAGE`).
+   - If `/persist/modules/<basename>` exists on host persist, backend responds with `0x00` (`ALREADY_PRESENT_PERSIST`).
+   - Otherwise, backend responds with disposition `0x01` (`UPLOAD_REQUIRED`).
+2. **Upload (Stage 2)**: On `UPLOAD_REQUIRED`, the client reads `/usr/lib/amba-virt/modules/<basename>` and sends a second `BACKEND_OP_MODULE_STORE` with payload `<basename>\0<file_bytes>` (up to 64 MiB limit).
+   - The backend streams the uploaded bytes into a temporary file under `/persist/modules/`, syncs via `fsync()`, and atomically renames to the destination.
+   - The client then proceeds to issue `BACKEND_OP_MODULE_LOAD`.
+
+### 2.5 Persist Filesystem Governance & Preserve List
+The `/persist` filesystem is strictly reserved for EVE state and controlled runtime tokens:
+- **Clean Install State**: At EVE installation, zero `amba-virt` files exist on `/persist`. Old bringup tools (`load-ambarella-drivers.sh`, `fresh-bringup/`, `/persist/firmware/`, `/persist/bin/`) are retired and deleted.
+- **Permitted Runtime State**:
+  - `/persist/etc/amba-virt-backend.token` (runtime authentication token).
+  - `/persist/modules/<name>.ko` (kernel modules uploaded dynamically via Section 2.4).
+  - No other amba-virt files or directories belong on `/persist`. The backend logs to stdout and never creates `/persist/log/`.
+- **EVE Preserved Directories**: The following native EVE directories are preserved and untouched:
+  `/persist/etc/`, `appdata/`, `certs/`, `clear-node/`, `config/`, `containerd/`, `downloads/`, `eve/`, `eve-current/`, `img/`, `kcrashes/`, `netdump/`, `newlog/`, `rkt/`, `status/`, `vault/`, `wpa_supplicant/`.
 
 ---
 

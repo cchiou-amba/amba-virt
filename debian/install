@@ -1,0 +1,6 @@
+drivers/amba_virt/tools/amba-virt-server usr/bin/
+drivers/amba_virt/tools/amba-virt-ctl usr/bin/
+drivers/amba_virt/tools/modules.conf etc/amba-virt/
+drivers/amba_virt/amba_virt.ko usr/lib/amba-virt/modules/
+drivers/amba_virt/amba_virt_uart.ko usr/lib/amba-virt/modules/
+drivers/amba_virt/amba_virt_dma.ko usr/lib/amba-virt/modules/

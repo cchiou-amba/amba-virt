@@ -38,6 +38,7 @@
 #include "virt_dma_broker.h"
 #include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
+#include "virt_module_loader.h"
 #include "virt_query.h"
 #include <uapi/specific/iav_ioctl.h>
 #include "iav_tap_abi.h"
@@ -1131,6 +1132,7 @@ static void usage(const char *prog)
 	fprintf(stderr, "  -t, --tenant <cid>:<idx>    Pre-register tenant slice for vsock CID to index\n");
 	fprintf(stderr, "  -l, --lease <cid>:<lease>   Bind vsock CID to DMA32 lease index (0..3)\n");
 	fprintf(stderr, "  -c, --tap-cohort <n>        Live tap clients required before frames are consumed (default 1)\n");
+	fprintf(stderr, "  -m, --modules-conf <path>   Path to modules.conf (default " MODULES_CONF_DEFAULT_PATH ")\n");
 	fprintf(stderr, "  -h, --help                  Show this help message\n");
 }
 
@@ -1222,6 +1224,7 @@ int main(int argc, char **argv)
 	unsigned char *map = MAP_FAILED;
 	int fd;
 	int enforce_path_b = 0;
+	const char *modules_conf = MODULES_CONF_DEFAULT_PATH;
 	int opt;
 
 	static struct option long_options[] = {
@@ -1229,6 +1232,7 @@ int main(int argc, char **argv)
 		{"tenant",         required_argument, 0, 't'},
 		{"lease",          required_argument, 0, 'l'},
 		{"tap-cohort",     required_argument, 0, 'c'},
+		{"modules-conf",   required_argument, 0, 'm'},
 		{"help",           no_argument,       0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -1237,7 +1241,7 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
-	while ((opt = getopt_long(argc, argv, "bt:l:c:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "bt:l:c:m:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'b':
 			enforce_path_b = 1;
@@ -1265,6 +1269,9 @@ int main(int argc, char **argv)
 			}
 			break;
 		}
+		case 'm':
+			modules_conf = optarg;
+			break;
 		case 'h':
 			usage(argv[0]);
 			return 0;
@@ -1274,6 +1281,51 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* 2. Connect to backend */
+	if (virt_backend_client_init("127.0.0.1", 5556, "/persist/etc/amba-virt-backend.token", on_backend_module_state_change) < 0) {
+		fprintf(stderr, "Failed to start backend client\n");
+		return 1;
+	}
+
+	/* 3. Poll connection every 200 ms, at most 10 seconds (50 iterations) */
+	int connected = 0;
+	for (int i = 0; i < 50; i++) {
+		if (virt_backend_client_is_connected()) {
+			connected = 1;
+			break;
+		}
+		usleep(200000);
+	}
+	if (!connected) {
+		fprintf(stderr, "Timed out waiting for backend connection after 10 seconds\n");
+		return 1;
+	}
+
+	/* 4. If conf file exists, run virt_module_loader */
+	if (access(modules_conf, F_OK) == 0) {
+		int ret = virt_module_loader_run(modules_conf);
+		if (ret < 0) {
+			fprintf(stderr, "virt_module_loader_run(%s) failed: %d\n", modules_conf, ret);
+			return 1;
+		}
+	} else {
+		printf("amba-virt-server: Config %s not found, continuing\n", modules_conf);
+	}
+
+	/* 5. Poll access("/dev/amba_virt", F_OK) every 500 ms, at most 30 seconds (60 iterations) */
+	int dev_ready = 0;
+	for (int i = 0; i < 60; i++) {
+		if (access(AMBA_VIRT_DEV_PATH, F_OK) == 0) {
+			dev_ready = 1;
+			break;
+		}
+		usleep(500000);
+	}
+	if (!dev_ready) {
+		fprintf(stderr, "Timed out waiting for %s after 30 seconds\n", AMBA_VIRT_DEV_PATH);
+	}
+
+	/* 6. Existing ensure_dev_node / open / mmap path */
 	if (ensure_dev_node(AMBA_VIRT_DEV_PATH) < 0)
 		return 1;
 
@@ -1309,7 +1361,6 @@ int main(int argc, char **argv)
 	virt_acl_init();
 	virt_dma_broker_init();
 	virt_admin_ipc_start(NULL);
-	virt_backend_client_init("127.0.0.1", 5556, "/persist/etc/amba-virt-backend.token", on_backend_module_state_change);
 
 	if (enforce_path_b) {
 		cavalry_proxy_set_enforce_path_b(1);

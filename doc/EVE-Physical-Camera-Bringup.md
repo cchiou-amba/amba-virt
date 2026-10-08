@@ -1,14 +1,10 @@
 # Physical Camera & 3A Bringup on Ambarella EVE-OS
 
-> **Checkpoint 2026-10-01, `n1-655-devkit`.** Port A streamed. A cold reset, a
-> self-contained stage built by `tools/bringup/scripts/stage_fresh_bringup.sh`,
-> and `tools/bringup/scripts/run_sensor_bringup_fresh.sh` produced 900 decodable
-> 1920x1080 H.264 frames at 30 fps. `vin0_idsp_sof` counted through the run and
-> the DSP state stayed `0x0`. Do not load DSP, IAV, or Cavalry from the old
-> `/persist` tree, and do not preload those modules at boot. The measured
-> procedure is the `sensor-bringup` skill. Sections below that describe a
-> `/persist/{modules,bin,lib,firmware}` layout are background, not the recipe
-> that cleared the 7-frame stall. `n1-655-pro` was not retested on this path.
+> [!NOTE]
+> **Retained Qualification Record (Historical Baseline — Not a Runnable Product Procedure)**:
+> This document records the historical hardware qualification achieved on 2026-10-01 on `n1-655-devkit`. A cold reset, a self-contained stage built by `tools/bringup/scripts/stage_fresh_bringup.sh`, and `tools/bringup/scripts/run_sensor_bringup_fresh.sh` produced 900 decodable 1920x1080 H.264 frames at 30 fps via Port A, clearing the previous 7-frame IDSP stall (`vin0_idsp_sof` counted continuously; DSP state stayed `0x0`).
+>
+> The `/persist/fresh-bringup` and `/persist/{modules,bin,lib,firmware}` paths described in this document are retained strictly as a historical qualification record and diagnostic baseline. They are **NOT** a runnable product procedure. Direct staging onto `/persist` has been retired and purged. In the product architecture, drivers and firmware are packaged in Debian packages (`amba-virt-camera`), and pipeline orchestration is driven by `amba-virt-server`. Do not stage files into `/persist/fresh-bringup` or execute manual bringup scripts on production boards.
 
 This guide details the hardware architecture, memory carveout requirements, driver loading sequence, 3A image tuning database integration, and video pipeline orchestration required to bring up physical GMSL2 cameras (Maxim MAX96712 deserializer with OmniVision OS08A10 sensors) natively in EVE-OS Dom0 on Ambarella N1-655 platforms (`n1-655-pro` and `n1-655-devkit`).
 
@@ -78,9 +74,9 @@ Do not install a static DTB with `set_global devicetree`. GRUB would replace the
 
 ---
 
-## 3. Persistent Directory Layout
+## 3. Persistent Directory Layout [RETAINED HISTORICAL QUALIFICATION RECORD]
 
-All modules, firmware binaries, calibration databases, and helper tools reside under `/persist`:
+All modules, firmware binaries, calibration databases, and helper tools were historically staged under `/persist` during initial bringup (this layout is now retired):
 
 ```
 /persist/
@@ -118,9 +114,9 @@ All modules, firmware binaries, calibration databases, and helper tools reside u
 
 ---
 
-## 4. Driver Loading & Hardware Bringup Sequence
+## 4. Driver Loading & Hardware Bringup Sequence [RETAINED HISTORICAL QUALIFICATION RECORD]
 
-Follow this sequence precisely to ensure clean driver initialization and sensor registration:
+This sequence records the historical verification steps executed on 2026-10-01:
 
 ### Step 1: Base Driver Insertion
 Configure kernel firmware path and load core DSP memory and control drivers:

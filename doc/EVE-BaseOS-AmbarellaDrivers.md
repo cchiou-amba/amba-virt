@@ -28,20 +28,19 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 ```
 / (SquashFS - Read-Only)
 ├── lib/
-│   ├── modules/<kernel-ver>/   (In-tree kernel modules only)
+│   ├── modules/<kernel-ver>/   (In-tree kernel modules /extra/)
 │   └── firmware/               (Standard platform firmware)
 │
 /persist (ext4 - Read-Write, Persistent across OTA & Reboot)
-├── modules/                    (Out-of-tree .ko drivers)
-│   ├── amba_virt.ko
-│   ├── amba_pci_platform.ko
-│   ├── dsplog.ko               (optional, built when ambvideo present)
-│   └── cavalry.ko              (optional proprietary module)
-├── firmware/                   (Hardware microcode binaries)
-│   └── cavalry.bin             (optional proprietary microcode)
-└── bin/                        (Runtime loader scripts)
-    └── load-ambarella-drivers.sh
+├── etc/                        (Preserved configuration & amba-virt-backend.token)
+└── modules/                    (Out-of-tree .ko drivers uploaded via amba-virt-backend)
+    ├── amba_virt.ko
+    ├── amba_virt_uart.ko
+    └── amba_virt_dma.ko
 ```
+
+> [!NOTE]
+> **Retired Historical Paths**: `/persist/firmware/`, `/persist/bin/load-ambarella-drivers.sh`, and loose `/persist/fresh-bringup` directories were retired and purged in Envelope 1. Firmware binaries (`cavalry.bin`, `orccode.bin`, etc.) ship inside the `amba-virt-camera` package and are read directly by userspace in NOHYPER (`load_ucode`), not loaded from `/persist/firmware`.
 
 ---
 
@@ -49,8 +48,8 @@ EVE maintains a dedicated read-write ext4 partition mounted at `/persist` that:
 
 | Location | Role | Typical Files | Access Mode |
 |---|---|---|---|
-| `/persist/modules/` | Houses out-of-tree kernel modules compiled for the active kernel ABI | `amba_virt.ko`, `amba_pci_platform.ko`, `dsplog.ko`, plus optional proprietary modules (`cavalry.ko`, `iav.ko`, `dsp.ko`, `pvrsrvkm.ko`, `amba_otp.ko`) | Read / Write |
-| `/persist/firmware/` | Houses proprietary hardware microcode and DSP firmware | `cavalry.bin`, `orccode.bin`, etc. | Read / Write |
+| `/persist/modules/` | Houses out-of-tree kernel modules uploaded via `amba-virt-backend` | `amba_virt.ko`, `amba_virt_uart.ko`, `amba_virt_dma.ko` | Read / Write (Backend only) |
+| `/persist/etc/` | Authentication token and system configuration | `amba-virt-backend.token` | Read / Write |
 | `/persist/status/` | EVE system state, microservice checkpoints, app configs | Managed by EVE | Read / Write |
 
 ---
@@ -283,38 +282,16 @@ Because `/persist` is non-volatile flash, staged files persist through reboots a
 
 ---
 
-## 8. Integrated EVE `storage-init` Boot Hook
-In modern EVE BaseOS builds, driver loading at boot time is fully automated via an early hook in EVE's `storage-init` service.
+## 8. Integrated EVE `storage-init` Boot Hook [RETIRED HISTORICAL RECORD]
 
-Upon mounting the `/persist` filesystem on system startup, `storage-init` automatically executes `/persist/bin/load-ambarella-drivers.sh` inside `/hostfs`:
-
-```bash
-#!/bin/sh
-# /persist/bin/load-ambarella-drivers.sh (deployed by scripts/deploy_and_insmod.sh)
-
-set -e
-
-# 1. Configure kernel firmware search path to persistent storage
-if [ -f /persist/firmware/cavalry.bin ]; then
-    echo -n "/persist/firmware" > /sys/module/firmware_class/parameters/path
-fi
-
-# 2. Insert out-of-tree hardware drivers if present
-if [ -f /persist/modules/cavalry.ko ] && ! lsmod | grep -q cavalry; then
-    insmod /persist/modules/cavalry.ko
-fi
-
-# 3. Insert virtualization transport drivers
-if [ -f /persist/modules/amba_pci_platform.ko ] && ! lsmod | grep -q amba_pci_platform; then
-    insmod /persist/modules/amba_pci_platform.ko
-fi
-
-if [ -f /persist/modules/amba_virt.ko ] && ! lsmod | grep -q amba_virt; then
-    insmod /persist/modules/amba_virt.ko
-fi
-```
-
-Because `storage-init` executes before edge applications and hypervisor domains launch, character devices (`/dev/cavalry`, `/dev/amba_virt`) are created up front, eliminating the container startup race condition. Deploying drivers via `./scripts/deploy_and_insmod.sh <target-node>` automatically installs this loader into `/persist/bin/`.
+> [!NOTE]
+> **Retired Workflow**: Early bringup used `/persist/bin/load-ambarella-drivers.sh` invoked from `storage-init`. This workflow, along with `scripts/deploy_and_insmod.sh`, has been fully retired and deleted.
+> 
+> In the modern architecture:
+> 1. `amba-virt-backend` is installed into the EVE image at `/usr/bin/amba-virt-backend` and started by Dom0 `/etc/init.d/020-amba-virt-backend`.
+> 2. `amba_virt.ko` is probed early by Dom0 `/etc/init.d/000-mod-params`.
+> 3. Out-of-tree modules ship inside NOHYPER Debian packages (`/usr/lib/amba-virt/modules/`).
+> 4. `amba-virt-server` negotiates module loading via `amba-virt-backend` over TCP port 5556 using the Section 2.8 two-stage `BACKEND_OP_MODULE_STORE` protocol and parameterised `BACKEND_OP_MODULE_LOAD`. Direct module copy and manual `insmod` are prohibited.
 
 ---
 
@@ -369,13 +346,8 @@ This displays whether the build is configured for `development` or `production`,
    ```
    Monitor SoC console for `BootFrom:PAHTA` (reboots within 10 seconds; if stuck, power cycle via MCP `embdevenv_mcu_power(target="<target>", action="reboot")`).
 
-4. **Rapidly Iterate on Driver Code**:
-   Modify driver code on the host, then recompile and reload live in ~3 seconds:
-   ```bash
-   make drivers
-   ./scripts/deploy_and_insmod.sh <target-node> --reload
-   ```
-   The module is recompiled, signed, transferred, and reloaded on the running board without rebooting.
+4. **Deploy and Iterate via NOHYPER Packages and Backend**:
+   Out-of-tree drivers are packaged into Debian packages (`amba-virt-server` and `amba-virt-camera`), installed in NOHYPER via `apt`, and loaded dynamically by `amba-virt-server` communicating with `amba-virt-backend` over TCP port 5556. Direct deployment via `deploy_and_insmod.sh` is retired and deleted.
 
 #### Switching to Production Mode (In-Tree Hermetic Build)
 

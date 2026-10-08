@@ -339,6 +339,94 @@ int virt_backend_client_get_full_status(uint32_t *mod_mask)
 	return 0;
 }
 
+static bool client_is_valid_param_char(char c)
+{
+	if ((c >= 'a' && c <= 'z') ||
+	    (c >= 'A' && c <= 'Z') ||
+	    (c >= '0' && c <= '9') ||
+	    c == '_' || c == '=' || c == '.' || c == ',' || c == ' ') {
+		return true;
+	}
+	return false;
+}
+
+int virt_backend_client_load_module_params(const char *module_name, const char *param_values)
+{
+	if (!module_name)
+		return -EINVAL;
+
+	size_t name_len = strlen(module_name);
+	if (name_len == 0 || name_len > BACKEND_MODULE_MAX_NAME_LEN)
+		return -EINVAL;
+	if (strchr(module_name, '/') != NULL || strchr(module_name, '\\') != NULL ||
+	    strstr(module_name, "..") != NULL)
+		return -EINVAL;
+
+	const char *params = param_values ? param_values : "";
+	size_t param_len = strlen(params);
+	if (param_len > BACKEND_MODULE_MAX_PARAM_LEN)
+		return -EINVAL;
+
+	for (size_t i = 0; i < param_len; i++) {
+		if (!client_is_valid_param_char(params[i]))
+			return -EINVAL;
+	}
+
+	pthread_mutex_lock(&g_rpc_mutex);
+	if (g_sock_fd < 0) {
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -ENOTCONN;
+	}
+
+	uint32_t payload_len = (uint32_t)(name_len + 1 + param_len);
+	if (payload_len > BACKEND_MODULE_LOAD_MAX_PAYLOAD) {
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EMSGSIZE;
+	}
+
+	struct backend_msg_hdr req = {
+		.magic = BACKEND_MSG_MAGIC,
+		.msg_type = BACKEND_OP_MODULE_LOAD,
+		.seq = g_seq++,
+		.len = payload_len,
+		.status = 0,
+	};
+
+	if (client_safe_write(g_sock_fd, &req, sizeof(req)) < 0 ||
+	    client_safe_write(g_sock_fd, module_name, name_len + 1) < 0 ||
+	    (param_len > 0 && client_safe_write(g_sock_fd, params, param_len) < 0)) {
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	struct backend_msg_hdr resp;
+	if (client_safe_read(g_sock_fd, &resp, sizeof(resp)) != sizeof(resp) ||
+	    resp.magic != BACKEND_MSG_MAGIC) {
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	if (resp.len > 0) {
+		char discard[256];
+		uint32_t to_drain = resp.len;
+		while (to_drain > 0) {
+			size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : to_drain;
+			if (client_safe_read(g_sock_fd, discard, chunk) != (ssize_t)chunk)
+				break;
+			to_drain -= chunk;
+		}
+	}
+
+	pthread_mutex_unlock(&g_rpc_mutex);
+	return resp.status;
+}
+
 int virt_backend_client_load_module(const char *module_name)
 {
 	if (!module_name)
@@ -372,6 +460,191 @@ int virt_backend_client_load_module(const char *module_name)
 	    resp.magic != BACKEND_MSG_MAGIC) {
 		pthread_mutex_unlock(&g_rpc_mutex);
 		return -EIO;
+	}
+
+	pthread_mutex_unlock(&g_rpc_mutex);
+	return resp.status;
+}
+
+int virt_backend_client_probe_module(const char *module_name, uint8_t *disposition)
+{
+	if (!module_name || !disposition)
+		return -EINVAL;
+
+	size_t name_len = strlen(module_name);
+	if (name_len == 0 || name_len > BACKEND_MODULE_MAX_NAME_LEN)
+		return -EINVAL;
+	if (strchr(module_name, '/') != NULL || strchr(module_name, '\\') != NULL ||
+	    strstr(module_name, "..") != NULL)
+		return -EINVAL;
+
+	pthread_mutex_lock(&g_rpc_mutex);
+	if (g_sock_fd < 0) {
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -ENOTCONN;
+	}
+
+	struct backend_msg_hdr req = {
+		.magic = BACKEND_MSG_MAGIC,
+		.msg_type = BACKEND_OP_MODULE_STORE,
+		.seq = g_seq++,
+		.len = (uint32_t)(name_len + 1),
+		.status = 0,
+	};
+
+	if (client_safe_write(g_sock_fd, &req, sizeof(req)) < 0 ||
+	    client_safe_write(g_sock_fd, module_name, name_len + 1) < 0) {
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	struct backend_msg_hdr resp;
+	if (client_safe_read(g_sock_fd, &resp, sizeof(resp)) != sizeof(resp) ||
+	    resp.magic != BACKEND_MSG_MAGIC) {
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	if (resp.status != 0) {
+		if (resp.len > 0) {
+			char discard[64];
+			client_safe_read(g_sock_fd, discard, resp.len > sizeof(discard) ? sizeof(discard) : resp.len);
+		}
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return resp.status;
+	}
+
+	if (resp.len != 1) {
+		char discard[64];
+		if (resp.len > 0)
+			client_safe_read(g_sock_fd, discard, resp.len > sizeof(discard) ? sizeof(discard) : resp.len);
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EPROTO;
+	}
+
+	uint8_t disp = 0;
+	if (client_safe_read(g_sock_fd, &disp, 1) != 1) {
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	if (disp != BACKEND_MODULE_IMAGE_PRESENT && disp != BACKEND_MODULE_UPLOAD_REQUIRED) {
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EPROTO;
+	}
+
+	*disposition = disp;
+	pthread_mutex_unlock(&g_rpc_mutex);
+	return 0;
+}
+
+int virt_backend_client_store_module(const char *module_name, const char *package_path)
+{
+	if (!module_name || !package_path)
+		return -EINVAL;
+
+	size_t name_len = strlen(module_name);
+	if (name_len == 0 || name_len > BACKEND_MODULE_MAX_NAME_LEN)
+		return -EINVAL;
+	if (strchr(module_name, '/') != NULL || strchr(module_name, '\\') != NULL ||
+	    strstr(module_name, "..") != NULL)
+		return -EINVAL;
+
+	struct stat st;
+	if (lstat(package_path, &st) < 0)
+		return -errno;
+
+	if (!S_ISREG(st.st_mode))
+		return -EINVAL;
+
+	if (st.st_size > (off_t)BACKEND_MODULE_STORE_MAX_SIZE)
+		return -EMSGSIZE;
+
+	int file_fd = open(package_path, O_RDONLY | O_CLOEXEC);
+	if (file_fd < 0)
+		return -errno;
+
+	pthread_mutex_lock(&g_rpc_mutex);
+	if (g_sock_fd < 0) {
+		close(file_fd);
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -ENOTCONN;
+	}
+
+	uint32_t payload_len = (uint32_t)(name_len + 1 + st.st_size);
+	struct backend_msg_hdr req = {
+		.magic = BACKEND_MSG_MAGIC,
+		.msg_type = BACKEND_OP_MODULE_STORE,
+		.seq = g_seq++,
+		.len = payload_len,
+		.status = 0,
+	};
+
+	if (client_safe_write(g_sock_fd, &req, sizeof(req)) < 0 ||
+	    client_safe_write(g_sock_fd, module_name, name_len + 1) < 0) {
+		close(file_fd);
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	char buf[65536];
+	ssize_t bytes_left = (ssize_t)st.st_size;
+	while (bytes_left > 0) {
+		ssize_t to_read = bytes_left > (ssize_t)sizeof(buf) ? (ssize_t)sizeof(buf) : bytes_left;
+		ssize_t n = read(file_fd, buf, to_read);
+		if (n <= 0) {
+			if (n < 0 && errno == EINTR)
+				continue;
+			close(file_fd);
+			close(g_sock_fd);
+			g_sock_fd = -1;
+			g_connected = false;
+			pthread_mutex_unlock(&g_rpc_mutex);
+			return -EIO;
+		}
+		if (client_safe_write(g_sock_fd, buf, (size_t)n) < 0) {
+			close(file_fd);
+			close(g_sock_fd);
+			g_sock_fd = -1;
+			g_connected = false;
+			pthread_mutex_unlock(&g_rpc_mutex);
+			return -EIO;
+		}
+		bytes_left -= n;
+	}
+	close(file_fd);
+
+	struct backend_msg_hdr resp;
+	if (client_safe_read(g_sock_fd, &resp, sizeof(resp)) != sizeof(resp) ||
+	    resp.magic != BACKEND_MSG_MAGIC) {
+		close(g_sock_fd);
+		g_sock_fd = -1;
+		g_connected = false;
+		pthread_mutex_unlock(&g_rpc_mutex);
+		return -EIO;
+	}
+
+	if (resp.len > 0) {
+		char discard[256];
+		uint32_t to_drain = resp.len;
+		while (to_drain > 0) {
+			size_t chunk = to_drain > sizeof(discard) ? sizeof(discard) : to_drain;
+			if (client_safe_read(g_sock_fd, discard, chunk) != (ssize_t)chunk)
+				break;
+			to_drain -= chunk;
+		}
 	}
 
 	pthread_mutex_unlock(&g_rpc_mutex);

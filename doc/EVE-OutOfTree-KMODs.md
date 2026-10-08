@@ -23,7 +23,7 @@ To reconcile these security guarantees with the need for fast developer turnarou
 
 ```text
 +------------------------------------+      +-----------------------------------------+
-| Development Mode (Host Out-of-Tree)|      | Production Mode (Hermetic Single-Image) |
+| Development Mode (Debian Packages) |      | Production Mode (Hermetic Single-Image) |
 +------------------------------------+      +-----------------------------------------+
 | Driver Source Code                 |      | Driver Source Code                      |
 | (cavalry, amba_virt)               |      | (cavalry, amba_virt)                    |
@@ -37,12 +37,12 @@ To reconcile these security guarantees with the need for fast developer turnarou
 | (via signing_key.pem)              |      |             /              \            |
 |        |                           |      |            v                v           |
 |        v                           |      | Kernel extra/ Dir    Firmware Dir       |
-| Writable Flash Staging             |      | (/lib/modules/extra) (/lib/firmware)    |
-| (/persist/modules, firmware)       |      |            |                            |
+| Debian Package (apt in NOHYPER)    |      | (/lib/modules/extra) (/lib/firmware)    |
+| (/usr/lib/amba-virt/modules/)      |      |            |                            |
 |        |                           |      |            v                            |
 |        v                           |      | depmod (modules.alias from DTS)         |
-| Dynamic Redirection & insmod       |      |            |                            |
-| (load-ambarella-drivers.sh)        |      |            v                            |
+| Package -> Server -> Backend       |      |            |                            |
+| (BACKEND_OP_MODULE_STORE / LOAD)   |      |            v                            |
 |                                    |      | udev Early Userspace (kmod load)        |
 +------------------------------------+      +-----------------------------------------+
 ```
@@ -233,20 +233,19 @@ Under the hood:
    signature:      ...
    ```
 
-### 4.3 Deploying and Reloading Live (No Reboot)
+### 4.3 Package -> Server -> Backend Dynamic Module Deployment
 
-To push modified modules to a live board without rebooting:
+The direct `/persist/modules` deployment workflow via `deploy_and_insmod.sh` has been retired. In the modern architecture, modules are packaged and deployed through the cooperative backend protocol:
 
-```bash
-./scripts/deploy_and_insmod.sh <target-node-ip> --reload
-```
-
-This workflow executes in **under 3 seconds**:
-1. Copies `cavalry.ko` and `amba_virt.ko` to `/persist/modules/`.
-2. Copies `cavalry.bin` to `/persist/firmware/`.
-3. Sets `/sys/module/firmware_class/parameters/path`.
-4. Removes existing modules (`rmmod amba_virt cavalry`) and re-inserts the newly built binaries.
-5. Verifies `/dev/cavalry`, `/dev/cavalry_profile`, and `/dev/amba_virt`.
+1. **Debian Packaging**: Drivers are compiled, signed, and assembled into the `amba-virt-server` Debian package (installing into `/usr/lib/amba-virt/modules/`).
+2. **Container Installation**: The Debian package is installed inside the NOHYPER container using standard `apt`.
+3. **Cooperative Store & Load Protocol (Section 2.8)**:
+   - On startup, `amba-virt-server` connects to `amba-virt-backend` on Dom0 TCP port 5556.
+   - For each module in `modules.conf`, the server issues a probe via `BACKEND_OP_MODULE_STORE`.
+   - If the module is not already present in the immutable EVE image (`/lib/modules/<ver>/extra/`) or host persist (`/persist/modules/`), the backend requests an upload (`0x01`).
+   - The server streams the packaged `.ko` file (up to 64 MiB) to the backend, which atomically stores it at `/persist/modules/<name>.ko`.
+   - The server then sends `BACKEND_OP_MODULE_LOAD` with any module parameters.
+   - *(Note: This describes the designed architecture; this plan establishes the protocol foundation and does not claim to have executed live module transfer on hardware).*
 
 ---
 
@@ -273,28 +272,23 @@ In Production Mode, the developer's workstation holds **no private keys**:
 
 ---
 
-## 6. How to Automate Development Mode Loading on Boot
+## 6. Boot-Time Driver Loading Architecture
 
-If Development Mode modules must be inserted automatically upon board cold boot, EVE-OS can be configured with an onboot hook.
+### 6.1 Early Boot & Backend Services
 
-### 6.1 Implemented `storage-init` Boot Hook
-
-In EVE's startup architecture, `storage-init` is the onboot container responsible for checking, formatting, and mounting `/persist`.
-
-In the Ambarella EVE fork, `pkg/storage-init` is enhanced with a native boot hook:
-1. Mounts `/persist` on `/persist`.
-2. Checks for `/persist/bin/load-ambarella-drivers.sh`.
-3. Automatically executes `/persist/bin/load-ambarella-drivers.sh` inside `/hostfs` before `pillar` starts.
-4. This guarantees `/dev/cavalry` and `/dev/amba_virt` exist **before** `domainmgr` begins starting edge containers, completely preventing device assignment race conditions. Deploying drivers via `./scripts/deploy_and_insmod.sh <node>` automatically installs this script into `/persist/bin/`.
+In the modern architecture, `/persist/bin/load-ambarella-drivers.sh` and its `storage-init` hook are retired:
+1. `amba_virt.ko` is probed early by Dom0 `/etc/init.d/000-mod-params`.
+2. `amba-virt-backend` is installed in the EVE BaseOS rootfs at `/usr/bin/amba-virt-backend` and started automatically by Dom0 `/etc/init.d/020-amba-virt-backend` listening on TCP port 5556.
+3. Accelerators and hardware modules are loaded dynamically when `amba-virt-server` in NOHYPER negotiates with the backend.
 
 ---
 
 ## 7. Troubleshooting & Common Pitfalls
 
-### Pitfall 1: Firmware Load Timeout (-2 / -ENOENT)
-- **Symptom**: `cavalry sub_scheduler0: Direct firmware load for cavalry.bin failed with error -2`, followed by a 60s freeze.
-- **Root Cause**: `firmware_class.path` was not pointed to `/persist/firmware` prior to `insmod`.
-- **Fix**: Run `echo -n '/persist/firmware' > /sys/module/firmware_class/parameters/path` before inserting `cavalry.ko`.
+### Pitfall 1: Firmware Missing or Inaccessible
+- **Symptom**: `cavalry sub_scheduler0: Direct firmware load for cavalry.bin failed with error -2`.
+- **Root Cause**: Microcode firmware was expected from `/persist/firmware` instead of the NOHYPER application package.
+- **Fix**: Firmware binaries (`cavalry.bin`, `orccode.bin`, etc.) ship inside the `amba-virt-camera` package and are read directly by userspace in NOHYPER (`load_ucode`), not loaded from `/persist/firmware`.
 
 ### Pitfall 2: Module Verification Failed (`Key was rejected by service`)
 - **Symptom**: `insmod: can't insert 'cavalry.ko': Permission denied` (dmesg: `Loading of unsigned module is rejected`).
@@ -303,8 +297,8 @@ In the Ambarella EVE fork, `pkg/storage-init` is enhanced with a native boot hoo
 
 ### Pitfall 3: Invalid Module Format (`version magic mismatch`)
 - **Symptom**: `insmod: can't insert 'cavalry.ko': invalid module format` (dmesg: `version magic '...ac6b5c0e15b0...' should be '...310c92224386...'`).
-- **Root Cause**: The running kernel on the target board was updated (e.g. via OTA or partition flip), but the modules in `/persist/modules/` were compiled against an older commit.
-- **Fix**: Run `make drivers` against the updated kernel source tree, then redeploy with `deploy_and_insmod.sh`.
+- **Root Cause**: The running kernel on the target board was updated (e.g. via OTA or partition flip), but the modules were compiled against an older commit.
+- **Fix**: Run `make drivers` against the updated kernel source tree, rebuild the Debian package, and reinstall in NOHYPER.
 
 ### Pitfall 4: Container Missing Assigned Adapter
 - **Symptom**: Application container fails to access `/dev/cavalry` even though the module is loaded.

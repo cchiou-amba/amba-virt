@@ -72,6 +72,7 @@ ifneq ($(CA_CERTS),)
 endif
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
+	stage-amba-virt-backend \
 	drivers $(OOT_DRIVERS) nohyper nohyper-apps everything clean distclean \
 	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
@@ -178,12 +179,21 @@ set-mode-production:
 mode-dev: set-mode-development
 mode-prod: set-mode-production
 
+.PHONY: stage-amba-virt-backend
+stage-amba-virt-backend:
+	$(MAKE) -C drivers/amba_virt/tools amba-virt-backend
+	@if ! file drivers/amba_virt/tools/amba-virt-backend | grep -q 'ARM aarch64'; then \
+		echo "Error: drivers/amba_virt/tools/amba-virt-backend is not ARM aarch64" >&2; \
+		exit 1; \
+	fi
+	@mkdir -p eve/pkg/dom0-ztools/rootfs/usr/bin
+	install -m 0755 drivers/amba_virt/tools/amba-virt-backend eve/pkg/dom0-ztools/rootfs/usr/bin/amba-virt-backend
 
-eve: linuxkit-ca-image $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
-	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar pkg/grub pkg/mkimage-raw-efi pkg/mkrootfs-squash
-	+$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
-		KERNEL_TAG=$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
-			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD)) live && \
+eve: stage-amba-virt-backend linuxkit-ca-image $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
+	$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar pkg/grub pkg/mkimage-raw-efi pkg/mkrootfs-squash
+	$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
+		KERNEL_TAG=$(if $(CURRENT_KERNEL_TAG),$(CURRENT_KERNEL_TAG),$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
+			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD))) live && \
 		$(EVE_MAKE_DONE)
 
 

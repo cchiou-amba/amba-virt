@@ -1,0 +1,46 @@
+#!/usr/bin/make -f
+
+HEADER_TREES := $(wildcard build/usr/src/linux-headers-*)
+HEADER_COUNT := $(words $(HEADER_TREES))
+SIGN_KEY := build/certs/signing_key.pem
+SIGN_CERT := build/certs/signing_key.x509
+
+ifeq ($(HEADER_COUNT),0)
+  $(error Missing build/usr/src/linux-headers-* prerequisite)
+endif
+ifneq ($(HEADER_COUNT),1)
+  $(error Multiple build/usr/src/linux-headers-* directories found, exactly one required)
+endif
+ifeq ($(wildcard $(SIGN_KEY)),)
+  $(error Missing signing key $(SIGN_KEY))
+endif
+ifeq ($(wildcard $(SIGN_CERT)),)
+  $(error Missing signing cert $(SIGN_CERT))
+endif
+
+KDIR := $(abspath $(firstword $(HEADER_TREES)))
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	env -u CFLAGS -u CPPFLAGS -u LDFLAGS $(MAKE) -C drivers/amba_virt KDIR=$(KDIR) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+
+override_dh_auto_clean:
+	env -u CFLAGS -u CPPFLAGS -u LDFLAGS $(MAKE) -C drivers/amba_virt clean 2>/dev/null || true
+
+override_dh_clean:
+	dh_clean -Xqemu -Xbuild -Xeve -Xthird_party
+
+override_dh_install:
+	dh_install
+	mv debian/amba-virt-server/etc/amba-virt/modules.conf debian/amba-virt-server/etc/amba-virt/modules.conf.example
+
+override_dh_strip:
+	dh_strip -X.ko
+
+override_dh_dwz:
+	dh_dwz -X.ko || true
+
+override_dh_shlibdeps:
+	dh_shlibdeps || true

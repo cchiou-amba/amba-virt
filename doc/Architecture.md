@@ -134,12 +134,29 @@ VComLink). The container must not connect to a guest CID.
 | Secure monitor | Not used by this stack | EL3 |
 
 Do not call the guest VM EL3. The NOHYPER container does not “run at EL2” as a
-hypervisor; it runs **on the hypervisor OS**. `insmod` inside a privileged
-NOHYPER app loads a module into the **EVE host kernel**. Build that module
+hypervisor; it runs **on the hypervisor OS** as a privileged container sharing the
+host kernel. However, `amba-virt-server` does not call `finit_module` or `delete_module`
+directly. Instead, kernel module insertion, parameterization, and removal go through
+`amba-virt-backend` running on Dom0 over TCP port 5556. Build out-of-tree host modules
 against `eve-kernel` (or the running EVE `/lib/modules/$(uname -r)/build`).
 Build Linux HVM modules against target guest distribution headers (`gcc-aarch64-linux-gnu`).
 Build QNX HVM resource managers and applications using QNX SDP 8.0 (`qcc -Vgcc_ntoaarch64le`).
 Do not give the guest the Ambarella kernel tree.
+
+### NOHYPER Process Hierarchy
+
+```text
+EVE container command  (EVE_ECO_CMD=/etc/init.sh)
+    |
+    +-- /etc/init.sh
+            |
+            +-- sshd
+            |
+            +-- amba-virt-server          (restarted by init.sh)
+                    |
+                    +-- dsp_monitor_service    (only while the pipeline is up)
+                    +-- amba-virt-aaa          (only while the pipeline is up)
+```
 
 Zedcontroller assigns devices (PhyIo / assigngrp) to the NOHYPER app so it can
 open `/dev/cavalry` and similar nodes. HVMs must not own VisORC. Cloud model

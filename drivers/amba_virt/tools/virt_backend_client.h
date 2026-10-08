@@ -22,6 +22,9 @@ bool virt_backend_client_is_connected(void);
 uint32_t virt_backend_client_get_mod_mask(void);
 
 int virt_backend_client_load_module(const char *module_name);
+int virt_backend_client_load_module_params(const char *module_name, const char *param_values);
+int virt_backend_client_probe_module(const char *module_name, uint8_t *disposition);
+int virt_backend_client_store_module(const char *module_name, const char *package_path);
 int virt_backend_client_unload_module(const char *module_name);
 int virt_backend_client_hardware_reset(uint32_t dev_id);
 int virt_backend_client_get_firmware(struct backend_firmware_resp *resp);

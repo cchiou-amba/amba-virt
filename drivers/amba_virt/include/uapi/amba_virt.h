@@ -391,6 +391,15 @@ struct amba_virt_gdma_copy {
 #define BACKEND_OP_HEARTBEAT_ACK       0x04u
 #define BACKEND_OP_FULL_STATUS         0x05u
 #define BACKEND_OP_FULL_STATUS_RESP    0x06u
+/*
+ * BACKEND_OP_MODULE_LOAD (0x07):
+ * Payload is either:
+ * - Module name without NUL (legacy, parameters empty)
+ * - Module name terminated by NUL, followed by optional parameter string
+ *   (up to second NUL or hdr.len).
+ * Limits: module name <= 63 bytes, no '/'. Parameter string <= 255 bytes
+ * containing only [A-Za-z0-9_ =.,]. Max hdr.len is 320 bytes.
+ */
 #define BACKEND_OP_MODULE_LOAD         0x07u
 #define BACKEND_OP_MODULE_LOAD_RESP    0x08u
 #define BACKEND_OP_MODULE_UNLOAD       0x09u
@@ -400,6 +409,18 @@ struct amba_virt_gdma_copy {
 #define BACKEND_OP_FIRMWARE_VERSIONS   0x0Du
 #define BACKEND_OP_FIRMWARE_VERSIONS_RESP 0x0Eu
 #define BACKEND_EVENT_MODULE_CHANGED   0x10u
+#define BACKEND_OP_MODULE_STORE        0x11u
+#define BACKEND_OP_MODULE_STORE_RESP   0x12u
+
+/* Module store probe dispositions */
+#define BACKEND_MODULE_IMAGE_PRESENT   0x00u
+#define BACKEND_MODULE_UPLOAD_REQUIRED 0x01u
+
+/* Module name, parameter, and transfer constraints */
+#define BACKEND_MODULE_MAX_NAME_LEN    63u
+#define BACKEND_MODULE_MAX_PARAM_LEN   255u
+#define BACKEND_MODULE_LOAD_MAX_PAYLOAD 320u
+#define BACKEND_MODULE_STORE_MAX_SIZE  (64u * 1024u * 1024u) /* 64 MiB */
 
 #define BACKEND_MSG_MAGIC              0x4156424BU /* 'AVBK' */
 #define BACKEND_TOKEN_MAX_LEN          64
