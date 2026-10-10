@@ -1,3 +1,48 @@
+amba-virt-server (1.0.5) unstable; urgency=medium
+
+  * Read the shared-memory window again after the camera pipeline.
+    cavalry.ko loads during that pipeline, and that is when the
+    guest bars become available.
+
+ -- Charles Chiou <cchiou@ambarella.com>  Fri, 09 Oct 2026 10:30:00 +0800
+
+amba-virt-server (1.0.4) unstable; urgency=medium
+
+  * Join the host network namespace before starting amba-virt-aaa.
+    The image connector lives in the init netns, and a bind there
+    requires CAP_NET_ADMIN. The namespace file is
+    /etc/amba-virt/host-netns.
+
+ -- Charles Chiou <cchiou@ambarella.com>  Fri, 09 Oct 2026 10:05:00 +0800
+
+amba-virt-server (1.0.3) unstable; urgency=medium
+
+  * Rebuild the packaged kernel modules for
+    6.1.112-linuxkit-b00cd5423ca9-custom and sign them with the
+    matching kernel key.
+
+ -- Charles Chiou <cchiou@ambarella.com>  Fri, 09 Oct 2026 09:10:00 +0800
+
+amba-virt-server (1.0.2) unstable; urgency=medium
+
+  * Authorize each amba-virt-backend peer from its live EVE bridge
+    assignment. The server sends BACKEND_MSG_AUTH_REQ with no payload.
+
+ -- Charles Chiou <cchiou@ambarella.com>  Fri, 09 Oct 2026 07:30:00 +0800
+
+amba-virt-server (1.0.1) unstable; urgency=medium
+
+  * Run the camera bring-up pipeline in amba-virt-server from a live
+    /etc/amba-virt/camera.conf: firmware synchronization, early and late
+    module lists, dsp_monitor_service, the 3A service, the sensor power
+    GPIO, and the apply call into libamba-virt-camera.so.
+  * amba-virt-backend gains BACKEND_OP_FIRMWARE_STORE and writes the
+    firmware_class path node.
+  * Package the Section 2.5 firmware set under /usr/lib/amba-virt/firmware
+    and example configuration files.
+
+ -- Charles Chiou <cchiou@ambarella.com>  Fri, 09 Oct 2026 12:30:00 +0800
+
 amba-virt-server (1.0.0) unstable; urgency=medium
 
   * Initial release of amba-virt-server package.

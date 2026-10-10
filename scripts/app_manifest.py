@@ -3,8 +3,6 @@
 # That dump includes UI keys (__*) and JSON nulls. Putting them back in
 # `edge-app update --manifest` yields BadReqBody / request body parsing failed.
 
-import base64
-import glob
 import json
 import os
 import sys
@@ -84,125 +82,6 @@ def custom_config_from_manifest(man):
     }
 
 
-def harvest_ssh_keys():
-    home = os.environ.get("HOME")
-    if not home:
-        sys.stderr.write("scripts/app_manifest.py: HOME environment variable not set\n")
-        return []
-    ssh_dir = os.path.join(home, ".ssh")
-    keys = []
-
-    # 1. Try authorized_keys first
-    auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
-    if os.path.isfile(auth_keys_path):
-        with open(auth_keys_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    keys.append(line)
-
-    # 2. If no keys in authorized_keys, look for public key files (*.pub)
-    if not keys:
-        pub_files = sorted(glob.glob(os.path.join(ssh_dir, "*.pub")))
-        for pub_path in pub_files:
-            with open(pub_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        keys.append(line)
-
-    return keys
-
-
-def generate_nohyper_custom_config(keys, out_path=None):
-    if not keys:
-        sys.stderr.write("scripts/app_manifest.py: no SSH public keys found in $HOME/.ssh/\n")
-        return 1
-
-    keys_block = "\n".join(keys)
-
-    init_script = f"""#!/bin/sh
-echo "`date` - /etc/init.sh starts" >> /var/log/init.sh.log
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends openssh-server sudo passwd
-
-# User ubuntu setup
-id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo ubuntu
-echo "ubuntu:ubuntu" | chpasswd
-passwd -u ubuntu || true
-echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-ubuntu
-chmod 0440 /etc/sudoers.d/90-ubuntu
-
-# SSH directories
-mkdir -p /run/sshd /etc/ssh/sshd_config.d /home/ubuntu/.ssh /root/.ssh
-chmod 700 /home/ubuntu/.ssh /root/.ssh
-
-# Dynamic SSH Key Injection
-cat << 'KEY_EOF' > /home/ubuntu/.ssh/authorized_keys
-{keys_block}
-KEY_EOF
-cp /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
-chown -R ubuntu:ubuntu /home/ubuntu/.ssh
-chmod 600 /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
-
-# Root & Password authentication config
-printf "PasswordAuthentication yes\\nKbdInteractiveAuthentication yes\\n" > /etc/ssh/sshd_config.d/00-passwordauth.conf
-echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/root_login.conf
-
-# Device node hygiene
-[ -e /dev/ucode ] || mknod -m 666 /dev/ucode c 508 0 2>/dev/null || true
-
-ssh-keygen -A
-/usr/sbin/sshd
-
-while true; do
-    if [ -x /usr/bin/amba-virt-server ]; then
-        /usr/bin/amba-virt-server
-        sleep 2
-    else
-        echo "`date` - /usr/bin/amba-virt-server is not executable" >> /var/log/init.sh.log
-        exec sleep infinity
-    fi
-done
-"""
-
-    cloud_config = """#cloud-config
-runcmd:
-  - EVE_ECO_CMD=/etc/init.sh
-write_files:
-  - path: /etc/init.sh
-    permissions: "0755"
-    owner: root:root
-    content: |
-"""
-    for line in init_script.splitlines():
-        if line:
-            cloud_config += "      " + line + "\n"
-        else:
-            cloud_config += "\n"
-
-    b64_template = base64.b64encode(cloud_config.encode("utf-8")).decode("ascii")
-
-    cc = {
-        "name": "cloud-init",
-        "add": True,
-        "override": True,
-        "allowStorageResize": False,
-        "fieldDelimiter": "###",
-        "template": b64_template,
-        "variableGroups": []
-    }
-
-    if out_path:
-        dump(out_path, cc)
-        sys.stderr.write(f"scripts/app_manifest.py: wrote dynamic custom config -> {out_path}\n")
-    else:
-        json.dump(cc, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-    return 0
-
-
 def live_interfaces(cfg):
     man = cfg.get("manifestJSON")
     if man is None:
@@ -262,10 +141,6 @@ def main(argv):
             json.dump(cc, sys.stdout, indent=2)
             sys.stdout.write("\n")
         return 0
-    if len(argv) in (2, 3) and argv[1] == "generate-nohyper-custom-config":
-        keys = harvest_ssh_keys()
-        out_path = argv[2] if len(argv) == 3 else None
-        return generate_nohyper_custom_config(keys, out_path)
     if len(argv) == 3 and argv[1] == "check-new-ifs":
         local = load(argv[2])
         cfg = show_config(json.load(sys.stdin))
@@ -291,7 +166,6 @@ def main(argv):
         "       scripts/app_manifest.py sanitize-file apps/NAME.json\n"
         "       scripts/app_manifest.py clone apps/SRC.json NEW-NAME\n"
         "       scripts/app_manifest.py extract-custom-config apps/NAME.json [out.json]\n"
-        "       scripts/app_manifest.py generate-nohyper-custom-config [out.json]\n"
         "       scripts/app_manifest.py check-new-ifs apps/NAME.json < show.json\n"
     )
     return 1

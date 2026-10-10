@@ -1,7 +1,7 @@
 /*
  * test_virt_dma_broker.c
  *
- * Test harness for Per-VM NOHYPER DMA Broker (Envelope 2).
+ * Test harness for the per-VM DMA broker.
  * Verifies RPC protocol validation, CID-to-lease binding, token-bucket
  * rate limiting, controller-neutral endpoint forwarding, and live kernel bridge.
  *

@@ -8,8 +8,9 @@ name="amba-virt-demo"
 description="Ambarella Virtualization Demo Hub Edge AI Service"
 command="/usr/local/bin/amba_virt_demo"
 command_args="--bind 0.0.0.0:8081"
-command_background="yes"
-pidfile="/run/${RC_SVCNAME}.pid"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=0
 output_log="/var/log/amba-virt-demo.log"
 error_log="/var/log/amba-virt-demo.log"
 

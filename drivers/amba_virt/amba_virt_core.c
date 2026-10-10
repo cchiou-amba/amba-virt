@@ -272,11 +272,16 @@ static int conn_rx_worker(void *data)
 		sock_release(conn->sock);
 		conn->sock = NULL;
 		if (conn->rx_thread == current) {
+			/*
+			 * Keep the slice binding. A guest reconnects when an RPC
+			 * times out (for example while the server restarts) and
+			 * claims its slice only once, at probe. The binding is
+			 * dropped when the VM's QEMU releases the slice.
+			 */
 			put_task_struct(conn->rx_thread);
 			conn->rx_thread = NULL;
 			conn->in_use = false;
 			mutex_unlock(&dev->conn_lock);
-			amba_virt_slice_unbind_cid(conn->cid);
 			return 0;
 		}
 	}
@@ -426,7 +431,7 @@ err:
  *
  * The file is created and sized by the hypervisor when the HVM domain starts,
  * which is well after this module loads: the module has to be resident early so
- * that /dev/amba_virt exists before the NOHYPER container is created, but the
+ * that /dev/amba_virt exists before amba-virt-server starts in Dom0, but the
  * window itself only shows up once the peer VM is running. So attach on first
  * use rather than at load, and re-read the size each time in case the window
  * was grown by a model change and an app restart.
@@ -633,6 +638,7 @@ int amba_virt_export_dmabuf_slice(struct amba_virt_dev *dev,
 	if (!dev)
 		return -ENODEV;
 
+	amba_virt_ensure_window(dev);
 	amba_virt_attach_shm(dev);
 	if (!dev->shm_phys || !dev->shm_size)
 		return -ENODEV;
@@ -791,6 +797,7 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 	switch (cmd) {
 	case AMBA_VIRT_IOC_GET_INFO: {
 		int i, active_conns = 0;
+		amba_virt_ensure_window(dev);
 		memset(&info, 0, sizeof(info));
 		info.proto = AMBA_VIRT_PROTO;
 		info.role = dev->is_host ? AMBA_VIRT_ROLE_HOST : AMBA_VIRT_ROLE_GUEST;

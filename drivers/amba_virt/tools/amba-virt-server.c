@@ -1,7 +1,7 @@
 /*
  * amba-virt-server.c
  *
- * Userspace daemon on NOHYPER host container.
+ * Userspace daemon in EVE Dom0.
  * Handles vsock control messages, shared memory validation, and benchmark bursts.
  *
  * Copyright (C) 2026, Ambarella International LLC
@@ -34,12 +34,16 @@
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
-#include "virt_backend_client.h"
+#include "virt_camera_conf.h"
+#include "virt_camera_pipeline.h"
+#include "virt_daemon.h"
 #include "virt_dma_broker.h"
 #include "virt_driver_matrix.h"
+#include "virt_host_ops.h"
 #include "virt_mem_pool.h"
 #include "virt_module_loader.h"
 #include "virt_query.h"
+#include "virt_ready.h"
 #include <uapi/specific/iav_ioctl.h>
 #include "iav_tap_abi.h"
 #include "iav_proxy.h"
@@ -293,6 +297,19 @@ static void server_init_iav_tap(void)
 }
 
 
+/* Section 2.7 step 2: stop the encode the tap started, then let the producer thread see it. */
+static void server_stop_iav_tap(void)
+{
+	g_tap_running = 0;
+	if (g_fd_iav >= 0) {
+		uint32_t stop_mask = (1 << 1);
+
+		if (ioctl(g_fd_iav, IAV_IOC_STOP_ENCODE, stop_mask) < 0)
+			perror("IAV_IOC_STOP_ENCODE in server");
+	}
+	usleep(200000);
+}
+
 struct server_ctx {
 	int fd;
 	unsigned char *map;
@@ -429,7 +446,7 @@ int server_broadcast_dev_state(uint32_t dev_id, uint32_t state, uint32_t reason_
 	return ret;
 }
 
-static void on_backend_module_state_change(uint32_t new_mod_mask)
+static void on_host_module_state_change(uint32_t new_mod_mask)
 {
 	virt_query_set_host_mod_mask(new_mod_mask);
 
@@ -1133,6 +1150,12 @@ static void usage(const char *prog)
 	fprintf(stderr, "  -l, --lease <cid>:<lease>   Bind vsock CID to DMA32 lease index (0..3)\n");
 	fprintf(stderr, "  -c, --tap-cohort <n>        Live tap clients required before frames are consumed (default 1)\n");
 	fprintf(stderr, "  -m, --modules-conf <path>   Path to modules.conf (default " MODULES_CONF_DEFAULT_PATH ")\n");
+	fprintf(stderr, "  -C, --camera-conf <path>    Live camera config; the camera pipeline runs only when it exists\n"
+			"                              (default " CAMERA_CONF_DEFAULT_PATH ")\n");
+	fprintf(stderr, "  -F, --foreground            Stay in the foreground. The default is daemon mode: fork the worker,\n"
+			"                              wait for readiness, exit 0, and keep restarting the worker\n");
+	fprintf(stderr, "  -R, --ready-timeout <sec>   Daemon mode: seconds to wait for readiness (default 120)\n");
+	fprintf(stderr, "  -N, --no-restart            Daemon mode: do not restart the worker when it dies\n");
 	fprintf(stderr, "  -h, --help                  Show this help message\n");
 }
 
@@ -1218,89 +1241,58 @@ static int xioctl(int fd, unsigned long req, void *arg, const char *what)
 	return ret;
 }
 
-int main(int argc, char **argv)
+/* Set by main() from the command line before the worker forks. */
+static int g_enforce_path_b;
+static const char *g_modules_conf = MODULES_CONF_DEFAULT_PATH;
+static const char *g_camera_conf_path = CAMERA_CONF_DEFAULT_PATH;
+
+#define SERVER_RUN_DIR                "/run/amba-virt"
+#define SERVER_DIAG_PATH              SERVER_RUN_DIR "/server-daemon.log"
+#define SERVER_LOG_PATH               SERVER_RUN_DIR "/server.log"
+#define SERVER_PID_PATH               SERVER_RUN_DIR "/server.pid"
+#define SERVER_READY_TIMEOUT_DEFAULT_S 120u
+#define SERVER_RESTART_MIN_MS         1000u
+#define SERVER_RESTART_MAX_MS         30000u
+#define SERVER_SHM_WAIT_MS            30000u
+
+/* stdout and stderr go to path, and stdin to /dev/null, for a process with no terminal. */
+static void redirect_output(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	int nul = open("/dev/null", O_RDONLY);
+
+	if (fd >= 0) {
+		dup2(fd, STDOUT_FILENO);
+		dup2(fd, STDERR_FILENO);
+		close(fd);
+	}
+	if (nul >= 0) {
+		dup2(nul, STDIN_FILENO);
+		close(nul);
+	}
+}
+
+/*
+ * The server. Runs in the forked worker in daemon mode and in the main process with --foreground.
+ * ready_fd is the pipe the worker reports readiness on, or -1.
+ */
+static int server_run(int ready_fd)
 {
 	struct amba_virt_info info;
 	unsigned char *map = MAP_FAILED;
 	int fd;
-	int enforce_path_b = 0;
-	const char *modules_conf = MODULES_CONF_DEFAULT_PATH;
-	int opt;
+	int enforce_path_b = g_enforce_path_b;
+	const char *modules_conf = g_modules_conf;
+	const char *camera_conf_path = g_camera_conf_path;
+	int camera_pipeline_up = 0;
 
-	static struct option long_options[] = {
-		{"enforce-path-b", no_argument,       0, 'b'},
-		{"tenant",         required_argument, 0, 't'},
-		{"lease",          required_argument, 0, 'l'},
-		{"tap-cohort",     required_argument, 0, 'c'},
-		{"modules-conf",   required_argument, 0, 'm'},
-		{"help",           no_argument,       0, 'h'},
-		{0, 0, 0, 0}
-	};
-
-	signal(SIGPIPE, SIG_IGN);
-	setvbuf(stdout, NULL, _IONBF, 0);
-	setvbuf(stderr, NULL, _IONBF, 0);
-
-	while ((opt = getopt_long(argc, argv, "bt:l:c:m:h", long_options, NULL)) != -1) {
-		switch (opt) {
-		case 'b':
-			enforce_path_b = 1;
-			break;
-		case 't':
-			/* Ignored per Section 3.3 / 7.5 */
-			break;
-		case 'c': {
-			int cohort = atoi(optarg);
-			if (cohort < 1) {
-				fprintf(stderr, "Invalid tap cohort '%s'\n", optarg);
-				return 1;
-			}
-			iav_proxy_set_cohort((uint32_t)cohort);
-			break;
-		}
-		case 'l': {
-			uint32_t cid = 0, lease_id = 0;
-			if (sscanf(optarg, "%u:%u", &cid, &lease_id) == 2 ||
-			    sscanf(optarg, "%u=%u", &cid, &lease_id) == 2) {
-				virt_dma_bind_cid_lease(cid, lease_id);
-			} else {
-				fprintf(stderr, "Invalid lease format '%s' (expected <cid>:<lease_id>)\n", optarg);
-				return 1;
-			}
-			break;
-		}
-		case 'm':
-			modules_conf = optarg;
-			break;
-		case 'h':
-			usage(argv[0]);
-			return 0;
-		default:
-			usage(argv[0]);
-			return 1;
-		}
-	}
-
-	/* 2. Connect to backend */
-	if (virt_backend_client_init("127.0.0.1", 5556, "/persist/etc/amba-virt-backend.token", on_backend_module_state_change) < 0) {
-		fprintf(stderr, "Failed to start backend client\n");
+	/* 2. Watch the host module state. The first call reports the state now. */
+	if (virt_host_watch_start(on_host_module_state_change) < 0) {
+		fprintf(stderr, "Failed to start the host module watcher\n");
 		return 1;
 	}
 
-	/* 3. Poll connection every 200 ms, at most 10 seconds (50 iterations) */
-	int connected = 0;
-	for (int i = 0; i < 50; i++) {
-		if (virt_backend_client_is_connected()) {
-			connected = 1;
-			break;
-		}
-		usleep(200000);
-	}
-	if (!connected) {
-		fprintf(stderr, "Timed out waiting for backend connection after 10 seconds\n");
-		return 1;
-	}
-
+	/* 3. Module loading is a direct host operation: no connection to wait for. */
 	/* 4. If conf file exists, run virt_module_loader */
 	if (access(modules_conf, F_OK) == 0) {
 		int ret = virt_module_loader_run(modules_conf);
@@ -1346,12 +1338,61 @@ int main(int argc, char **argv)
 			perror("mmap (continuing without shm)");
 	}
 
+	/*
+	 * Section 2.2: with the live camera config the pipeline (steps 2 through 11)
+	 * runs first. Without it the server is the transport-only boot of today.
+	 */
+	if (access(camera_conf_path, F_OK) == 0) {
+		struct virt_camera_conf camera_conf;
+		int ret = virt_camera_conf_load(camera_conf_path, &camera_conf);
+
+		if (ret < 0) {
+			fprintf(stderr, "Camera config %s is not usable: %d\n", camera_conf_path, ret);
+			return 1;
+		}
+		virt_camera_pipeline_set_encode_stop(server_stop_iav_tap);
+		ret = virt_camera_pipeline_run(&camera_conf);
+		if (ret < 0) {
+			fprintf(stderr, "Camera pipeline failed: %d\n", ret);
+			virt_camera_pipeline_shutdown();
+			return 1;
+		}
+		camera_pipeline_up = 1;
+	} else {
+		printf("amba-virt-server: %s not found, camera pipeline off\n", camera_conf_path);
+	}
+
+	/* The cavalry user window is published when cavalry.ko loads, which
+	 * the camera pipeline does after the first GET_INFO.
+	 */
+	if (camera_pipeline_up) {
+		if (xioctl(fd, AMBA_VIRT_IOC_GET_INFO, &info, "GET_INFO") < 0)
+			return 1;
+		printf("amba-virt-server proto=%u role=%u shm=%u phys=0x%lx port=%u (after camera)\n",
+		       info.proto, info.role, info.shm_size, (unsigned long)info.shm_phys, info.vsock_port);
+		if (info.shm_size && map == MAP_FAILED) {
+			map = mmap(NULL, info.shm_size, PROT_READ | PROT_WRITE,
+				   MAP_SHARED, fd, 0);
+			if (map == MAP_FAILED)
+				perror("mmap (continuing without shm)");
+		}
+	}
+
+	/* Step 12: encode starts after preview, not before. */
 	if (cavalry_proxy_init(fd, map, info.shm_size, info.shm_phys) < 0) {
 		fprintf(stderr, "Failed to initialize cavalry proxy\n");
+		if (camera_pipeline_up)
+			virt_camera_pipeline_shutdown();
 		return 1;
 	}
 
 	server_init_iav_tap();
+
+	if (camera_pipeline_up && virt_camera_pipeline_supervise() < 0) {
+		fprintf(stderr, "Failed to start the camera pipeline supervisor\n");
+		virt_camera_pipeline_shutdown();
+		return 1;
+	}
 
 	g_ctx.fd = fd;
 	g_ctx.map = map;
@@ -1375,6 +1416,16 @@ int main(int argc, char **argv)
 	} else {
 		perror("pthread_create(tcp_listener_thread)");
 	}
+
+	/*
+	 * The shared-memory nodes, the camera pipeline, the Cavalry proxy, the admin socket, and the
+	 * listener are all up. Say so, and only now.
+	 */
+	if (virt_ready_wait_shm(VIRT_READY_DEV_DIR, SERVER_SHM_WAIT_MS) < 0) {
+		fprintf(stderr, "no /dev/amba_virt_shm* after %u ms\n", SERVER_SHM_WAIT_MS);
+		return 1;
+	}
+	virt_ready_notify(ready_fd);
 
 	for (;;) {
 		struct amba_virt_xfer rx, tx;
@@ -1403,4 +1454,122 @@ int main(int argc, char **argv)
 		}
 	}
 	return 0;
+}
+
+static int server_worker(int ready_fd, void *ctx)
+{
+	(void)ctx;
+	return server_run(ready_fd);
+}
+
+int main(int argc, char **argv)
+{
+	int foreground = 0;
+	int no_restart = 0;
+	unsigned int ready_timeout_s = SERVER_READY_TIMEOUT_DEFAULT_S;
+	int opt;
+
+	static struct option long_options[] = {
+		{"enforce-path-b", no_argument,       0, 'b'},
+		{"tenant",         required_argument, 0, 't'},
+		{"lease",          required_argument, 0, 'l'},
+		{"tap-cohort",     required_argument, 0, 'c'},
+		{"modules-conf",   required_argument, 0, 'm'},
+		{"camera-conf",    required_argument, 0, 'C'},
+		{"foreground",     no_argument,       0, 'F'},
+		{"ready-timeout",  required_argument, 0, 'R'},
+		{"no-restart",     no_argument,       0, 'N'},
+		{"help",           no_argument,       0, 'h'},
+		{0, 0, 0, 0}
+	};
+
+	signal(SIGPIPE, SIG_IGN);
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
+
+	while ((opt = getopt_long(argc, argv, "bt:l:c:m:C:FR:Nh", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 'b':
+			g_enforce_path_b = 1;
+			break;
+		case 't':
+			/* Ignored per Section 3.3 / 7.5 */
+			break;
+		case 'c': {
+			int cohort = atoi(optarg);
+			if (cohort < 1) {
+				fprintf(stderr, "Invalid tap cohort '%s'\n", optarg);
+				return 1;
+			}
+			iav_proxy_set_cohort((uint32_t)cohort);
+			break;
+		}
+		case 'l': {
+			uint32_t cid = 0, lease_id = 0;
+			if (sscanf(optarg, "%u:%u", &cid, &lease_id) == 2 ||
+			    sscanf(optarg, "%u=%u", &cid, &lease_id) == 2) {
+				virt_dma_bind_cid_lease(cid, lease_id);
+			} else {
+				fprintf(stderr, "Invalid lease format '%s' (expected <cid>:<lease_id>)\n", optarg);
+				return 1;
+			}
+			break;
+		}
+		case 'm':
+			g_modules_conf = optarg;
+			break;
+		case 'C':
+			g_camera_conf_path = optarg;
+			break;
+		case 'F':
+			foreground = 1;
+			break;
+		case 'N':
+			no_restart = 1;
+			break;
+		case 'R':
+			ready_timeout_s = (unsigned int)atoi(optarg);
+			if (ready_timeout_s < 1) {
+				fprintf(stderr, "Invalid ready timeout '%s'\n", optarg);
+				return 1;
+			}
+			break;
+		case 'h':
+			usage(argv[0]);
+			return 0;
+		default:
+			usage(argv[0]);
+			return 1;
+		}
+	}
+
+	{
+		struct virt_daemon_cfg cfg;
+		pid_t daemon_pid = 0;
+		int rc;
+
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.worker = server_worker;
+		cfg.ready_timeout_ms = ready_timeout_s * 1000u;
+		cfg.restart_min_ms = SERVER_RESTART_MIN_MS;
+		cfg.restart_max_ms = SERVER_RESTART_MAX_MS;
+		cfg.restart = !no_restart;
+		cfg.diag_path = SERVER_DIAG_PATH;
+		cfg.pid_path = SERVER_PID_PATH;
+
+		if (foreground)
+			return virt_daemon_run_foreground(&cfg);
+
+		/*
+		 * Daemon mode, the init entry on EVE Dom0: everything below this point, the server
+		 * itself, runs in a forked worker. Init gets 0 once the worker is ready.
+		 */
+		mkdir(SERVER_RUN_DIR, 0755);
+		redirect_output(SERVER_LOG_PATH);
+		rc = virt_daemon_start(&cfg, &daemon_pid);
+		if (rc == 0)
+			return 0;
+		fprintf(stderr, "amba-virt-server: not ready (%d); see %s\n", rc, SERVER_DIAG_PATH);
+		return 1;
+	}
 }

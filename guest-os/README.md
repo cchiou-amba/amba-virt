@@ -1,5 +1,9 @@
 # Ambarella HVM Guest OS Cross-Compilation Guide
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](../doc/Architecture.md#security-boundary)).
+
 *Copyright (C) 2026, Ambarella International LLC*
 
 This directory contains drivers, resource managers, test client applications, and AI runtime suites for guest operating systems running as Hardware Virtual Machines (HVM) on the **Ambarella N1-655** edge virtualization platform across supported Linux distributions (Ubuntu 24.04, Alpine 3.20), RTOS environments (BlackBerry QNX Neutrino RTOS 8.0), and cloud guest images.
@@ -106,8 +110,8 @@ guest-os/
 │   ├── cavalry_mem/            # Memory allocator abstraction
 │   └── nnctrl/                 # VisORC neural network control library
 └── docker/
-    ├── Dockerfile.ubuntu       # Ubuntu 24.04 ARM64 container image definition
-    └── Dockerfile.alpine       # Alpine 3.20 ARM64 container image definition
+    ├── Dockerfile.ubuntu       # Ubuntu 24.04 ARM64 build environment (Docker fallback path)
+    └── Dockerfile.alpine       # Alpine 3.20 ARM64 build environment (Docker fallback path)
 ```
 
 ---

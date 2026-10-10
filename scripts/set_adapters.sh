@@ -112,7 +112,7 @@ for spec in "$@"; do
 	case "$grp" in
 	cavalry|gpio|iav)
 		if [ "$ALLOW_VISORC" -eq 0 ]; then
-			echo "scripts/set_adapters.sh: $grp is VisORC; pass --allow-visorc for NOHYPER" >&2
+			echo "scripts/set_adapters.sh: $grp belongs to amba-virt-server in Dom0; do not assign it (--allow-visorc overrides)" >&2
 			exit 1
 		fi
 		;;

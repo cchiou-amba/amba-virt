@@ -1,11 +1,27 @@
 # Updating EVE Firmware / BaseOS on Ambarella Edge Nodes
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 This recipe documents the step-by-step process of building a custom EVE BaseOS firmware image on the host, locating the generated artifacts, registering the image in ZedControl, and performing an over-the-air (OTA) update on an active edge node (`n1-655-devkit` or `n1-655-pro`).
 
 Related documents:
 - [ZedControl-scripts.md](ZedControl-scripts.md) (catalog of `zcli` wrappers)
 - [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) (hardware models and adapter inventory)
 - [Architecture.md](Architecture.md) (system architecture and transport design)
+
+> [!IMPORTANT]
+> **Qualified build path (2026-10-09): development mode only.**
+> Before building, run `make mode` and require `DEVELOPMENT`. The qualified
+> recipe is `make set-mode-development` followed by `make all`. It builds
+> `kernel-gcc`, extracts the matching headers and persistent signing key, and
+> builds/signs the out-of-tree drivers on the host.
+>
+> Do not use `make set-mode-production`, `kernel-ambarella`, or
+> `eve-kernel/Dockerfile.ambarella`. That production path has not produced a
+> qualified image and currently fails from a clean baseline. A bare `make eve`
+> is mode-dependent and therefore is not an unambiguous build instruction.
 
 ---
 
@@ -64,18 +80,50 @@ EVE uses an **A/B dual-partitioning scheme** with priority boot support in GRUB 
 
 ---
 
-## 3. Building EVE on the Host
+## 3. Building the Qualified EVE Image on the Host
 
-Build the EVE image from the repository root:
+From the repository root, select and verify development mode, then build the
+kernel, matching out-of-tree modules, and EVE image:
 
 ```bash
-make eve
+make set-mode-development
+make mode
+make all
 ```
 
-### What this does:
-1. Builds the Ambarella kernel with GCC (`make -C eve-kernel -f Makefile.eve kernel-gcc`).
-2. Invokes LinuxKit and builder Docker containers to compile the EVE microservices and assemble packages for `ZARCH=arm64 HV=kvm`.
-3. Even though Docker is used internally for toolchains, the output files are mounted directly onto the host filesystem.
+`make mode` must report:
+
+```text
+EVE Compile Mode: development
+  Kernel:    kernel-gcc
+```
+
+### What `make all` does in development mode
+1. Builds the EVE kernel with GCC through
+   `make -C eve-kernel -f Makefile.eve kernel-gcc`.
+2. Extracts that kernel's headers and persistent signing material into
+   `build/`.
+3. Builds the available out-of-tree modules through `make drivers`, signs
+   them with `build/certs/signing_key.pem`, and stages them under
+   `build/modules/`.
+4. Builds the `eve/pkg/amba-virt` layer (`make amba-virt-image`): the
+   signed modules, firmware, and `amba-virt-server`. The A/B update
+   therefore replaces drivers and server together with the kernel; nothing
+   amba-virt lives on `/persist`. `/persist/amba-virt-dev/` is a manual
+   development tree only ([AmbaVirtServer.md](AmbaVirtServer.md) §14.3).
+5. Invokes LinuxKit and builder containers to assemble the EVE packages for
+   `ZARCH=arm64 HV=kvm`.
+
+The version string for this path ends in `-gcc-kvm-arm64`. Confirm that suffix
+in `eve/dist/arm64/current/installer/eve_version` before publishing.
+
+### Unqualified production target
+
+The top-level Makefile selects `kernel-ambarella` when `.mode` says
+`production`. That path uses `eve-kernel/Dockerfile.ambarella` and is a
+different build, not an alias for the qualified recipe above. As of
+2026-10-09 it is not a release path. Do not repair, substitute, or invoke it
+while following this runbook.
 
 ---
 
@@ -291,5 +339,5 @@ If you wish to proceed with the pending update:
 When updating physical IO adapters in hardware models (`scripts/push_models.sh`):
 > [!CAUTION]
 > **Never modify or reorder hardware model IO adapters while applications are active.**  
-> If an adapter (`iav`, `gpio0`, `amba_virt`) is modified in the model while assigned to an active container or VM, `domainmgr.releaseAdapters()` will fail to locate the bundle in `AssignableAdapters` and execute `log.Fatalf()`, crashing the node into a halted reboot state.  
+> If an adapter is modified in the model while assigned to an active app instance, `domainmgr.releaseAdapters()` will fail to locate the bundle in `AssignableAdapters` and execute `log.Fatalf()`, crashing the node into a halted reboot state.  
 > Always stop or undeploy direct-attached applications before updating hardware models on ZedControl.

@@ -1,17 +1,24 @@
 # amba-virt
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](doc/Architecture.md#security-boundary)).
+
 Virtualize Ambarella N1-655 devices for **EVE-OS** (KVM). Hardware stays on
-the hypervisor host, and out-of-tree Ambarella kernel drivers (Cavalry / VisORC,
-`amba_virt`, and optional vendor drivers) are built, signed, and staged for
-deployment and automated loading on EVE BaseOS.
+the hypervisor host: one trusted `amba-virt-server` in EVE Dom0 owns VisORC,
+the camera, and the other shared accelerators, and brokers them to unchanged
+HVM guests over virtio-vsock and ivshmem. The server, its camera userspace,
+firmware, and the signed out-of-tree Ambarella kernel modules (Cavalry /
+VisORC, `amba_virt`, and optional vendor drivers) ship inside the EVE image as
+the `eve/pkg/amba-virt` layer and start at boot before any guest.
 
 | Path | What it is |
 |---|---|
 | [Makefile](Makefile) | Top-level build orchestration (`eve`, `drivers`, `eve-kernel`, `eve-kernel-headers`, `clean`) |
 | [drivers/](drivers/) | Out-of-tree Ambarella kernel modules (`amba_virt`, `dsplog`, `pci_platform`, optional `cavalry`, `ambvideo`, `pwr_gpu`, `amba_otp`) |
-| [eve/](eve/) | LF Edge EVE-OS submodule with Ambarella board support and storage-init boot hooks |
+| [eve/](eve/) | LF Edge EVE-OS submodule with Ambarella board support and the `pkg/amba-virt` Dom0 layer |
 | [eve-kernel/](eve-kernel/) | EVE Linux kernel package definitions and configuration |
-| [scripts/](scripts/) | Deployment, OTA update, driver loader, and management scripts |
+| [scripts/](scripts/) | Cloud (`zcli`) wrappers, EVE image publishing, guest deployment, and node power scripts |
 | [models/](models/) | Hardware-details JSON for Cooper cloud models |
 | [apps/](apps/) | Edge-app manifests and instance configurations |
 | [eden/](eden/) | LF Edge Eden test harness and client orchestration framework for EVE |
@@ -43,20 +50,20 @@ make set-mode-development
 # Switch to production mode (hermetic in-tree drivers, zero-trust appliance)
 make set-mode-production
 
-# Build EVE BaseOS + all NOHYPER drivers and apps (default goal)
+# Build EVE BaseOS with the amba-virt Dom0 layer and all drivers (default goal)
 make
 make all
 
-# Build NOHYPER drivers/apps + all guest side artifacts
+# Build all out-of-tree drivers + all guest side artifacts
 make everything
 
 # Build all HVM guest side artifacts
 make guest
 
-# Build all NOHYPER host drivers and apps
-make nohyper
+# Build the amba-virt Dom0 layer (server, camera userspace, firmware, signed modules)
+make amba-virt-image
 
-# Build EVE BaseOS live installer image for active mode
+# Build EVE BaseOS live installer image for active mode (runs amba-virt-image)
 make eve
 
 # Build and sign all out-of-tree drivers found under drivers/ (dev mode)
@@ -88,7 +95,7 @@ The repository provides two operational modes configured via the `.mode` file:
 - **Development Mode (`make set-mode-development`)**:
   - Builds `kernel-gcc` and extracts headers and signing keys to `build/certs/`.
   - Out-of-tree drivers are compiled on the host and signed with the persistent local key.
-  - Staged to `/persist/modules/` on the target node via `./scripts/deploy_and_insmod.sh <node> --reload` with **~3-second iteration turnaround**.
+  - `make amba-virt-image` copies the signed modules named in the `/etc/amba-virt` module lists into the `eve/pkg/amba-virt` layer under `/lib/modules/<ver>/extra/`, and `make eve` builds them into the EVE root filesystem.
 - **Production Mode (`make set-mode-production`)**:
   - Builds `kernel-ambarella` via Docker BuildKit with driver sources mapped in as build contexts.
   - Drivers and firmware are signed with an ephemeral single-use key and baked directly into `rootfs.img` under `/lib/modules/<ver>/extra/` and `/lib/firmware/`.
@@ -109,25 +116,19 @@ and `signing_key.x509`) are extracted directly from the LinuxKit cache into
 headers, signs them with `sign-file` (SHA256), and stages them into:
 - `build/modules/`: Signed kernel modules (`.ko`)
 - `build/firmware/`: Required driver firmware binaries
-- `build/bin/`: Host helper daemons and tools (e.g. `amba-virt-server`)
 
-### Deployment & Automated Early Boot Loading
+### Deployment & Boot Order
 
-To deploy staged drivers to an active EVE node:
+Deployment is an EVE image update. Publish the image built by `make eve` and update the node
+over the air ([doc/EVE-UpdateEVE-Firmware.md](doc/EVE-UpdateEVE-Firmware.md)), or install it
+fresh ([doc/EVE-Installation.md](doc/EVE-Installation.md)). Nothing amba-virt is staged in
+`/persist`.
 
-```bash
-./scripts/deploy_and_insmod.sh <target-node>
-```
-
-This script stages modules into `/persist/modules/`, firmware into
-`/persist/firmware/`, and installs the runtime loader to
-`/persist/bin/load-ambarella-drivers.sh`.
-
-On system boot, EVE's `storage-init` service automatically executes
-`/persist/bin/load-ambarella-drivers.sh` via chroot into `/hostfs` as soon as the
-`/persist` partition is mounted, ensuring all Ambarella character devices
-(`/dev/cavalry`, `/dev/amba_virt`, etc.) are initialized before edge applications
-and runtime domains launch.
+On boot, LinuxKit init runs `/etc/init.d/021-amba-virt-server` before the EVE system services.
+The server loads `ambcma.ko`, `cavalry.ko`, and `amba_virt.ko`, brings up the camera pipeline
+when `/etc/amba-virt/camera.conf` exists, and reports ready only once `/dev/amba_virt_shm*`
+exists, so every Ambarella device node is in place before EVE starts a guest. See
+[doc/AmbaVirtServer.md](doc/AmbaVirtServer.md).
 
 ### USB Flash Programming (`usb-matrix`)
 
@@ -177,21 +178,20 @@ Staged binaries are placed into `build/guest/{ubuntu,alpine,qnx}/` and cloud ima
 - [doc/RNGVirtualization.md](doc/RNGVirtualization.md) — Host-mediated hardware TRNG virtualization, Dom0 silicon retention, and VirtIO RNG architecture.
 
 ### Driver & Firmware Operations
-- [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — Persistent storage layout (`/persist`), dynamic firmware loading, and boot hooks.
+- [doc/EVE-BaseOS-AmbarellaDrivers.md](doc/EVE-BaseOS-AmbarellaDrivers.md) — The `eve/pkg/amba-virt` image layer, module and firmware layout, and boot order.
 - [doc/EVE-OutOfTree-KMODs.md](doc/EVE-OutOfTree-KMODs.md) — Dual compile modes (Development vs. Production) and cryptographic signature enforcement.
 - [doc/EVE-UpdateEVE-Firmware.md](doc/EVE-UpdateEVE-Firmware.md) — BaseOS OTA image upgrade workflows and A/B dual-partition preservation.
 
 ### Edge Application Provisioning & Cloud Models
 - [doc/EVE-Ambarella-Models.md](doc/EVE-Ambarella-Models.md) — ZEDEDA Cloud hardware models (`N1-655-Cooper-Pro`, `N1-655-Cooper-Devkit`) and `ioMemberList`.
-- [doc/EVE-EdgeApp-Provision.md](doc/EVE-EdgeApp-Provision.md) — End-to-end deployment guide for paired HVM and NOHYPER edge application instances.
+- [doc/EVE-EdgeApp-Provision.md](doc/EVE-EdgeApp-Provision.md) — End-to-end deployment guide for HVM edge application instances.
 - [doc/EVE-ReconfigureEdgeApps.md](doc/EVE-ReconfigureEdgeApps.md) — Edge application interface update rules and immutable instance policies.
-- [doc/EVE-Create-NOHYPER-EdgeApp-Instance.md](doc/EVE-Create-NOHYPER-EdgeApp-Instance.md) — Standalone NOHYPER edge application provisioning procedures.
 - [doc/ZedControl-scripts.md](doc/ZedControl-scripts.md) — Catalog of `zcli` orchestration wrappers for cloud orchestration.
 
 ### Guest Operating Systems & Scaling
 - [guest-os/README.md](guest-os/README.md) — Guest OS developer guide, cross-compilation pipeline, and cloud images.
 - [doc/Guest-OS-Cross-Compilation.md](doc/Guest-OS-Cross-Compilation.md) — Native host cross-compilation pipeline architecture and benchmarks.
-- [doc/EVE-Multiple-HVM.md](doc/EVE-Multiple-HVM.md) — Multi-HVM scaling architecture, memory overhead modeling, and future design.
+- [doc/EVE-Multiple-HVM.md](doc/EVE-Multiple-HVM.md) — Multiple HVMs on one Dom0 server: CID and slice arbitration, memory overhead modeling, and future design.
 
 ### Host Tools
 - [tools/README.md](tools/README.md) — Host tools guide and `usb-matrix` USB flash programming reference.

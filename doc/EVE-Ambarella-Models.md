@@ -1,12 +1,16 @@
 # EVE Ambarella hardware models
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 ZEDEDA Cloud inventory for Ambarella N1-655. **Cloud `ioMemberList` is
 authoritative.** This is not an app-instance or QEMU recipe.
 
-Related: [Architecture.md](Architecture.md) (PhyIo / NOHYPER),
+Related: [Architecture.md](Architecture.md) (Dom0 server and device ownership),
 [AmbaVirtServer.md](AmbaVirtServer.md) (vsock + ivshmem server),
 [ZedControl-scripts.md](ZedControl-scripts.md) (zcli wrappers),
-[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM + NOHYPER),
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) (deploy HVM guests),
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) (do not update in place),
 [drivers/amba_virt/](../drivers/amba_virt/README.md) and [guest-os/](../guest-os/).
 
@@ -25,10 +29,10 @@ Both are ARM64, 4 CPUs, 32G memory, 32G storage, watchdog on, HSM/LEDs off.
 > - **`watchdog` is operational (`true`).** Following Wave 2 driver integration,
 >   `ambarella_wdt.c` is active (`fff4001000.wdt`, creating `/dev/watchdog`),
 >   confirming the model attribute `"watchdog": "true"`.
-> - **`iav` is a pending adapter.** It advertises `/dev/iav`, but no
->   `iav.ko` exists in `eve-kernel` yet. It is preserved in the model
->   for backwards container compatibility; do not assign it to new apps
->   until the vendor BSP driver lands.
+> - **`cavalry`, `cavalry_profile`, `gpio0`, `iav`, and `amba_virt` are
+>   Dom0-owned.** `amba-virt-server` in EVE Dom0 loads their modules
+>   (`iav.ko` among the camera modules) and owns the nodes. The entries
+>   remain published, but must stay **unassigned**, like `hwrng`.
 > - **`hwrng` is published.** `/dev/hwrng` is created by the active
 >   `ambarella-rng.c` hardware RNG driver and published in the model.
 >
@@ -57,7 +61,8 @@ Those are the types in use. Prefer a specific type over `IO_TYPE_OTHER` wherever
 has native semantics for it.
 
 `PhyIoOther` uses `phyaddrs.Ifname` as a host chardev. EVE injects that path
-into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
+into a container's OCI spec when an app is assigned the `assigngrp`. The
+reference design assigns none of the Ambarella chardevs this way.
 
 ## Assignment rules
 
@@ -65,12 +70,10 @@ into the NOHYPER OCI spec when the app is assigned the `assigngrp`.
 - Same non-empty `assigngrp`: one unit, assignable to one app instance.
 - `usage` `ADAPTER_USAGE_MANAGEMENT`: EVE management port. Do not assign it
   to an app even if `assigngrp` is set.
-- Assign `cavalry` and `gpio` only to the NOHYPER app. HVMs must
-  not get VisORC / Cavalry. (`iav` would follow the same rule, but
-  the node does not exist — see the note above.)
-- Assign `amba_virt` only to NOHYPER (`Ifname=/dev/amba_virt`).
-- Assign `amba_shm` only to the HVM (window marker). One window per pair;
-  `shmsize` is `1G`.
+- Never assign `cavalry`, `gpio`, `iav`, or `amba_virt` to an app. They
+  belong to `amba-virt-server` in Dom0. HVMs reach Cavalry and the camera
+  through the server, never by passthrough.
+- Assign `amba_shm` only to HVMs (window marker). `shmsize` is `1G`.
 - Current `COM2`/`COM3` entries are legacy delivered configuration. Their
   populated `Serial=/dev/ttyS*` fields make Pillar emit QEMU `pci-serial`;
   they are not the planned Ambarella UART virtualization path.
@@ -90,18 +93,17 @@ Both models have the same adapters (`zcli model show … --detail`):
 | cavalry_profile | cavalry_profile | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry_profile` | unspecified |
 | gpio0 | gpio0 | `IO_TYPE_OTHER` | gpio | `Ifname=/dev/gpiochip0` | unspecified |
 | hwrng | hwrng | `IO_TYPE_OTHER` | hwrng | `Ifname=/dev/hwrng` | unspecified |
-| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified — pending vendor `iav.ko` |
+| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified |
 | amba_virt | amba_virt | `IO_TYPE_OTHER` | amba_virt | `Ifname=/dev/amba_virt` | unspecified |
 | amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | *(empty)* | unspecified |
 
 `amba_shm` has empty `phyaddrs` and `cbattr` `shmpath=/dev/amba_virt_shm`,
 `shmsize=1G`. Assigning it to an HVM is a window marker: `kvm.go` emits
-`ivshmem-plain`. One window is shared by every virtual driver on that pair
+`ivshmem-plain`. One window is shared by every virtual driver in that HVM
 (Cavalry, DMA, SD/eMMC, …). Do not add a second `amba_shm`. 16M is PoC-only.
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
-`amba_virt` is the host chardev injected into NOHYPER. The container's
-`/dev/shm` is a private tmpfs and cannot see the backing file.
+`amba_virt` is the host chardev the Dom0 server opens to reach the window.
 
 ### Planned UART Adapter Bundles
 
@@ -128,114 +130,48 @@ entries and update the shared table above in the same change.
 - **`hwrng` Dom0 Retention**: `/dev/hwrng` is created by `ambarella-rng.c` on Dom0. It is published in the model but must remain **unassigned** to any app instance. Dom0 retains exclusive ownership of physical TRNG registers (`0xe002f000`), constantly seeding the Dom0 kernel CSPRNG (`/dev/urandom`).
 - **Stock VirtIO RNG for HVMs**: All ARM64 `virt` HVM guests (Ubuntu, Alpine, Windows) automatically receive a stock `virtio-rng-pci` device backed by Dom0's `/dev/urandom` (with rate limit `max-bytes = "4096"`, `period = "1000"`). Like `vhost-vsock-pci`, this is a standard platform device and requires no custom model adapter assignments.
 - **QNX `rng-mmio` Adapter**: QNX guest VMs require MMIO transport (`virtio-rng-device` on `virtio-mmio-bus.0`) rather than PCI. To select MMIO, QNX instances are assigned the `rng-mmio` adapter (`IO_TYPE_OTHER`, empty `phyaddrs`, `cbattr: {"rng": "mmio"}`), which pairs with native QNX `random -l devr-virtio.so:mem=<address>`.
-- **Exclusions**: NOHYPER / OCI containers and x86 domains do not receive VirtIO RNG devices.
+- **Exclusions**: OCI containers and x86 domains do not receive VirtIO RNG devices.
 
 `/dev/ucode` was not added (not confirmed on the host). Assigning a missing
-`Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails)
-— which is exactly what happens with `iav` today.
+`Ifname` makes EVE skip that device in the OCI spec (`getDeviceInfo` fails).
 
-Confirm on the edge node before assigning to NOHYPER. `/dev/iav` is
-included here only to show that it is absent:
+The Dom0-owned nodes exist on the host once the server is ready (`/dev/iav`
+only while the camera pipeline is configured):
 
 ```bash
-ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0
-ls -l /dev/iav          # expected: No such file or directory
+ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav /dev/amba_virt
 ```
 
 ## Assign adapters to edge apps
 
-The model only **publishes** adapters. No app gets `/dev/cavalry` until the
-**edge-app instance** lists that `assigngrp`. Attach `cavalry` and `gpio`
-to the NOHYPER container only. Keep them off the HVM. Do not attach
-`iav` — the node does not exist.
-
-Worked deploy (from scratch, adapters at create):
-[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Do not edit an
-existing bundle in place; that is
+The model only **publishes** adapters. The reference design assigns one
+Ambarella adapter, `amba_shm`, to each HVM at instance create. Worked deploy:
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Do not edit an existing
+bundle in place; that is
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
 Wrappers: [ZedControl-scripts.md](ZedControl-scripts.md). `$ZCLI_TOKEN` must
 already be in the environment.
 
 ```text
-+--------------------+   available   +-----------------------------------+   assigngrp cavalry/gpio   +--------------------------+
-| Model ioMemberList |-------------->| NOHYPER instance create --adapter |--------------------------->| OCI devices in container |
-+--------------------+               +-----------------------------------+                            +--------------------------+
++--------------------+  amba_shm   +--------------------------------+  window marker  +----------------------+
+| Model ioMemberList |------------>| HVM instance create --adapter  |---------------->| ivshmem-plain (BAR2) |
++--------------------+             +--------------------------------+                 +----------------------+
 ```
 
-### 1. Find both instances
+Confirm no app holds a Dom0-owned group:
 
 ```bash
 ./scripts/show_instances.sh
-./scripts/show_instances.sh ubuntu_24_04_container.n1-655-pro
 ./scripts/show_instances.sh ubuntu_24_04.n1-655-pro
 ```
 
-| Role | Typical name | Adapters |
-|---|---|---|
-| Old NOHYPER | `ubuntu_24_04_container.n1-655-pro` | eth0 only |
-| New NOHYPER | `ubuntu_24_04_container_visorc.n1-655-pro` | cavalry, gpio, iav |
-| HVM | `ubuntu_24_04.n1-655-pro` | **none** of those |
-
-Cloud instance names may differ. `zcli update --adapter=` **replaces** all
-interfaces (including networks). `set_adapters.sh` keeps current networks.
-
-### 2. Edge-app interfaces (if missing)
-
-The left side of `--adapter=intfname:assigngrp` must exist on the
-**edge-app** manifest. Group `cavalry` covers both `/dev/cavalry` and
-`/dev/cavalry_profile`.
+If `cavalry` / `gpio` / `iav` / `amba_virt` appear on any instance, clear
+them (`set_adapters.sh` keeps networks):
 
 ```bash
-./scripts/show_app.sh ubuntu_24_04-container
+./scripts/set_adapters.sh ubuntu_24_04.n1-655-pro --adapter=amba_shm:amba_shm --restart
 ```
-
-gmwtus will not add those names to a bundle that already has instances
-(Halted included). Create `ubuntu_24_04-container-visorc` instead:
-[EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md). Do not add
-Cavalry / GPIO / IAV interfaces to the HVM edge-app.
-
-### 3. Attach on the NOHYPER instance
-
-Prefer `--adapter=` at **instance create**. For an instance whose
-template already lists the ifs:
-
-```bash
-./scripts/set_adapters.sh ubuntu_24_04_container_visorc.n1-655-pro \
-  --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
-  --allow-visorc --dry-run
-./scripts/set_adapters.sh ubuntu_24_04_container_visorc.n1-655-pro \
-  --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
-  --allow-visorc --restart
-```
-
-Use the real `intfname` from `show_app.sh` on the left. `--restart`
-recreates OCI devices. GUI: instance → I/O Adapters → add those groups →
-save → restart.
-
-### 4. Confirm the HVM is clean
-
-```bash
-./scripts/show_instances.sh ubuntu_24_04.n1-655-pro
-```
-
-If cavalry / gpio / iav appear:
-
-```bash
-./scripts/set_adapters.sh ubuntu_24_04.n1-655-pro --clear-adapters --restart
-```
-
-HVMs must not own VisORC.
-
-### 5. Verify on the node
-
-Inside the **container** (not the VM):
-
-```bash
-ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav
-```
-
-On the **HVM** those host Cavalry nodes must not be passed through.
 
 ## DTS mapping
 
@@ -244,9 +180,9 @@ On the **HVM** those host Cavalry nodes must not be passed through.
 | eth0 | `mac0` (`ethernet0`) | Management; leave with EVE. |
 | USB | `usb_cdnsp` | Assignable as group `USB`. |
 | COM1 `/dev/ttyS0` | `uart0` (`serial0`, stdout) | Console. Do not assign away from EVE. |
-| cavalry, cavalry_profile | `sub_scheduler0` | NOHYPER only. |
-| gpio0 | `gpio@0` (123 lines) | NOHYPER only. |
-| iav | `compatible = "ambarella,iav"` | VIN/DSP through this chardev. |
+| cavalry, cavalry_profile | `sub_scheduler0` | Dom0 server only; never assigned. |
+| gpio0 | `gpio@0` (123 lines) | Dom0 server only (camera power lines); never assigned. |
+| iav | `compatible = "ambarella,iav"` | VIN/DSP through this chardev; Dom0 server only. |
 
 ## Not in cloud model
 
@@ -264,8 +200,8 @@ On the **HVM** those host Cavalry nodes must not be passed through.
 
 **ivshmem is in the model** as `amba_shm` (empty `phyaddrs`, `cbattr.shmsize`).
 The QEMU device is still emulated; the adapter only requests the window.
-NOHYPER reaches that DRAM through `amba_virt`, not a bind-mount of the
-backing file.
+The Dom0 server reaches that DRAM through `/dev/amba_virt`, not by opening
+the backing file.
 
 See [drivers/amba_virt/README.md](../drivers/amba_virt/README.md), [AmbaVirtServer.md](AmbaVirtServer.md),
 [EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md).

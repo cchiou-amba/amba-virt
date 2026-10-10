@@ -41,6 +41,16 @@ guest-os/qnx/check_device
 guest-os/qnx/dump_fdt
 guest-os/qnx/private/
 
+# Debian package build outputs
+debian/.debhelper/
+debian/amba-virt-server/
+debian/*.substvars
+debian/debhelper-build-stamp
+debian/files
+guest-os/userspace/*.deb
+guest-os/userspace/*.buildinfo
+guest-os/userspace/*.changes
+
 # Python caches
 __pycache__/
 *.py[cod]

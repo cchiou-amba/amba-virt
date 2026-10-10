@@ -1,5 +1,9 @@
 # Host-Mediated Hardware TRNG Virtualization
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 Copyright (C) 2026, Ambarella International LLC.
 
 ## 1. Overview & Architectural Goals
@@ -107,7 +111,7 @@ EVE's `domainmgr` orchestrator renders QEMU launch configurations deterministica
 3. **Explicit Opt-Out (`rng=off`)**:
    - If an assigned adapter carries `cbattr: {"rng": "off"}`, neither PCI nor MMIO RNG devices are instantiated.
 4. **Exclusions**:
-   - **NOHYPER / OCI Containers**: Containers share the host kernel directly and do not run hypervisors; VirtIO RNG is excluded.
+   - **OCI Containers** (generic EVE `HV_NOHYPER` apps): Containers share the host kernel directly and do not run hypervisors; VirtIO RNG is excluded.
    - **x86 Architectures**: x86 domains do not consume ARM-specific VirtIO RNG templates.
 5. **Strict Validation & Error Handling**:
    - Unknown values (e.g., `cbattr: {"rng": "invalid"}`) cause `CreateDomConfig` to fail with a descriptive error.

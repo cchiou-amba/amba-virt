@@ -1,5 +1,9 @@
 # Ambarella Cavalry QNX Resource Manager (`amba_cavalry_resmgr`)
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](../../../doc/Architecture.md#security-boundary)).
+
 *Copyright (C) 2026, Ambarella International LLC*
 
 This directory contains the QNX Neutrino RTOS 8.0 resource manager for Ambarella Cavalry NPU acceleration (`/dev/cavalry`).
@@ -29,7 +33,7 @@ In monolithic Linux guests, hardware virtualization is implemented via the `amba
 +-------------------------------------------------------|-----------------+
                                                         v
 +-------------------------------------------------------------------------+
-| Host Hypervisor & NOHYPER Control Plane                                 |
+| Host Hypervisor & EVE Dom0 Control Plane                                |
 |   - amba-virt-server daemon (CID 2, Port 5555)                          |
 |   - cavalry_proxy -> host /dev/cavalry -> VisORC Hardware               |
 |   - ivshmem BAR 2 (Shared DRAM Aperture)                                |

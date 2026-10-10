@@ -1,7 +1,7 @@
 /*
  * amba-virt-ctl.c
  *
- * NOHYPER Dom0 control plane utility for amba-virt-server.
+ * Dom0 control plane utility for amba-virt-server.
  *
  * Copyright (C) 2026, Ambarella International LLC
  */
@@ -23,8 +23,8 @@ static void usage(const char *prog)
 	fprintf(stderr, "Usage: %s <command> [arguments]\n\n", prog);
 	fprintf(stderr, "Commands:\n");
 	fprintf(stderr, "  status                               Show amba-virt-server status\n");
-	fprintf(stderr, "  backend status                       Show amba-virt-backend connection & module status\n");
-	fprintf(stderr, "  module load <name>                   Load host kernel module via backend\n");
+	fprintf(stderr, "  host status                          Show the host module status mask\n");
+	fprintf(stderr, "  module load <name>                   Load a host kernel module from the image\n");
 	fprintf(stderr, "  module unload <name>                 Drain and unload host kernel module\n");
 	fprintf(stderr, "  pipeline start <npu|camera>          Start composite subsystem pipeline\n");
 	fprintf(stderr, "  firmware                             Query firmware inventory status\n");
@@ -108,12 +108,12 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	if (strcmp(action, "backend") == 0) {
+	if (strcmp(action, "host") == 0) {
 		if (argc < 3 || strcmp(argv[2], "status") != 0) {
-			fprintf(stderr, "Usage: %s backend status\n", argv[0]);
+			fprintf(stderr, "Usage: %s host status\n", argv[0]);
 			return 1;
 		}
-		snprintf(cmd_buf, sizeof(cmd_buf), "BACKEND_STATUS\n");
+		snprintf(cmd_buf, sizeof(cmd_buf), "HOST_STATUS\n");
 		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
 			return 1;
 		printf("%s", resp_buf);

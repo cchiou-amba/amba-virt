@@ -8,6 +8,7 @@
 .*.cmd
 tools/amba-virt-server
 tools/amba-virt-ctl
-tools/amba-virt-backend
+tools/iav_frame_tap
+tools/iav_proxy_test
 tools/test_virt_*
 !tools/test_virt_*.c

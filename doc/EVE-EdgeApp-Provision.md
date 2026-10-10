@@ -1,7 +1,13 @@
-# Provision Ubuntu 24.04 HVM and NOHYPER on EVE
+# Provision an Ubuntu 24.04 HVM on EVE
+
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
 
 From-scratch recipe for one Ambarella node: an Ubuntu **HVM** (KVM guest)
-and a privileged Ubuntu **NOHYPER** container. Example node:
+that reaches the accelerators through `amba-virt-server` in EVE Dom0. The
+server ships in the EVE image and starts at boot; there is no broker app to
+deploy. Example node:
 **`n1-655-devkit`**. Other nodes are the same commands with the node name and
 `defaultLocal-<node>` swapped.
 
@@ -12,33 +18,31 @@ Catalog: [ZedControl-scripts.md](ZedControl-scripts.md). Models:
 
 This guide stops when login and adapter assignment work. Transport smoke
 tests stay in [guest-os/client/README.md](../guest-os/client/README.md).
-The pair this creates is the same transport Native-ivshmem already ran.
+The HVM this creates is the same transport Native-ivshmem already ran.
 
 Do not bake NoCloud into the Ubuntu image before EVE sees it. EVE injects
 CIDATA from the **instance** `--custom-configuration`, not from the
 edge-app bundle. Putting the YAML only on the marketplace app is not
 enough for `zcli`. On ARM `virt`, that ISO is a USB CD and cloud-init
 often never sees it; the repeatable operator seed is
-[Appendix H](#h-good-iso-guest-never-ran-cloud-init). Local QEMU image
-hacks live next to this repo in `cloud-images/` (reference only).
+[Appendix H](#h-good-iso-guest-never-ran-cloud-init).
 
 ## Names
 
 | Role | Edge-app | Instance | Image |
 |---|---|---|---|
 | HVM | `ubuntu_24_04` | `ubuntu_24_04.n1-655-devkit` | `ubuntu-24.04-server-cloudimg-arm64` (QCOW2 from Ubuntu) |
-| NOHYPER | `ubuntu_24_04-container` | `ubuntu_24_04_container.n1-655-devkit` | `ubuntu-24-04-container` (`library/ubuntu:24.04`) |
 
 Network: `eth0:defaultLocal-n1-655-devkit`.
 
 | App | Adapters at instance create |
 |---|---|
 | HVM | `amba_shm:amba_shm` |
-| NOHYPER | `cavalry:cavalry`, `gpio0:gpio0`, `iav:iav`, `USB:USB`, `amba_virt:amba_virt` |
 
-Do not attach VisORC to the HVM. `amba_shm` is an `IO_TYPE_OTHER` window
-marker (empty `phyaddrs`); assigning it is what makes `kvm.go` emit
-`ivshmem-plain`. `amba_virt` is `Ifname=/dev/amba_virt` on the host.
+Do not attach VisORC to any app. `cavalry`, `iav`, `gpio0`, and `amba_virt`
+belong to `amba-virt-server` in Dom0 and are never assigned. `amba_shm` is an
+`IO_TYPE_OTHER` window marker (empty `phyaddrs`); assigning it is what makes
+`kvm.go` emit `ivshmem-plain`.
 
 Production UART hardware passthrough assigns the physical controller via an
 `IO_TYPE_OTHER` adapter bundle (e.g. `{"uart": "2"}`) under `AssignableAdapters`.
@@ -57,11 +61,11 @@ interfaces later if `appInstCount > 0` (Halted counts).
 
 ## One ivshmem, many drivers
 
-One HVM/NOHYPER pair gets **one** `ivshmem-plain` BAR. Cavalry, DMA, SD/eMMC,
+Each HVM gets **one** `ivshmem-plain` BAR. Cavalry, DMA, SD/eMMC,
 and later frontends share it. Do not add a second `amba_shm` per driver.
 Several drivers **inside one guest** share offsets (`shm_off` / `shm_len` on
-vsock). Several HVMs would need several windows:
-[EVE-Multiple-HVM.md](EVE-Multiple-HVM.md) (deferred).
+vsock). Several HVMs share the one host window by slice:
+[EVE-Multiple-HVM.md](EVE-Multiple-HVM.md).
 
 Control stays on vsock (CID 2, port **5555**, never 2000). Bulk is the BAR.
 A later host allocator hands out non-overlapping slices; Cavalry takes most of
@@ -90,8 +94,7 @@ Convenient network access; `eve console` / `eve enter` still work. Guest passwor
 | Role / App | Host (edge node) | Guest / Target | Access / Credentials | Setup Reference |
 |---|---|---|---|---|
 | **Dom0 Host (EVE)** | TCP **22** | 22 (debug container) | SSH Key (`authorized_keys`) | [EVE-Installation.md §9.3](EVE-Installation.md#93-configuring-dom0-ssh-access-on-newly-provisioned-nodes) |
-| **HVM Guest** | TCP **2222** | 22 | `ssh ubuntu@<node-ip> -p 2222` | [§1 Provisioning Recipes](#1-hvm-edge-app) |
-| **NOHYPER Container** | TCP **4222** | 22 | `ssh ubuntu@<node-ip> -p 4222` | [§2 Provisioning Recipes](#2-nohyper-edge-app) |
+| **HVM Guest** | TCP **2222** | 22 | `ssh ubuntu@<node-ip> -p 2222` | [§3 Create the edge-app](#3-create-the-edge-app) |
 
 `eth0` ACL `lport` / `portmapto.appPort` on the edge-app. ACLs are snapshotted
 into the instance at create; updating the bundle afterwards does not change a
@@ -99,12 +102,20 @@ born-wrong port. Password is `ubuntu` / `ubuntu` from **instance**
 cloud-init (`--custom-configuration`), not from the edge-app bundle alone.
 
 Resources: 2 CPUs, `1048576` KiB RAM. HVM also `104857600` KiB disk, `HV_HVM`,
-`disableVTPM: true`, `enablevnc: true`. NOHYPER is `HV_NOHYPER`.
+`disableVTPM: true`, `enablevnc: true`.
 
 ## 0. Starting point
 
-Node already onboarded and `Online`. BaseOS has the ivshmem patch
-(`0.0.0-amba-ivshmem-…` on the example node).
+Node already onboarded and `Online`, running an EVE image built by `make eve`
+from this tree (it carries the ivshmem support and the `eve/pkg/amba-virt`
+layer). Confirm the Dom0 server is ready, as root on the node:
+
+```bash
+grep -c 'is ready' /run/amba-virt/server-daemon.log   # 1 after a clean boot
+```
+
+The worker reports ready only after `/dev/amba_virt` and `/dev/amba_virt_shm*`
+exist.
 
 ```bash
 ./scripts/zcli -- edge-node show n1-655-devkit
@@ -112,17 +123,23 @@ Node already onboarded and `Online`. BaseOS has the ivshmem patch
 ./scripts/zcli -- edge-app show
 ```
 
-No instances on the node. `ubuntu_24_04` and `ubuntu_24_04-container` must
-be **absent** from the library (this illustration creates them). If those
-names are still present and have no instances:
+No instances on the node. `ubuntu_24_04` must be **absent** from the library
+(this illustration creates it). If it is still present and has no instances:
 
 ```bash
 ./scripts/zcli -- edge-app delete ubuntu_24_04 -f
-./scripts/zcli -- edge-app delete ubuntu_24_04-container -f
 ```
 
-Confirm the model publishes `amba_shm` / `amba_virt` / cavalry / gpio / iav /
-USB, and that `amba_shm` `cbattr.shmsize` is **1G**:
+A node provisioned under the retired design may still run an amba-virt
+broker container instance (`ubuntu_24_04_container.<node>`). It holds no
+hardware the server needs, but delete it:
+
+```bash
+./scripts/zcli -- edge-app-instance delete ubuntu_24_04_container.n1-655-devkit -f
+```
+
+Confirm the model publishes `amba_shm` and that its `cbattr.shmsize` is
+**1G**:
 
 ```bash
 ./scripts/zcli -- --format=json model show N1-655-Cooper-Devkit --detail \
@@ -146,7 +163,6 @@ Inspect:
 ```bash
 ./scripts/zcli -- datastore show
 ./scripts/zcli -- datastore show Ubuntu --detail
-./scripts/zcli -- datastore show Docker --detail
 ./scripts/zcli -- image show
 ```
 
@@ -188,21 +204,6 @@ IMG_SIZE=619036160
 
 Record `Image ID` from `--detail` for the edge-app JSON.
 
-**NOHYPER image** — official Ubuntu container on Docker Hub. cloud-images
-does not serve OCI images. Reuse `ubuntu-24-04-container` if it is already
-`library/ubuntu:24.04` on datastore **`Docker`**. Otherwise:
-
-```bash
-./scripts/zcli -- image create ubuntu-24-04-container \
-  --datastore-name=Docker --arch=ARM64 --image-format=container \
-  --type=Application --image-url=library/ubuntu:24.04 \
-  --title=ubuntu-24-04-container
-```
-
-```bash
-./scripts/zcli -- image show ubuntu-24-04-container --detail
-```
-
 ## 2. Cloud-init (`ubuntu` / `ubuntu`)
 
 Two objects, both required:
@@ -226,7 +227,7 @@ Encode the YAML with:
 python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())'
 ```
 
-Do not copy [cloud-images/user-data](../../cloud-images/user-data) as-is
+Do not copy a personal `cloud-images/user-data` as-is
 (personal SSH key, baked NoCloud seed).
 
 An instance created without `--custom-configuration` still gets a CIDATA
@@ -286,65 +287,17 @@ runcmd:
   - netplan apply
 ```
 
-### NOHYPER
-
-EVE does **not** run cloud-init inside the container. It only applies `runcmd`
-(environment) and `write_files`
-([EVE cloud-init](https://eve-os.readthedocs.io/docs/CLOUD-INIT/)). `runcmd`
-sets `EVE_ECO_CMD=/etc/init.sh`, which **replaces** the image entrypoint
-(`ubuntu:24.04` is `/bin/bash`). That must be on the **instance**
-custom-configuration so it is the command on every start. If it is only
-in the edge-app bundle, the first volume may get `write_files` but a
-reboot falls back to `/bin/bash` and sshd never comes back (`Connection
-refused` on 4222).
-
-`init.sh` creates `ubuntu`, sets the password, starts `sshd`, then
-`sleep infinity` so the container does not exit.
-
-`eve enter` is a host nsenter (root, **no** login prompt). `su - ubuntu` and
-`ssh -p 4222` use `ubuntu` / `ubuntu`. First boot runs `apt-get` (needs
-network on `eth0`); wait until sshd is up before `-p 4222`.
-
-```yaml
-#cloud-config
-runcmd:
-  - EVE_ECO_CMD=/etc/init.sh
-write_files:
-  - path: /etc/init.sh
-    permissions: '0755'
-    owner: root:root
-    content: |
-      #!/bin/sh
-      echo "`date` - /etc/init.sh starts" >> /var/log/init.sh.log
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y --no-install-recommends openssh-server sudo passwd
-      id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo ubuntu
-      echo 'ubuntu:ubuntu' | chpasswd
-      passwd -u ubuntu || true
-      echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-ubuntu
-      chmod 0440 /etc/sudoers.d/90-ubuntu
-      mkdir -p /run/sshd /etc/ssh/sshd_config.d
-      printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' \
-        > /etc/ssh/sshd_config.d/00-passwordauth.conf
-      ssh-keygen -A
-      /usr/sbin/sshd
-      echo "`date` - /etc/init.sh ends" >> /var/log/init.sh.log
-      exec sleep infinity
-```
-
-## 3. Create the edge-apps
+## 3. Create the edge-app
 
 Write ACE JSON under `apps/` (gitignored). `create_app.sh` sanitizes and
 calls `zcli edge-app create`. Substitute `IMAGE_ID` from `image show
---detail`. Datastore IDs on gmwtus: UbuntuCloud
-`d188e4e2-26ab-430d-aad5-0e02c64ef71e`, Docker
-`ed972124-19d0-4dfa-a89b-a29d892e0771`. Image
+--detail`. Datastore ID on gmwtus: UbuntuCloud
+`d188e4e2-26ab-430d-aad5-0e02c64ef71e`. Image
 `ubuntu-24.04-server-cloudimg-arm64` is
 `9c940ce7-6b6e-474e-8e56-67bc882bb849`.
 
 `add_app_direct.sh` allows `amba_shm` on `HV_HVM` (empty `phyaddrs` window
-marker). It still refuses `cavalry`.
+marker). It refuses `cavalry`.
 
 ### HVM `apps/ubuntu_24_04.json`
 
@@ -434,98 +387,14 @@ Expect `eth0` and `amba_shm`. `--version` is `userDefinedVersion`. ACE
 **`false`**; `create_instance.sh` sets `true` only on the instance JSON
 ([appendix](#appendix-cloud-init-failure-modes)).
 
-### NOHYPER `apps/ubuntu_24_04-container.json`
-
-```json
-{
-  "acKind": "PodManifest",
-  "acVersion": "1.2.0",
-  "name": "ubuntu_24_04-container",
-  "images": [
-    {
-      "imagename": "ubuntu-24-04-container",
-      "imageid": "d9a25a64-d542-44ff-ac37-11e2f5a4674a",
-      "imageformat": "CONTAINER",
-      "maxsize": "0",
-      "cleartext": true,
-      "datastore": [
-        { "id": "ed972124-19d0-4dfa-a89b-a29d892e0771", "name": "Docker" }
-      ]
-    }
-  ],
-  "interfaces": [
-    {
-      "name": "eth0",
-      "directattach": false,
-      "acls": [
-        {
-          "matches": [{ "type": "ip", "value": "0.0.0.0/0" }],
-          "actions": []
-        },
-        {
-          "matches": [
-            { "type": "protocol", "value": "tcp" },
-            { "type": "lport", "value": "4222" },
-            { "type": "ip", "value": "0.0.0.0/0" }
-          ],
-          "actions": [
-            {
-              "portmap": true,
-              "portmapto": { "appPort": 22 }
-            }
-          ]
-        }
-      ]
-    },
-    { "name": "cavalry", "directattach": true, "acls": [] },
-    { "name": "gpio0", "directattach": true, "acls": [] },
-    { "name": "iav", "directattach": true, "acls": [] },
-    { "name": "USB", "directattach": true, "acls": [] },
-    { "name": "amba_virt", "directattach": true, "acls": [] }
-  ],
-  "vmmode": "HV_NOHYPER",
-  "enablevnc": true,
-  "resources": [
-    { "name": "cpus", "value": "2" },
-    { "name": "memory", "value": "1048576.00" }
-  ],
-  "configuration": {
-    "customConfig": {
-      "name": "cloud-init",
-      "add": true,
-      "override": false,
-      "fieldDelimiter": "",
-      "template": "<base64 of NOHYPER #cloud-config>",
-      "variableGroups": []
-    }
-  },
-  "appType": "APP_TYPE_CONTAINER",
-  "deploymentType": "DEPLOYMENT_TYPE_STAND_ALONE"
-}
-```
-
-Confirm `imageid` with `image show ubuntu-24-04-container --detail` if you
-created a new record.
-
-```bash
-./scripts/create_app.sh ubuntu_24_04-container --version=1.0 --dry-run
-./scripts/create_app.sh ubuntu_24_04-container --version=1.0
-./scripts/show_app.sh ubuntu_24_04-container
-```
-
-Expect `eth0`, `cavalry`, `gpio0`, `iav`, `USB`, `amba_virt`.
-
-Do not use `create_nohyper.sh` for this pair; it still defaults to an app
-without `amba_virt`.
-
-## 4. Create instances on n1-655-devkit
+## 4. Create the instance on n1-655-devkit
 
 `create_instance.sh` writes `apps/.custom-config.<edge-app>.json` from the
 local manifest and passes `--custom-configuration=$HOME/apps/...` inside the
 zcli container.
 Dry-run must show that flag. Override with
 `--custom-configuration=apps/FILE.json` or skip with
-`--no-custom-configuration` (do not skip for this pair).
+`--no-custom-configuration` (do not skip it here).
 
 ```bash
 ./scripts/create_instance.sh ubuntu_24_04.n1-655-devkit \
@@ -539,29 +408,13 @@ Dry-run must show that flag. Override with
   --edge-node=n1-655-devkit \
   --network-instance=eth0:defaultLocal-n1-655-devkit \
   --adapter=amba_shm:amba_shm
-
-./scripts/create_instance.sh ubuntu_24_04_container.n1-655-devkit \
-  --edge-app=ubuntu_24_04-container \
-  --edge-node=n1-655-devkit \
-  --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=cavalry:cavalry --adapter=gpio0:gpio0 \
-  --adapter=iav:iav --adapter=USB:USB --adapter=amba_virt:amba_virt \
-  --allow-visorc --dry-run
-./scripts/create_instance.sh ubuntu_24_04_container.n1-655-devkit \
-  --edge-app=ubuntu_24_04-container \
-  --edge-node=n1-655-devkit \
-  --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=cavalry:cavalry --adapter=gpio0:gpio0 \
-  --adapter=iav:iav --adapter=USB:USB --adapter=amba_virt:amba_virt \
-  --allow-visorc
 ```
 
-`--allow-visorc` is required for cavalry / iav. Wait until `Online`:
+Wait until `Online`:
 
 ```bash
 ./scripts/show_instances.sh --edge-node=n1-655-devkit
 ./scripts/show_instances.sh ubuntu_24_04.n1-655-devkit
-./scripts/show_instances.sh ubuntu_24_04_container.n1-655-devkit
 ```
 
 An `assigngrp` is exclusive. On a blank node that is not an issue.
@@ -575,12 +428,9 @@ document.
 
 ```bash
 ./scripts/show_instances.sh ubuntu_24_04.n1-655-devkit
-./scripts/show_instances.sh ubuntu_24_04_container.n1-655-devkit
 ```
 
 HVM: `amba_shm` only (plus `eth0` network). No cavalry / gpio / iav.
-NOHYPER: cavalry, gpio0, iav, USB, amba_virt, and `eth0` →
-`defaultLocal-n1-655-devkit`.
 
 **HVM**
 
@@ -604,38 +454,19 @@ If the ISO is non-empty but serial has no `Cloud-init` (USB CD race),
 do not MCU-cycle. Seed the qcow2:
 [Appendix H.1](#h1-on-disk-nocloud-seed-repeatable).
 
-**NOHYPER**
-
-```text
-eve enter
-```
-
-Root shell (no password). Then:
-
-```bash
-su - ubuntu
-ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav /dev/amba_virt
-```
-
-`/dev/amba_virt` is injected from the model. No `mknod`. SSH:
-
-```bash
-ssh ubuntu@<node-ip> -p 4222
-```
-
 ## Out of scope
 
-Virtualization transport demonstration: `insmod amba_virt.ko`, `amba-virt-server`,
-test client. That workflow is documented in
+Virtualization transport demonstration: `insmod amba_virt.ko` in the guest and
+the test client. `amba-virt-server` is already running in Dom0. That workflow is documented in
 ([guest-os/client/README.md](../guest-os/client/README.md)). A 1G window does not change those tests:
 they mmap whatever `GET_INFO.shm_size` reports and write 256 bytes at offset 0.
 The guest module must be built in the VM against that kernel.
 
 ## Appendix: Cloud-init failure modes
 
-Lab notes from first-booting this pair on `n1-655-devkit` and
-`n1-655-pro` (2026-09-08). The VM/container can be `Online` with
-`amba_shm` / `amba_virt` assigned and QEMU still emitting
+Lab notes from first-booting the HVM on `n1-655-devkit` and
+`n1-655-pro` (2026-09-08). The VM can be `Online` with
+`amba_shm` assigned and QEMU still emitting
 `ivshmem-plain` while login and SSH are dead. That is this appendix, not
 a firmware miss.
 
@@ -652,7 +483,7 @@ template onto the instance. Dry-run **must** show
 `--custom-configuration=$HOME/apps/...`. The file has to live under
 `apps/` because the zcli container mounts that directory read-only at
 `$HOME/apps`. `--no-custom-configuration` is how you get an empty
-ISO on purpose; do not skip it for this pair.
+ISO on purpose; do not skip it.
 
 `create_instance.sh` / `app_manifest.py extract-custom-config` reads the
 local manifest and **forces** `override: true` on the instance JSON. Do
@@ -757,7 +588,7 @@ instead, then verify CIDATA **before** any power cycle.
   --adapter=amba_shm:amba_shm
 ```
 
-Leave the NOHYPER instance alone if it is still good. Wait until
+Wait until
 `Online`, mount CIDATA, then try `ssh -p 2222`. `cloud-init status:
 running` on the guest is normal while `packages:` (`build-essential`,
 `linux-headers-generic`, `openssh-server`) install; SSH can already
@@ -773,44 +604,16 @@ no DHCP:
 | `chpasswd.list` (`ubuntu:ubuntu` under `list: \|`) | Noble cloud-init **ignores** it. Password never set. |
 | No `chpasswd.users` + `type: text` | Same. Use the YAML in §2. |
 | Assume the NIC is `eth0` | Virtio-net is `enp3s0`. Without the netplan `match: name: en*` + `runcmd` that drops `50-cloud-init.yaml`, DHCP often never completes (`RX=0`). |
-| Bake NoCloud into the qcow2 | Fights EVE’s CIDATA. Do not copy [cloud-images/user-data](../../cloud-images/user-data) (personal key, local seed). |
+| Bake NoCloud into the qcow2 | Fights EVE’s CIDATA. Do not copy a personal `cloud-images/user-data` (personal key, local seed). |
 | Old `ubuntu` user locked | Official noble cloudimg already has `ubuntu`. `lock_passwd: false` + `ssh_pwauth: true` are required. |
 
-### F. NOHYPER is not cloud-init
-
-EVE does not run cloud-init inside the container. It only honors
-`write_files` and `runcmd` as **host-side** ECO metadata
-([EVE cloud-init](https://eve-os.readthedocs.io/docs/CLOUD-INIT/)).
-
-`runcmd: [EVE_ECO_CMD=/etc/init.sh]` must be on the **instance**
-`--custom-configuration` so it is the container command **every start**.
-`ubuntu:24.04` default is `/bin/bash`. `init.sh` installs sshd, sets
-`ubuntu`/`ubuntu`, then `exec sleep infinity`.
-
-| After MCU / EVE restart | Meaning |
-|---|---|
-| PID 1 is `/etc/init.sh` or `sleep infinity`, `/var/log/init.sh.log` has a **new** timestamp | `EVE_ECO_CMD` reapplied. SSH `:4222` should return. |
-| PID 1 is `/bin/bash`, log timestamp is still first-create | Instance template was not sent this boot. Volume kept `/etc/init.sh` and a previously installed sshd; **the next reboot drops sshd** unless someone started it by hand. |
-| `ssh -p 4222` **Connection refused** | DNAT is fine (`4222 → 10.1.0.x:22`); sshd is not running. |
-| `eve enter` works, `su - ubuntu` works | Expected: `eve enter` is host nsenter, root, no login. That does not prove SSH. |
-
-Same persistence hole as the HVM ISO: if the instance custom-config is
-not in what EVE receives after reboot, ECO falls back to the image
-entrypoint. Fix is delete + recreate with `create_instance.sh`, not
-`update`.
-
-`/dev/amba_virt`, `/dev/cavalry`, `/dev/gpiochip0` coming from the
-model is independent of this. Missing `/dev/iav` for the `ubuntu` user
-does not mean cloud-init failed; check as root via `eve enter`.
-
-### G. Quick split
+### F. Quick split
 
 | What you see | Likely cause | Fix |
 |---|---|---|
 | HVM `Online`, console **Login incorrect**, `ssh -p 2222` **No route to host**, tap **RX=0** | Empty CIDATA, YAML traps (§E), **or** guest never mounted the ISO (§H) | Mount ISO on the **host**. If `user-data` is 0 bytes: delete + recreate. If YAML is present: grep guest serial for `Cloud-init` and `sda`/`sr0`. |
 | HVM SSH works on first boot, dies after MCU | Controller did not persist instance template; ISO rebuilt empty | Recreate. Verify CIDATA before the next power cycle. |
-| NOHYPER `:4222` **Connection refused**, PID 1 `/bin/bash` | `EVE_ECO_CMD` not on the instance this boot | Recreate with container `--custom-configuration`. |
-| `ssh -p 2222` / `4222` **Connection refused** but neighbor is REACHABLE | sshd not running (packages still installing, or `init.sh` never ran) | Wait for `cloud-init` / `init.sh`; do not MCU-cycle. |
+| `ssh -p 2222` **Connection refused** but neighbor is REACHABLE | sshd not running (the guest is still in cloud-init) | Wait. Do not MCU-cycle. |
 | `push_app.sh` / `edge-app create` rejects custom config | App JSON has `override: true` **and** `template` | Set app `override: false`. Keep `override: true` only on the instance JSON. |
 | `refresh --purge` does nothing useful | `"ignorepurge": true` on the cloudimg | Delete the instance. |
 | `zcli show` template looks empty | Redaction | Ignore it. Mount CIDATA. |

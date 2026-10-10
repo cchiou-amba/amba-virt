@@ -1,0 +1,19 @@
+# /etc/amba-virt/camera.conf: live camera config for amba-virt-server.
+#
+# Copy this file to /etc/amba-virt/camera.conf once per board to turn the
+# camera pipeline on. The package never installs the live file. This example
+# is for the OS08A10 Port A boards in the lab.
+#
+# Copyright (C) 2026, Ambarella International LLC
+
+firmware_dir=/usr/lib/amba-virt/firmware
+resource_script=/usr/share/ambarella/lua_scripts/n1_655_vin0_1080p_linear.lua
+vout_script=/usr/share/ambarella/lua_scripts/vout0_dsi.lua
+app_img_profile=10
+poc_chip=/dev/gpiochip0
+poc_lines=92 93 98 99
+poc_settle_ms=4000
+early_modules=/etc/amba-virt/early-modules.conf
+late_modules=/etc/amba-virt/late-modules.conf
+aaa_bin=/usr/bin/amba-virt-aaa
+monitor_bin=/usr/bin/dsp_monitor_service

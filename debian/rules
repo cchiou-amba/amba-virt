@@ -25,6 +25,9 @@ KDIR := $(abspath $(firstword $(HEADER_TREES)))
 
 override_dh_auto_build:
 	env -u CFLAGS -u CPPFLAGS -u LDFLAGS $(MAKE) -C drivers/amba_virt KDIR=$(KDIR) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+	$(KDIR)/scripts/sign-file sha256 $(SIGN_KEY) $(SIGN_CERT) drivers/amba_virt/amba_virt.ko
+	$(KDIR)/scripts/sign-file sha256 $(SIGN_KEY) $(SIGN_CERT) drivers/amba_virt/amba_virt_uart.ko
+	$(KDIR)/scripts/sign-file sha256 $(SIGN_KEY) $(SIGN_CERT) drivers/amba_virt/amba_virt_dma.ko
 
 override_dh_auto_clean:
 	env -u CFLAGS -u CPPFLAGS -u LDFLAGS $(MAKE) -C drivers/amba_virt clean 2>/dev/null || true

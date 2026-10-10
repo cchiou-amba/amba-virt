@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # scripts/deploy_guest.sh
-# Top-level wrapper script to deploy artifacts to HVM guest VMs and NOHYPER containers.
+# Top-level wrapper script to deploy artifacts to HVM guest VMs.
 #
 # Copyright (C) 2026, Ambarella International LLC
 #

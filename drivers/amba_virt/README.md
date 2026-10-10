@@ -1,6 +1,10 @@
 # Ambarella Virtualization Host Driver (`amba_virt`)
 
-This directory contains the host-side NOHYPER kernel module (`amba_virt.ko`) and arbitrator daemon (`tools/amba-virt-server`) for EVE-OS on Ambarella platforms.
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](../../doc/Architecture.md#security-boundary)).
+
+This directory contains the host-side kernel module (`amba_virt.ko`) and the arbitrator daemon (`tools/amba-virt-server`) for EVE-OS on Ambarella platforms. Both run in EVE Dom0: the server ships in the `eve/pkg/amba-virt` image layer, starts from LinuxKit init, and loads the module itself. See [doc/AmbaVirtServer.md](../../doc/AmbaVirtServer.md).
 
 ## Architecture
 
@@ -16,7 +20,7 @@ drivers/amba_virt/
 ├── Kbuild                   # Out-of-tree kbuild definition
 ├── Makefile                 # Driver & daemon build driver
 ├── README.md                # This document
-├── amba_virt_nohyper.c      # Host char dev registration & vsock server
+├── amba_virt_nohyper.c      # Host role: char dev registration & vsock server (historical file name)
 ├── amba_virt_core.c         # Core ringbuffer and transport engine
 ├── amba_virt_core.h         # Core transport internal definitions
 ├── include/

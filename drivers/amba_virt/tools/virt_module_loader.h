@@ -25,7 +25,7 @@ int virt_module_loader_parse_line(const char *line, char *out_name, size_t name_
                                  char *out_params, size_t params_sz);
 
 /*
- * Reads config_path and loads each module in sequence through the backend client.
+ * Reads config_path and loads each module in sequence with the host operations.
  * Returns 0 on success, or the first probe/store/load error encountered.
  */
 int virt_module_loader_run(const char *config_path);

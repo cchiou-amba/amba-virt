@@ -1,5 +1,9 @@
 # ZedControl scripts
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 Wrappers under [`scripts/`](../scripts/) talk to
 `zedcontrol.gmwtus.zededa.net` through [`scripts/zcli`](../scripts/zcli).
 They read `$ZCLI_TOKEN` from the environment. They do not export, prompt for,
@@ -8,12 +12,10 @@ or store the token. Override the controller with `$ZCLI_SERVER` if needed.
 Catalog of wrappers in [`scripts/`](../scripts/). Hardware-model
 inventory: [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md).
 Firmware updates: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
-Architecture: [Architecture.md](Architecture.md). Deploy HVM + NOHYPER:
+Architecture: [Architecture.md](Architecture.md). Deploy HVM guests:
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). **Do not** add
 interfaces to an edge-app that already has instances:
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
-In-place update attempts:
-[scripts/failed/README.md](../scripts/failed/README.md).
 
 ## scripts/zcli
 
@@ -62,8 +64,8 @@ networks.
 ```bash
 ./scripts/show_instances.sh
 ./scripts/show_instances.sh --edge-node=NAME
-./scripts/show_instances.sh --edge-app=ubuntu_24_04-container
-./scripts/show_instances.sh ubuntu_24_04_container.n1-655-pro
+./scripts/show_instances.sh --edge-app=ubuntu_24_04
+./scripts/show_instances.sh ubuntu_24_04.n1-655-pro
 ./scripts/show_instances.sh NAME --format=json
 ```
 
@@ -71,9 +73,10 @@ Use this first when I/O looks wrong. Typical names (cloud may differ):
 
 | Role | Typical instance | Adapters |
 |---|---|---|
-| Old NOHYPER | `ubuntu_24_04_container.n1-655-pro` | eth0 only |
-| New NOHYPER | `ubuntu_24_04_container_visorc.n1-655-pro` | cavalry, gpio, iav |
-| HVM | `ubuntu_24_04.n1-655-pro` | none of those |
+| HVM | `ubuntu_24_04.n1-655-pro` | `amba_shm` (ivshmem window); never `cavalry`, `gpio`, `iav` |
+
+The reference design has HVM guests only. `amba-virt-server` in EVE Dom0 owns
+`cavalry`, `iav`, and `amba_virt`; no app is assigned them.
 
 ## scripts/show_app.sh
 
@@ -81,13 +84,13 @@ Show **edge-app** manifest interface names. Those names are the left side
 of `--adapter=intfname:assigngrp`.
 
 ```bash
-./scripts/show_app.sh ubuntu_24_04_container
+./scripts/show_app.sh ubuntu_24_04
 ```
 
-If `cavalry` / `gpio0` / `iav` are missing here, `set_adapters.sh` and
-`create_instance.sh --adapter=` cannot use them. gmwtus will not add
-those names to an edge-app that already has instances (Halted counts).
-Create a new bundle instead:
+An interface name missing here cannot be used by `set_adapters.sh` or
+`create_instance.sh --adapter=`. gmwtus will not add interface names to an
+edge-app that already has instances (Halted counts). Create a new bundle
+instead:
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
 ## scripts/set_adapters.sh
@@ -101,16 +104,16 @@ network instances.
 `--adapter=` list together.
 
 ```bash
-./scripts/set_adapters.sh ubuntu_24_04_container_visorc.n1-655-pro \
-  --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
-  --allow-visorc --dry-run
-./scripts/set_adapters.sh NAME --adapter=… --allow-visorc --restart
+./scripts/set_adapters.sh ubuntu_24_04.n1-655-pro --adapter=… --dry-run
+./scripts/set_adapters.sh NAME --adapter=… --restart
 ./scripts/set_adapters.sh ubuntu_24_04.n1-655-pro --clear-adapters --restart
 ```
 
 - `--adapter=` **replaces** adapter attachments. Re-specify all you want.
 - `--clear-adapters` removes adapters and keeps networks (HVM).
-- `cavalry` / `gpio` / `iav` require `--allow-visorc` (NOHYPER only).
+- The scripts refuse the `cavalry` / `gpio` / `iav` groups unless `--allow-visorc`
+  is passed. The reference design never passes it: those devices belong to the
+  Dom0 server.
 - `--dry-run` prints the `zcli` command and does not update the controller.
 - `--restart` then runs `edge-app-instance restart`. Update alone does not
   recreate OCI / QEMU devices.
@@ -137,8 +140,8 @@ mounted read-only in `zcli`; `apps/*.json` is gitignored). Strips
 `show --detail` UI fields (`__*`, JSON `null`, `imagestatus`).
 
 ```bash
-./scripts/pull_app.sh ubuntu_24_04-container
-./scripts/pull_app.sh ubuntu_24_04-container --dry-run
+./scripts/pull_app.sh ubuntu_24_04
+./scripts/pull_app.sh ubuntu_24_04 --dry-run
 ```
 
 ## scripts/add_app_direct.sh
@@ -148,8 +151,7 @@ true`). Copies ACE keys from `eth0` only (not `__*` UI fields). Does not
 call the controller. Refuses `HV_HVM` unless `--force`.
 
 ```bash
-./scripts/add_app_direct.sh ubuntu_24_04-container-visorc \
-  --if=cavalry --if=gpio0 --if=iav
+./scripts/add_app_direct.sh APP --if=NAME [--if=NAME...]
 ```
 
 ## scripts/clone_app.sh
@@ -157,35 +159,34 @@ call the controller. Refuses `HV_HVM` unless `--force`.
 Copy `apps/<SRC>.json` to `apps/<DST>.json` and set ACE `name`. Local only.
 
 ```bash
-./scripts/clone_app.sh ubuntu_24_04-container ubuntu_24_04-container-visorc
+./scripts/clone_app.sh ubuntu_24_04 ubuntu_24_04-v2
 ```
 
 ## scripts/create_app.sh
 
 `zcli edge-app create` from `apps/<Name>.json`. Use this for a **new**
-bundle that already lists Cavalry interfaces. Does not `update`.
+bundle that already lists the interfaces it needs. Does not `update`.
 
 ```bash
-./scripts/create_app.sh ubuntu_24_04-container-visorc --version=1.0 --dry-run
+./scripts/create_app.sh ubuntu_24_04-v2 --version=1.0 --dry-run
 ```
 
 ## scripts/create_instance.sh
 
 `zcli edge-app-instance create` with `--network-instance=`,
 `--adapter=`, and `--custom-configuration=` (cloud-init). Template
-`intfname`s must exist. VisORC groups need `--allow-visorc`.
+`intfname`s must exist.
 `create_instance.sh` extracts `configuration.customConfig` from
 `apps/<edge-app>.json` unless you pass `--custom-configuration=` or
 `--no-custom-configuration`. An instance created without that flag gets
 empty CIDATA; `update` cannot add it later.
 
 ```bash
-./scripts/create_instance.sh ubuntu_24_04_container_visorc.n1-655-devkit \
-  --edge-app=ubuntu_24_04-container-visorc \
+./scripts/create_instance.sh ubuntu_24_04.n1-655-devkit \
+  --edge-app=ubuntu_24_04 \
   --edge-node=n1-655-devkit \
   --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=cavalry:cavalry --adapter=gpio0:gpio --adapter=iav:iav \
-  --allow-visorc --dry-run
+  --adapter=… --dry-run
 ```
 
 ## scripts/push_app.sh
@@ -194,24 +195,13 @@ Update an existing edge-app manifest on ZEDEDA Cloud from local
 `apps/<Name>.json`. Requires `appInstCount == 0` if adding new interfaces.
 
 ```bash
-./scripts/push_app.sh ubuntu_24_04-container
-./scripts/push_app.sh ubuntu_24_04-container --dry-run
+./scripts/push_app.sh ubuntu_24_04
+./scripts/push_app.sh ubuntu_24_04 --dry-run
 ```
 
-## scripts/create_nohyper.sh
+## Provisioning recipes
 
-Create a NOHYPER edge-app instance on an Ambarella edge node with all
-Ambarella model adapters attached (`cavalry`, `gpio0`, `iav`, `USB`).
-
-```bash
-./scripts/create_nohyper.sh n1-655-devkit
-./scripts/create_nohyper.sh n1-655-pro
-./scripts/create_nohyper.sh n1-655-devkit --dry-run
-```
-
-Walkthrough: [EVE-Create-NOHYPER-EdgeApp-Instance.md](EVE-Create-NOHYPER-EdgeApp-Instance.md).
-
-Current recipe (HVM + NOHYPER, `amba_virt`): [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+Current recipe (HVM guests, `amba_shm`): [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 Walkthrough (legacy clone recipe): [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
@@ -241,21 +231,3 @@ register/uplink the image in ZedControl via `zcli`.
 ```
 
 Walkthrough: [EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
-
-## scripts/config-grub-noruntime.cfg
-
-GRUB snippet for the EVE CONFIG partition. Appends `efi=noruntime` so Linux
-skips U-Boot's broken UEFI `ResetSystem` and reaches `ambarella-reboot`.
-
-```bash
-scp scripts/config-grub-noruntime.cfg n1-655-devkit:/config/grub.cfg
-```
-
-Takes effect after one MCU power cycle via MCP `embdevenv_mcu_power(target, action="reboot")`.
-
-## scripts/failed/
-
-Do **not** run. `push_app.sh` (`edge-app update` extra ifs) and
-`reconfigure_edge_apps.sh` (in-place orchestrator) failed on gmwtus.
-They exit immediately. Notes:
-[README.md](../scripts/failed/README.md).

@@ -1,5 +1,9 @@
 # Guest OS Cross-Compilation Architecture & Performance Guide
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 - **Status**: Production Architecture & Engineering Guide
 - **Target Platform**: Ambarella N1-655 SoC / EVE-OS Hypervisor
 - **References**: [guest-os/README.md](../guest-os/README.md), [Architecture.md](Architecture.md), [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md), [guest-os/windows/README.md](../guest-os/windows/README.md)
@@ -13,12 +17,13 @@ On the **Ambarella N1-655** architecture, the hypervisor host runs **EVE-OS** (K
 ```text
 +--------------------------------------------------------------------+
 |                Ambarella N1-655 Hypervisor Host                    |
-|  +---------------------------+  +-------------------------------+  |
-|  |    EVE BaseOS (Dom0)      |  |  Privileged NOHYPER Container |  |
-|  |  - Kernel: 6.1-linuxkit   |  |  - amba-virt-server           |  |
-|  |  - Drivers: cavalry.ko,   |  |  - Hardware acceleration proxy|  |
-|  |    amba_virt (host).ko    |  +---------------+---------------+  |
-|  +-------------+-------------+                  |                  |
+|  +--------------------------------------------------------------+  |
+|  |                     EVE BaseOS (Dom0)                        |  |
+|  |  - Kernel: 6.1-linuxkit                                      |  |
+|  |  - amba-virt-server (eve/pkg/amba-virt image layer)          |  |
+|  |  - Drivers loaded by the server: ambcma.ko, cavalry.ko,      |  |
+|  |    amba_virt (host).ko, camera modules                       |  |
+|  +-------------+--------------------------------+---------------+  |
 +----------------|--------------------------------|------------------+
                  |       vhost-vsock-pci &        |
                  |      ivshmem-plain (1 GiB)     |

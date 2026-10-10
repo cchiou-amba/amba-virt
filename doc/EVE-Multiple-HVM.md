@@ -1,19 +1,47 @@
-# Multiple HVMs on one ivshmem host (deferred)
+# Multiple HVMs on one Dom0 server
 
-Scaling the `amba_virt` transport past **one** HVM/NOHYPER pair. Nothing here is
-implemented; the current design and the in-flight EVE patch are deliberately
-scoped to a single pair. This records what breaks at N > 1 so the topic can be
-picked up later without re-deriving it.
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
 
-Related: [Architecture.md](Architecture.md) (the N=1 split),
+One `amba-virt-server` in EVE Dom0 serves every HVM on the node. It arbitrates
+by guest vsock CID and by slice of the single host ivshmem window.
+
+Related: [Architecture.md](Architecture.md) (transport and ownership),
 [AmbaVirtServer.md](AmbaVirtServer.md) (transport and daemon architecture),
 [EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md)
 (the EVE-side patch), [drivers/amba_virt/README.md](../drivers/amba_virt/README.md) (the modules discussed
 below).
 
+## Current design
+
+- **One owner.** The server worker is the only process that opens
+  `/dev/cavalry`, `/dev/iav`, and the host `/dev/amba_virt`. Every HVM is a
+  client of it; no HVM and no other app is assigned those devices.
+- **One host window, one slice per HVM.** The host `amba_virt.ko` splits the
+  window into slices (`amba_virt_shm` / `amba_virt_shm0`, and
+  `amba_virt_shm1`). Each HVM's QEMU maps its slice as BAR 2.
+- **CID binding by nonce.** The guest reads the claim page at the end of its
+  slice and sends that nonce over vsock. The server binds the caller's
+  kernel-reported CID to the slice only when the nonce matches, and clamps the
+  Cavalry pool to the usable slice. `amba-virt-ctl status` prints one `BIND`
+  line per bound CID.
+- **Per-CID state.** Quotas, ACL capabilities, handles, DAGs, and sessions are
+  keyed by CID. A worker restart restores the CID bindings from the kernel but
+  not the handles; guests re-register.
+- **Known limitation.** Stored ACL rules are keyed by CID, and CIDs have been
+  observed to change across boot retries, so a stored rule can attach to a
+  different guest later.
+
 Several virtual drivers **inside one guest** (Cavalry, DMA, SD/eMMC) share
-the single N=1 window. That is not this document. Production that window is
-**1 GiB**. [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+that guest's slice. Production window size is **1 GiB**.
+[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+
+## Original N > 1 analysis (historical)
+
+> Written before multi-HVM support, when the server ran in a NOHYPER broker
+> container. The container-specific statements below describe that retired
+> design; the memory-accounting findings still apply.
 
 ## The question
 

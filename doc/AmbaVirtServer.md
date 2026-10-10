@@ -4,7 +4,7 @@
 
 ## 1. Overview & System Role
 
-The **`amba-virt-server`** is the privileged host-side virtualization daemon running within the EVE-OS **NOHYPER** container (`n1-655-devkit-nohyper` / `n1-655-pro-nohyper`). It acts as the central **hardware arbitrator, virtualization proxy, and control plane** connecting untrusted KVM HVM guest VMs (e.g., Ubuntu 24.04, Alpine Linux 3.20, QNX) to physical Ambarella silicon accelerators:
+The **`amba-virt-server`** is the privileged host-side virtualization daemon running in **EVE Dom0**, from the signed EVE root filesystem. It is a trusted root Dom0 service; the untrusted boundary is the HVM RPC over vsock and the guest `/dev/amba_virt` UAPI. It acts as the central **hardware arbitrator, virtualization proxy, and control plane** connecting untrusted KVM HVM guest VMs (e.g., Ubuntu 24.04, Alpine Linux 3.20, QNX) to physical Ambarella silicon accelerators:
 - **VisORC NPU (Cavalry)**: Deep learning neural network acceleration (`/dev/cavalry`).
 - **GDMA Engine**: Hardware-accelerated 2D pitch copy and memory DMA (`/dev/gdma`).
 - **Image Audio Video (IAV)**: Video sensor capture pipelines and DSP encoding (`/dev/iav`).
@@ -44,10 +44,10 @@ The **`amba-virt-server`** is the privileged host-side virtualization daemon run
 +---------------------|---------------------------------------------------|---------------------+
                       |                                                   |
 +---------------------|---------------------------------------------------|---------------------+
-| NOHYPER Host (Ambarella SoC Privileged Dom0 Control Plane)              |                     |
+| EVE Dom0 (Ambarella SoC Privileged Control Plane)                       |                     |
 |                                                                         |                     |
 |   +---------------------------------------------------------------------------------------+   |
-|   |                          kmod/nohyper/amba_virt.ko <----------------+                 |   |
+|   |                          host amba_virt.ko <------------------------+                 |   |
 |   +---------------------------------------------------------------------------------------+   |
 |                                              |                                                |
 |                                              v                                                |
@@ -77,20 +77,34 @@ The **`amba-virt-server`** is the privileged host-side virtualization daemon run
 +-----------------------------------------------------------------------------------------------+
 ```
 
-### 1.1 The NOHYPER Container as Dom0 Linux
-Architecturally, the NOHYPER container functions analogously to **Xen's Dom0 Linux** (or the Hyper-V Root Partition / KVM host control domain):
-- **Privileged Host Execution Domain**: NOHYPER runs as an unconfined Ubuntu container on EVE-OS with direct access to physical silicon character devices (`/dev/cavalry`, `/dev/gdma`, `/dev/iav`) and shared memory backing files.
-- **Rich Userspace Tooling**: Because NOHYPER is a full Ubuntu Linux environment (standard glibc, bash, Python, GCC, coreutils), it hosts both the server daemon (`amba-virt-server`) and the dedicated host management utility (**`amba-virt-ctl`**).
-- **Omnipotent Administrative Authority**: Just as Xen Dom0 possesses hypervisor control privileges over unprivileged guest domains (DomU), NOHYPER Dom0 possesses **unconditional root authority to inspect, configure, modify, throttle, resize quotas, or quarantine (reclaim vsock/AMA/handles)** any guest VM on the platform.
+### 1.1 Dom0 Placement, Packaging, and Process Tree
+`amba-virt-server` runs directly in EVE Dom0, the host control domain (the role Xen calls Dom0):
+- **Hardware owner**: The server worker is the single owner of `/dev/cavalry`, `/dev/iav`, `/dev/gdma`, and the host `/dev/amba_virt`. No app is ever assigned these devices.
+- **Hermetic image payload**: The server, `amba-virt-ctl`, the camera userspace (`amba-virt-aaa`, `dsp_monitor_service`, their libraries, Lua scripts, and IDSP assets), the firmware, the `/etc/amba-virt` configuration, and the signed modules ship in the `eve/pkg/amba-virt` LinuxKit init layer of the EVE root filesystem. EVE Dom0 is musl, so the glibc binaries carry the interpreter `/usr/lib/amba-virt/lib/ld-linux-aarch64.so.1` and run against the private glibc in `/usr/lib/amba-virt/lib`. `/usr/share/amba-virt/PREBUILTS` records the origin and checksum of each prebuilt file. Nothing is installed at runtime, and the production path never reads a binary from `/persist`.
+- **Administrative authority**: The server holds unconditional root authority to inspect, configure, throttle, resize quotas, or quarantine (reclaim vsock/AMA/handles) any guest VM. `amba-virt-ctl` exercises that authority over the root-only admin socket.
+
+```text
+LinuxKit init: /etc/init.d/021-amba-virt-server -> /usr/bin/amba-virt-server (no arguments)
+    |
+    +-- supervisor   PID in /run/amba-virt/server.pid, diagnostics in /run/amba-virt/server-daemon.log
+          |          Init gets exit 0 only after the worker reports ready (default timeout 120 s).
+          |          SIGUSR1 holds the worker down; SIGUSR2 resumes it.
+          |
+          +-- worker   stdout/stderr in /run/amba-virt/server.log; restarted with
+                |      1 s to 30 s backoff if it dies (unless --no-restart)
+                |
+                +-- amba-virt-aaa          (only while the camera pipeline is up)
+                +-- dsp_monitor_service    (only while the camera pipeline is up)
+```
 
 ```text
 +-----------------------------------------------------------------------------------------------+
-| NOHYPER Container (Ambarella Dom0 Linux Control Plane)                                        |
-| - Full Ubuntu 24.04 Environment (glibc, Python, GCC, system tooling)                          |
+| EVE Dom0 (Ambarella Control Plane)                                                            |
 | - Root Silicon Access: /dev/cavalry, /dev/gdma, /dev/iav, /dev/amba_virt                      |
 |                                                                                               |
 |   +---------------------------------------+   +-------------------------------------------+   |
-|   | amba-virt-ctl (Dom0 Management CLI)   |   | Persistent Store (/persist/policies.json) |   |
+|   | amba-virt-ctl (Dom0 Management CLI)   |   | Policy store                              |   |
+|   |                                       |   | /persist/etc/amba-virt/policies.json      |   |
 |   +---------------------------------------+   +-------------------------------------------+   |
 |                      \                                     /                                  |
 |                       v                                   v                                   |
@@ -115,7 +129,7 @@ Architecturally, the NOHYPER container functions analogously to **Xen's Dom0 Lin
 ```
 
 ### 1.2 The Hypervisor / BAR Hard Limit Boundary
-While NOHYPER acts as an administrative control plane, `amba-virt-server` does **not** own EVE/QEMU physical memory allocation or VM lifecycle. It is constrained by a fundamental physical hard limit:
+While Dom0 is the administrative control plane, `amba-virt-server` does **not** own EVE/QEMU physical memory allocation or VM lifecycle. It is constrained by a fundamental physical hard limit:
 - **ivshmem BAR Constraints**: The daemon cannot allocate memory beyond the domain-create-time ivshmem BAR provisioned by the hypervisor (typically a static 1 GiB window per guest).
 - **Asymmetric Sizing Requires Reboot**: Any attempt to provision quotas beyond this static window (e.g., expanding a guest to 1.5 GiB) requires altering the underlying EVE/QEMU model definitions (via ZEDEDA Cloud / `zcli`) and rebooting the guest VM. `amba-virt-server` dynamically sub-slices, manages, and arbitrates memory strictly within the bounds of this pre-existing mapped BAR.
 
@@ -141,7 +155,7 @@ Rather than provisioning separate PCI apertures for each virtualized peripheral,
 The server architecture distinguishes between two UART modes:
 
 1. **True MMIO Passthrough (Production Standard)**:
-   - UART MMIO and physical IRQs bypass `amba-virt-server` and NOHYPER completely.
+   - UART MMIO and physical IRQs bypass `amba-virt-server` completely.
    - Assigned directly via `vfio-platform` to the guest Stage-2 page table.
    - Physical GIC SPI 115 is handled via in-kernel KVM `irqfd` and `resamplefd`,
      eliminating userspace doorbell ACK round-trips and eventfd proxy latency.
@@ -164,7 +178,7 @@ Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
     Generic-DMA1 32-bit addressing constraints.
 
 - **Split Authority & Reference Monitor**:
-  - **Per-VM NOHYPER Transport (Untrusted)**:
+  - **DMA broker in `amba-virt-server` (`virt_dma_broker`, guest-facing)**:
     - Derives caller CID directly from the vsock socket (never from payload).
     - Applies bounded token-bucket rate limiting and queues.
     - Forwards offset-only requests through a lease-scoped device node
@@ -185,9 +199,9 @@ Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
 | **HVM Guest** | `amba_cavalry.ko` | Guest `/dev/cavalry` frontend driver | Distro kernel headers |
 | **HVM Guest** | `amba_gdma.ko` | Guest kernel GDMA export driver | Distro kernel headers |
 | **HVM Guest** | `amba-virt-client` | CppUTest functional test suite & IPC benchmark | `g++` (`-std=c++17`, `-lpthread`) |
-| **NOHYPER Host** | `amba_virt.ko` | Shared memory backing file mmap + vsock server | Ambarella `eve-kernel` |
-| **NOHYPER Host** | `amba-virt-server` | Arbitrator daemon, memory pool, ACL, proxy | `gcc` (`-std=c11`, `-lpthread`) |
-| **NOHYPER Host** | `amba-virt-ctl` | Dom0 host administration CLI utility | `gcc` (`-std=c11`, `-lpthread`) |
+| **EVE Dom0** | `amba_virt.ko` | Shared memory backing file mmap + vsock server | Ambarella `eve-kernel` |
+| **EVE Dom0** | `amba-virt-server` | Arbitrator daemon, memory pool, ACL, proxy | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`), glibc from `/usr/lib/amba-virt/lib` |
+| **EVE Dom0** | `amba-virt-ctl` | Dom0 host administration CLI utility | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`) |
 
 ---
 
@@ -351,12 +365,20 @@ The host driver publishes two slices of the one attached window. The guest reads
 
 ## 4. Dom0 Control Plane & Administrative Tooling (`amba-virt-ctl`)
 
-Because NOHYPER is a full Ubuntu Linux container, `amba-virt-ctl` is compiled as a rich native userspace utility. It interfaces directly with `amba-virt-server` over a dedicated local UNIX domain socket:
+`amba-virt-ctl` ships in the EVE image at `/usr/bin/amba-virt-ctl` and runs from the Dom0 debug shell. It interfaces directly with `amba-virt-server` over a dedicated local UNIX domain socket:
 - **Socket Path**: `/run/amba-virt/admin.sock`
-- **Authentication**: Socket file permissions strictly set to `0600` (asserting root access within container). `SO_PEERCRED` alone is insufficient as it applies to all processes in the container.
+- **Authentication**: Socket file permissions strictly set to `0600`, so only Dom0 root can connect.
 
 ### 4.1 Dom0 Management Commands Suite
 ```bash
+# 0. Host modules, pipelines, and firmware (direct Dom0 operations in the server)
+amba-virt-ctl host status
+amba-virt-ctl module load cavalry.ko
+amba-virt-ctl module unload cavalry.ko
+amba-virt-ctl pipeline start npu
+amba-virt-ctl pipeline start camera
+amba-virt-ctl firmware
+
 # 1. Platform & Tenant Overview
 amba-virt-ctl status
 amba-virt-ctl list-guests
@@ -381,9 +403,10 @@ amba-virt-ctl policy export 15 -o /persist/ubuntu-perception.policy
 amba-virt-ctl policy import /persist/ubuntu-perception.policy
 ```
 
-### 4.2 Persistent Storage in Edge-App Volume (`/persist`)
-- Policies are written to the edge-app mounted volume `/persist/etc/amba-virt/policies.json` or `/etc/amba-virt/policy.d/<tenant>.json`.
-- On Ambarella EVE-OS, `/persist` is the persistent writable storage partition passed into NOHYPER that survives reboots, powercycles, and OTA firmware updates.
+### 4.2 Persistent Policy Storage (`/persist`)
+- Policies are read at start from `/persist/etc/amba-virt/policies.json` and rewritten there on every policy change. `/etc/amba-virt/policies.json` in the image is the read fallback.
+- `/persist` is the EVE host persistent partition; it survives reboots, power cycles, and OTA firmware updates. The policy file is the one data file the server keeps there; no binary is ever read from `/persist` in production.
+- **Known limitation**: rules are keyed by guest CID. CIDs are bound at domain creation and have been observed to change across boot retries, so a stored rule can attach to a different guest later.
 - Modifying policies via `amba-virt-ctl` immediately notifies `amba-virt-server` via `/run/amba-virt/admin.sock`, reloading rules dynamically without terminating running guest sessions.
 
 ---
@@ -467,7 +490,7 @@ Rather than treating host-configured policies and guest dynamic drivers as mutua
 
 | Tier | Role | Component | Authority |
 |---|---|---|---|
-| **Tier 1: Guardrails & Default Policy** | Authoritative Quota Ceiling, ACL Capabilities, Default Device Layout | `amba-virt-ctl` on NOHYPER Dom0 & `/persist/etc/amba-virt/policies.json` | Host Administrator / Platform Integrator |
+| **Tier 1: Guardrails & Default Policy** | Authoritative Quota Ceiling, ACL Capabilities, Default Device Layout | `amba-virt-ctl` in EVE Dom0 & `/persist/etc/amba-virt/policies.json` | Host Administrator / Platform Integrator |
 | **Tier 2: In-Band Boundary Declaration** | Fine-Tuned Memory Sizing at `insmod` time | Guest Drivers (`amba_cavalry.ko`, `amba_gdma.ko`) in DomU via vsock | Edge-App Designer |
 
 ```text
@@ -484,7 +507,7 @@ Rather than treating host-configured policies and guest dynamic drivers as mutua
 |                                              |                                                |
 |                                              v                                                |
 |   +---------------------------------------------------------------------------------------+   |
-|   | amba-virt-server Host Arbitration Engine (in NOHYPER Dom0)                            |   |
+|   | amba-virt-server Host Arbitration Engine (in EVE Dom0)                                |   |
 |   | - Enforces host quota ceiling as immutable upper bound                                |   |
 |   | - Checks AMBA_VIRT_CAP_DEV_CONFIG capability on in-band requests                      |   |
 |   | - Evaluates spatial collisions and computes suggested_offset on overlap               |   |
@@ -909,6 +932,16 @@ The functional validation suite is implemented using **CppUTest** within `guest-
 - Validates bitmask checking across all capability boundaries.
 - Asserts that untrusted tenants cannot invoke legacy Path A or modify host memory partitions.
 
+### 11.8 Host Regression Suites (`make -C drivers/amba_virt/tools test`)
+Host-side suites run natively with AddressSanitizer and UBSan. They include boundary and limit
+stress (`test_boundary_stress`), desync and state reconciliation (`test_state_desync`), fuzzing
+and corruption protection (`test_fuzz_corruption`), rogue-HVM exploits
+(`test_security_exploits`), hardware safety and drain timeouts (`test_hardware_safety`), the
+direct host operations (`test_virt_host_ops`), the module loader (`test_virt_module_loader`),
+the daemon supervisor (`test_virt_daemon`), and the camera configuration and pipeline
+(`test_virt_camera`). These prove the host logic only; hardware behavior is qualified on the
+boards.
+
 ---
 
 ## 12. Performance Benchmarking Methodology
@@ -994,10 +1027,10 @@ The following architectural subsystems represent targeted capabilities planned f
                                        |
                                        v
 +-------------------------------------------------------------------------------+
-| Phase 3: NOHYPER Dom0 Control Plane & amba-virt-ctl                           |
+| Phase 3: Dom0 Control Plane & amba-virt-ctl                                   |
 | - Implement drivers/amba_virt/tools/virt_acl.c / .h                           |
 | - Implement drivers/amba_virt/tools/virt_admin_ipc.c / .h (/run/.../admin.sock)|
-| - Build build/bin/amba-virt-ctl for NOHYPER Dom0 control                      |
+| - Build amba-virt-ctl for Dom0 control                                        |
 | - JSON policy datastore at /persist/etc/amba-virt/policies.json               |
 | - Support dynamic quota overrides, live tenant eviction, and policy editing   |
 | - Connection disconnect auto-reaper and state cleanup                         |
@@ -1031,50 +1064,91 @@ The following architectural subsystems represent targeted capabilities planned f
 
 ---
 
-## 14. Compilation, Execution & Diagnostic Triage
+## 14. Compilation, Boot, Development & Diagnostic Triage
 
-### 14.1 Building Server & Control Tools
+### 14.1 Building the Server and the Image Layer
 ```bash
-# Compile host daemon and control utility for AArch64 inside NOHYPER:
-make -C drivers/amba_virt/tools
+# Unit tests for the host tools (native build, sanitizers on):
+make -C drivers/amba_virt/tools test
+
+# Cross-build amba-virt-server and amba-virt-ctl, stage the eve/pkg/amba-virt rootfs
+# (camera userspace, private glibc, configs, signed modules, init link), and build the layer:
+make amba-virt-image
+
+# Build the EVE image with that layer (runs amba-virt-image first):
+make eve
 ```
-Outputs:
-- `build/bin/amba-virt-server`: Daemon and arbitration proxy.
-- `build/bin/amba-virt-ctl`: Dom0 command-line administration tool.
+`make amba-virt-image` requires `make drivers` (signed modules in `build/modules`) and the
+`guest-os/userspace/amba-virt-camera` checkout. `eve/pkg/amba-virt/rootfs/` is generated and
+gitignored. The layer is tagged from a digest of that rootfs, and the tag reaches the EVE
+root filesystem as `AMBAVIRT_TAG`. Production updates are the EVE A/B image update:
+[EVE-UpdateEVE-Firmware.md](EVE-UpdateEVE-Firmware.md).
 
-### 14.2 Launching the Server Daemon & Startup Sequence
+### 14.2 Boot Sequence
 
-The server daemon accepts an optional `-m <config-path>` argument specifying the module configuration file to load before opening the virtualization character device:
+LinuxKit init runs `/etc/init.d/021-amba-virt-server`, a link to `/usr/bin/amba-virt-server`,
+with no arguments, before the EVE system services (pillar and its domain manager) start. With
+no arguments the server runs in daemon mode with `/etc/amba-virt/modules.conf` and
+`/etc/amba-virt/camera.conf`.
 
-```bash
-# Run server in background inside NOHYPER container:
-amba-virt-server -m /etc/amba-virt/modules.conf > /tmp/amba-virt-server.log 2>&1 &
-```
+Options for manual runs: `-F` (foreground), `-N` (do not restart the worker), `-R <sec>`
+(readiness timeout, default 120), `-m <modules.conf>`, `-C <camera.conf>`, `-b` (reject Path A),
+`-l <cid>:<lease>` (DMA32 lease binding), `-c <n>` (tap cohort).
 
-#### Module Configuration Grammar (`modules.conf`)
+#### Module Configuration Grammar (`modules.conf`, `early-modules.conf`, `late-modules.conf`)
 - Blank lines and lines starting with `#` are ignored.
 - Each directive line specifies: `<basename>[ <params>]`
   - `<basename>`: Single non-empty `*.ko` filename, at most 63 bytes, with no `/`, `\`, or `..`.
-  - `<params>`: Optional module parameters string, at most 255 bytes, passed directly to `finit_module`.
+  - `<params>`: Optional module parameters string, at most 255 bytes, passed to `finit_module`.
+- Modules are read from `/lib/modules/$(uname -r)/extra/` in the image. A module already loaded
+  with the same parameters is accepted; one loaded with other parameters fails the boot
+  (`-EEXIST`).
 
-#### Server Startup Sequence
-1. **Backend IPC Connection**: Connects to `amba-virt-backend` on Dom0 TCP port 5556, polling up to 10 seconds for backend availability.
-2. **Module Negotiation & Loading**: If a module configuration file exists (via `-m` or default), parses the file and executes the Section 2.8 two-stage probe/upload protocol for each entry. The backend loads image copies from `/lib/modules/<release>/extra/` or stores uploaded packages in `/persist/modules/` before inserting them with parameters.
-3. **Character Device Polling**: Polls for `/dev/amba_virt` up to 30 seconds until the driver character device is registered by the kernel. The server does not wait on `/dev/amba_virt_shm`; `/dev/amba_virt` is the single authoritative node opened by the server.
-4. **Device Open & Memory Mapping**: Opens `/dev/amba_virt`, queries device capabilities via `ioctl(AMBA_VIRT_IOC_GET_INFO)`, and maps the ivshmem shared DRAM window.
-5. **Service Initialization**: Starts the vsock listener on CID 2 port 5555 and enters the main event loop.
+#### Worker Startup Sequence
+1. **Module watcher**: Starts watching the host module state.
+2. **Module loading**: Loads `modules.conf` in order with direct `finit_module` calls
+   (`ambcma.ko` with its parameters, then `cavalry.ko`, then `amba_virt.ko`).
+3. **Character device**: Polls for `/dev/amba_virt` up to 30 seconds, creating the node from
+   sysfs or `/proc/devices` if needed, opens it, and maps the window from `AMBA_VIRT_IOC_GET_INFO`.
+4. **Camera pipeline** (only when `camera.conf` exists): loads `early-modules.conf`, powers the
+   camera, loads `late-modules.conf`, starts `amba-virt-aaa` and `dsp_monitor_service`, and
+   brings up preview and encode.
+5. **Services**: Initializes the Cavalry proxy, the IAV tap, the geometry check and CID
+   restore, the ACL, the DMA broker, the admin socket, and the vsock listener on port 5555.
+6. **Readiness**: Waits up to 30 seconds for `/dev/amba_virt_shm*`, then reports ready to the
+   supervisor, which logs `worker N is ready` in `server-daemon.log` and lets init continue.
 
-### 14.3 Diagnostic & Error Recovery Triage
+### 14.3 Development Loop
+
+Production always boots the immutable image payload. For development, candidate binaries,
+libraries, firmware, and modules may be copied to the fixed tree `/persist/amba-virt-dev/` and
+run by hand from the Dom0 debug shell. The supervisor never selects that tree on its own. A
+candidate server built by `make amba-virt-image` has the image loader as its interpreter and
+`DT_RPATH` `/usr/lib/amba-virt/lib`, so it runs against the image's glibc and libraries:
+
+```bash
+kill -USR1 $(cat /run/amba-virt/server.pid)   # hold the production worker
+/persist/amba-virt-dev/amba-virt-server -F -N
+kill -USR2 $(cat /run/amba-virt/server.pid)   # resume the production worker
+```
+
+`DT_RPATH` is searched before `LD_LIBRARY_PATH`, so a candidate library with the same name as
+an image library is not picked up that way. Modules already loaded by the production worker stay loaded while it is held. Ship a change by
+rebuilding the image and updating EVE, not by leaving files under `/persist`.
+
+### 14.4 Diagnostic & Error Recovery Triage
 
 | Failure Mode / Symptom | Root Cause | Remediation Protocol |
 |---|---|---|
-| `ioctl(CONNECT): Connection refused` | `amba-virt-server` not active | Check daemon on NOHYPER (`pgrep amba-virt-server`). Inspect `/tmp/amba-virt-server.log`. Restart server on port 5555. |
+| `ioctl(CONNECT): Connection refused` | No ready server worker | In Dom0: `cat /run/amba-virt/server.pid`, `grep 'is ready' /run/amba-virt/server-daemon.log`, then read `/run/amba-virt/server.log` for the worker's failure. |
+| Server not ready within the readiness timeout | A module, the camera, or `/dev/amba_virt_shm*` failed | `server-daemon.log` records each worker start, exit, and backoff; `server.log` holds the worker output. A module loaded earlier with other parameters shows as `already loaded with parameters`. |
+| Guest app exits with `host no longer knows our handles` | The worker restarted; handles do not survive it | Expected. The guest re-registers; a systemd unit with `Restart=` recovers by itself. |
 | `open(/dev/amba_virt): No such file or directory` (HVM) | Guest `amba_virt.ko` not inserted | Run `lspci -nn \| grep 1af4:1110`. If present, run `sudo insmod ~/amba_virt.ko`. Check `dmesg \| tail -n 20`. |
-| `open(/dev/amba_virt): No such file or directory` (NOHYPER) | Container missing cgroup rule or adapter not bound | Verify `zcli edge-app-instance show <instance>`. Ensure `amba_virt` `IO_TYPE_OTHER` adapter is assigned in the hardware model. |
+| No `1af4:1110` device in the guest | The HVM lacks the `amba_shm` adapter | Check the instance adapters with `zcli edge-app-instance show <instance>` against [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md). |
 | `amba_cavalry: offset collides with active dev` (`-EEXIST`) | In-band `preferred_offset` overlaps active allocation | Use `preferred_offset=auto` or inspect `dmesg` for suggested offset returned by `amba-virt-server`. |
 | `amba_cavalry: requested %u MB exceeds quota` (`-ENOMEM`) | Driver pool size exceeds tenant memory ceiling | Use `amba-virt-ctl set-quota <cid> <size>` in Dom0 or reduce `pool_size` module parameter. |
 | `amba_cavalry: host ACL denied registration` (`-EPERM`) | Guest CID lacks `AMBA_VIRT_CAP_DEV_CONFIG` capability | Run `amba-virt-ctl set-acl <cid> standard` in Dom0 or define static profile in `/persist/etc/amba-virt/policies.json`. |
 | `amba_cavalry: Cavalry device already registered` (`-EBUSY`) | Previous driver instance crashed without clean `rmmod` | Pass `force_replace=1` on `insmod` to trigger server-side session cleanup and re-registration. |
-| `amba-virt-ctl: connect failed (/run/amba-virt/admin.sock)` | Server not running or caller is not root | Verify daemon status with `pgrep amba-virt-server`. Ensure `amba-virt-ctl` is executed as root in NOHYPER. |
+| `amba-virt-ctl: connect failed (/run/amba-virt/admin.sock)` | Server not running or caller is not root | Check the server as above. Run `amba-virt-ctl` as root in Dom0. |
 | `mmap: Invalid argument (EINVAL)` | Buffer size exceeds 1 GiB window or is unaligned | Query driver via `AMBA_VIRT_IOC_GET_INFO`. Ensure buffer offsets and mapping sizes are page-aligned and $\le$ `shm_size`. |
-| Latency regression ($p99 > 2000\text{ }\mu\text{s}$) | CPU throttling or core frequency scaling | Inspect CPU governor on host (`cpupower frequency-info`). Verify background container CPU utilization. |
+| Latency regression ($p99 > 2000\text{ }\mu\text{s}$) | CPU throttling or core frequency scaling | Inspect CPU governor on host (`cpupower frequency-info`). Check Dom0 and guest CPU load. |

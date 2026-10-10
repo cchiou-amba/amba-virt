@@ -4,3 +4,17 @@ drivers/amba_virt/tools/modules.conf etc/amba-virt/
 drivers/amba_virt/amba_virt.ko usr/lib/amba-virt/modules/
 drivers/amba_virt/amba_virt_uart.ko usr/lib/amba-virt/modules/
 drivers/amba_virt/amba_virt_dma.ko usr/lib/amba-virt/modules/
+drivers/amba_virt/tools/camera.conf.example etc/amba-virt/
+drivers/amba_virt/tools/early-modules.conf.example usr/share/amba-virt/
+drivers/amba_virt/tools/late-modules.conf.example usr/share/amba-virt/
+build/cooper-golden/root/lib/firmware/cavalry.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/lcd_r9611 usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/ambarella/n1_655 usr/lib/amba-virt/firmware/ambarella/
+build/cooper-golden/root/lib/firmware/orccode.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/orcidsp0.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/orcidsp1.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/orcvin0.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/orcvin1.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/orcme0.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/orcmdxf0.bin usr/lib/amba-virt/firmware/
+build/cooper-golden/root/lib/firmware/default_binary.bin usr/lib/amba-virt/firmware/

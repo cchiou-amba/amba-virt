@@ -133,6 +133,8 @@ static void *LiveTapWorkerThread(void *arg)
     yolo_postprocess_default_config(&post_cfg);
 
     bool is_first_after_wake = true;
+    const int kMaxStaleHandleErrors = 20;
+    int stale_handle_errors = 0;
 
     while (g_running.load()) {
         /* Invariant: Demand-driven streaming. Sleep when 0 subscribers are connected */
@@ -219,8 +221,23 @@ static void *LiveTapWorkerThread(void *arg)
 
         if (resp_env.which_body != ambarella_virt_v1_RpcEnvelope_iav_tap_run_response_tag) {
             if (resp_env.which_body == ambarella_virt_v1_RpcEnvelope_error_tag) {
+                int status = resp_env.body.error.status;
+
                 fprintf(stderr, "[ERROR] Host tap RPC error: status=%d detail='%s'\n",
-                        resp_env.body.error.status, resp_env.body.error.detail);
+                        status, resp_env.body.error.detail);
+                /*
+                 * The host server restarted and freed this process's DAG and
+                 * handles. They cannot be recovered in place; exit so the
+                 * service manager restarts us and the model registers again.
+                 */
+                if (status == -ENOENT || status == -EACCES || status == -EPERM) {
+                    if (++stale_handle_errors >= kMaxStaleHandleErrors) {
+                        fprintf(stderr, "[FATAL] host no longer knows our handles; exiting to re-register\n");
+                        exit(EXIT_FAILURE);
+                    }
+                } else {
+                    stale_handle_errors = 0;
+                }
             } else {
                 fprintf(stderr, "[ERROR] Unexpected response body tag: %d\n", resp_env.which_body);
             }
@@ -228,6 +245,7 @@ static void *LiveTapWorkerThread(void *arg)
             continue;
         }
 
+        stale_handle_errors = 0;
         auto *resp = &resp_env.body.iav_tap_run_response;
         if (resp->status != 0) {
             if (resp->status != -EAGAIN && resp->status != -EBUSY) {
@@ -353,6 +371,15 @@ static void HandleLiveStream(int client_fd)
                                                frame_buf.data(), frame_buf.size(),
                                                &frame_len, 2000);
         if (fetch_rc == -ETIMEDOUT) {
+            /* No frame is flowing, so a send cannot detect a client that left. */
+#ifdef POLLRDHUP
+            const short hangup = POLLRDHUP | POLLHUP | POLLERR;
+#else
+            const short hangup = POLLHUP | POLLERR;
+#endif
+            struct pollfd pfd = { client_fd, static_cast<short>(POLLIN | hangup), 0 };
+            if (poll(&pfd, 1, 0) > 0 && (pfd.revents & hangup))
+                break;
             continue;
         }
         if (fetch_rc < 0) {

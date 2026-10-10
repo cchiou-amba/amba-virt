@@ -72,8 +72,8 @@ ifneq ($(CA_CERTS),)
 endif
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
-	stage-amba-virt-backend \
-	drivers $(OOT_DRIVERS) nohyper nohyper-apps everything clean distclean \
+	amba-virt-image \
+	drivers camera-drivers $(OOT_DRIVERS) everything clean distclean \
 	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
 	guest guest-all guest-ubuntu guest-ubuntu-image guest-ubuntu-install \
@@ -85,22 +85,14 @@ endif
 
 all: eve $(DRIVER_DEPENDENCY)
 
-nohyper: drivers nohyper-apps
-
-nohyper-apps:
-	@if [ -f "$(ROOT_DIR)/nohyper/Makefile" ]; then \
-		echo "Building NOHYPER target applications and tests..."; \
-		$(MAKE) -C $(ROOT_DIR)/nohyper CROSS_COMPILE=aarch64-linux-gnu- || exit 1; \
-	fi
-
-everything: nohyper guest
+everything: drivers guest
 
 
 help:
 	@echo "Ambarella N1-655 EVE-OS Firmware & Driver Build Targets:"
 	@echo
-	@echo "  <empty> / all       Build EVE BaseOS + all NOHYPER drivers and apps (default)"
-	@echo "  everything          Build all NOHYPER drivers/apps + all HVM guests"
+	@echo "  <empty> / all       Build EVE BaseOS + all out-of-tree drivers (default)"
+	@echo "  everything          Build all out-of-tree drivers + all HVM guests"
 	@echo "  u-boot              Build U-Boot bootloader (u-boot.bin)"
 	@echo "  host-mkimage        Build host firmware packaging tool (host_mkimage)"
 	@echo "  u-boot-pkg          Package u-boot.bin into bld.img firmware container"
@@ -112,10 +104,10 @@ help:
 	@echo "  guest-alpine        Build Alpine 3.20 HVM driver & client"
 	@echo "  guest-qnx           Build QNX 8.0 HVM resource manager & client"
 	@echo "  guest-qnx-image     Build bootable QNX 8.0 QCOW2 disk image"
-	@echo "  nohyper             Build all NOHYPER host drivers and apps"
 	@echo "  drivers             Build and sign all detected out-of-tree drivers (dev mode)"
 	@echo "  diag                Build host diagnostic drivers (diag_stage2_pte, diag_gdma)"
 	@echo "  eve                 Build EVE BaseOS live installer image for active mode"
+	@echo "  amba-virt-image     Build the amba-virt Dom0 init layer (eve/pkg/amba-virt)"
 	@echo "  eve-kernel          Build EVE kernel package via Docker ($(EVE_KERNEL_TARGET))"
 	@echo "  eve-kernel-headers  Extract linux-headers and signing keys to build/"
 	@echo "  eve-kernel-keys     Alias for extracting signing keys to build/certs/"
@@ -125,7 +117,6 @@ help:
 	@echo "  deploy-guest        Deploy guest artifacts (TARGET=<host-alias>)"
 	@echo "  deploy-hvm-ubuntu   Deploy & reload Ubuntu HVM (TARGET=n1-655-*-ubuntu)"
 	@echo "  deploy-hvm-qnx      Deploy & reload QNX 8.0 HVM (TARGET=n1-655-*-qnx)"
-	@echo "  deploy-nohyper      Deploy & reload NOHYPER container (TARGET=n1-655-*-nohyper)"
 	@echo "  clean               Clean local build outputs and driver artifacts"
 	@echo "  distclean           Full clean of build outputs and EVE system artifacts"
 
@@ -179,21 +170,60 @@ set-mode-production:
 mode-dev: set-mode-development
 mode-prod: set-mode-production
 
-.PHONY: stage-amba-virt-backend
-stage-amba-virt-backend:
-	$(MAKE) -C drivers/amba_virt/tools amba-virt-backend
-	@if ! file drivers/amba_virt/tools/amba-virt-backend | grep -q 'ARM aarch64'; then \
-		echo "Error: drivers/amba_virt/tools/amba-virt-backend is not ARM aarch64" >&2; \
-		exit 1; \
-	fi
-	@mkdir -p eve/pkg/dom0-ztools/rootfs/usr/bin
-	install -m 0755 drivers/amba_virt/tools/amba-virt-backend eve/pkg/dom0-ztools/rootfs/usr/bin/amba-virt-backend
+# Dom0 payload, the eve/pkg/amba-virt init layer: amba-virt-server and amba-virt-ctl, the glibc
+# they and the camera userspace run on under /usr/lib/amba-virt/lib, the camera userspace, firmware
+# and assets (guest-os/userspace/amba-virt-camera), the /etc/amba-virt configs, the signed modules
+# the configs name, and /etc/init.d/021-amba-virt-server. rootfs/ is generated and gitignored, so
+# the git-tree tag linuxkit would compute never changes with it: the package is force-built under
+# a tag derived from rootfs/ itself, which 'eve' passes to the rootfs as AMBAVIRT_TAG.
+AMBA_VIRT_CAMERA   := $(ROOT_DIR)/guest-os/userspace/amba-virt-camera
+AMBA_VIRT_TOOLS    := $(DRIVERS_DIR)/amba_virt/tools
+AMBA_VIRT_ROOTFS   := $(EVE_SYSTEM_DIR)/pkg/amba-virt/rootfs
+AMBA_VIRT_LIBDIR   := /usr/lib/amba-virt/lib
+AMBA_VIRT_TAG_FILE := $(BUILD_DIR)/amba-virt-pkg.tag
+AMBA_VIRT_SYSROOT_LIBS := ld-linux-aarch64.so.1 libc.so.6 libm.so.6
 
-eve: stage-amba-virt-backend linuxkit-ca-image $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
+.PHONY: amba-virt-image
+amba-virt-image: linuxkit-ca-image $(DRIVER_DEPENDENCY)
+	@test -f $(AMBA_VIRT_CAMERA)/Makefile || { echo "Error: $(AMBA_VIRT_CAMERA) is not checked out" >&2; exit 1; }
+	@test -f $(BUILD_DIR)/modules/amba_virt.ko || { echo "Error: no signed modules in $(BUILD_DIR)/modules (run make drivers)" >&2; exit 1; }
+	rm -f $(AMBA_VIRT_TOOLS)/amba-virt-server $(AMBA_VIRT_TOOLS)/amba-virt-ctl
+	$(MAKE) -C $(AMBA_VIRT_TOOLS) CROSS_COMPILE=aarch64-linux-gnu- amba-virt-server amba-virt-ctl
+	rm -rf $(AMBA_VIRT_ROOTFS)
+	$(MAKE) -C $(AMBA_VIRT_CAMERA) CROSS_COMPILE=aarch64-linux-gnu- install DESTDIR=$(AMBA_VIRT_ROOTFS)
+	install -m 0755 $(AMBA_VIRT_TOOLS)/amba-virt-server $(AMBA_VIRT_TOOLS)/amba-virt-ctl $(AMBA_VIRT_ROOTFS)/usr/bin/
+	set -e; for l in $(AMBA_VIRT_SYSROOT_LIBS); do \
+		src=$$(readlink -f $$(aarch64-linux-gnu-gcc -print-file-name=$$l)); \
+		install -m 0755 $$src $(AMBA_VIRT_ROOTFS)$(AMBA_VIRT_LIBDIR)/$$l; \
+		so=$$(aarch64-linux-gnu-readelf -dW $$src | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p'); \
+		id=$$(aarch64-linux-gnu-readelf -nW $$src | sed -n 's/.*Build ID: *//p'); \
+		pkg=$$(dpkg-query -S $$src 2>/dev/null | cut -d: -f1 | head -1); \
+		printf '%s sha256=%s soname=%s build-id=%s origin=%s license=-\n' \
+			$(patsubst /%,%,$(AMBA_VIRT_LIBDIR))/$$l $$(sha256sum < $$src | cut -c1-64) $${so:--} $${id:--} \
+			$${pkg:-toolchain}:$$src >> $(AMBA_VIRT_ROOTFS)/usr/share/amba-virt/PREBUILTS; \
+	done
+	set -e; d=$(AMBA_VIRT_ROOTFS)/etc/amba-virt; install -d $$d; \
+	printf '%s\n' '# Loaded by amba-virt-server when it starts, before any guest connects.' \
+		'ambcma.ko ama_enable=1 dsp_buf_size=0x40000000' 'cavalry.ko' 'amba_virt.ko' > $$d/modules.conf; \
+	for c in early-modules late-modules camera; do install -m 0644 $(AMBA_VIRT_TOOLS)/$$c.conf.example $$d/$$c.conf; done; \
+	rel=$$(/sbin/modinfo -F vermagic $(BUILD_DIR)/modules/amba_virt.ko | cut -d' ' -f1); \
+	m=$(AMBA_VIRT_ROOTFS)/lib/modules/$$rel/extra; install -d $$m; \
+	for k in $$(cat $$d/modules.conf $$d/early-modules.conf $$d/late-modules.conf | sed 's/#.*//' | awk 'NF {print $$1}' | sort -u); do \
+		install -m 0644 $(BUILD_DIR)/modules/$$k $$m/$$k; \
+	done
+	install -d $(AMBA_VIRT_ROOTFS)/etc/init.d
+	ln -s /usr/bin/amba-virt-server $(AMBA_VIRT_ROOTFS)/etc/init.d/021-amba-virt-server
+	set -e; hash=$$(tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -C $(AMBA_VIRT_ROOTFS) -cf - . | sha256sum | cut -c1-40); \
+	$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) ZARCH=arm64 HV=kvm FORCE_BUILD=--force EVE_HASH=$$hash pkg/amba-virt; \
+	cd $(EVE_SYSTEM_DIR) && build-tools/bin/linuxkit pkg show-tag --hash $$hash pkg/amba-virt > $(AMBA_VIRT_TAG_FILE)
+	@echo "amba-virt Dom0 layer: $$(cat $(AMBA_VIRT_TAG_FILE))"
+
+eve: amba-virt-image linuxkit-ca-image $(call my-depend,eve-kernel) $(DRIVER_DEPENDENCY)
 	$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm pkg/storage-init pkg/dom0-ztools pkg/pillar pkg/grub pkg/mkimage-raw-efi pkg/mkrootfs-squash
 	$(EVE_MAKE) -C $(EVE_SYSTEM_DIR) NCORES=$(NCORES) ZARCH=arm64 HV=kvm \
 		KERNEL_TAG=$(if $(CURRENT_KERNEL_TAG),$(CURRENT_KERNEL_TAG),$$($(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
-			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD))) live && \
+			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TAG_CMD))) \
+		AMBAVIRT_TAG=$$(cat $(AMBA_VIRT_TAG_FILE)) live && \
 		$(EVE_MAKE_DONE)
 
 
@@ -310,9 +340,47 @@ drivers: $(call my-depend,eve-kernel-headers)
 			done; \
 		fi; \
 	done
+	@$(MAKE) --no-print-directory camera-drivers
 	@$(EVE_MAKE_DONE)
 	@echo "Staged modules in $(BUILD_DIR)/modules/:"
 	@ls -la $(BUILD_DIR)/modules/
+
+# Camera chain: VIN/VOUT monitor, sensor bridge core, MAX96712 deserializer, OS08A10 sensor,
+# and the R9611 MIPI-DSI LCD bridge. They live under drivers/private and drivers/platform,
+# which OOT_DRIVERS skips, and each one links against the symbols of the one before it.
+CAMERA_DSP := $(DRIVERS_DIR)/private/video/dsp_v6
+CAMERA_VIN := $(DRIVERS_DIR)/platform/vin
+CAMERA_CFLAGS := -DAMBA_DSP_ARCH_V6 -DAMBA_SOC_N1_655 -I$(CAMERA_DSP)/include \
+	-I$(CAMERA_DSP)/include/driver -I$(CAMERA_DSP)/include/driver/specific \
+	-I$(CAMERA_DSP)/include/uapi -I$(CAMERA_DSP)/include/uapi/specific \
+	-I$(DRIVERS_DIR)/private/vin_vout_monitor
+
+# $(1) source dir, $(2) extra cflags, $(3) Module.symvers files, $(4) module name
+camera-module = echo "Building camera-chain driver: $(4)..." && \
+	$(MAKE) -C $$hdr M=$(1) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- clean && \
+	$(MAKE) -C $$hdr M=$(1) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+		EXTRA_CFLAGS="$(CAMERA_CFLAGS) $(2)" KBUILD_EXTRA_SYMBOLS="$(3)" modules && \
+	echo "Signing $(1)/$(4).ko with $$(basename $$key)..." && \
+	"$$sign_bin" sha256 "$$key" "$$cert" $(1)/$(4).ko && \
+	cp -f $(1)/$(4).ko $(BUILD_DIR)/modules/
+
+camera-drivers: $(call my-depend,eve-kernel-headers)
+	@mkdir -p $(BUILD_DIR)/modules
+	@hdr=$$(echo $(BUILD_DIR)/usr/src/linux-headers-*); \
+	sign_bin=$(BUILD_DIR)/bin/sign-file; \
+	key=$(BUILD_DIR)/certs/signing_key.pem; \
+	cert=$(BUILD_DIR)/certs/signing_key.x509; \
+	if [ ! -x "$$sign_bin" ] || [ ! -f "$$key" ]; then \
+		echo "camera-drivers: sign-file or signing key missing in $(BUILD_DIR)" >&2; exit 1; \
+	fi; \
+	if [ ! -f "$(CAMERA_DSP)/Module.symvers" ]; then \
+		echo "camera-drivers: $(CAMERA_DSP)/Module.symvers missing; build ambvideo first" >&2; exit 1; \
+	fi; \
+	$(call camera-module,$(DRIVERS_DIR)/private/vin_vout_monitor,,$(CAMERA_DSP)/Module.symvers,vio_monitor) && \
+	$(call camera-module,$(CAMERA_VIN)/bridges/ambrg,-I$(CAMERA_VIN)/bridges/ambrg,$(CAMERA_DSP)/Module.symvers $(DRIVERS_DIR)/private/vin_vout_monitor/Module.symvers,ambrg) && \
+	$(call camera-module,$(CAMERA_VIN)/bridges/maxim_96712,-I$(CAMERA_VIN)/bridges/ambrg -I$(CAMERA_VIN)/bridges/maxim_96712,$(CAMERA_DSP)/Module.symvers $(DRIVERS_DIR)/private/vin_vout_monitor/Module.symvers $(CAMERA_VIN)/bridges/ambrg/Module.symvers,max96712) && \
+	$(call camera-module,$(CAMERA_VIN)/sensors/omnivision_os08a10_mipi_brg,-I$(CAMERA_VIN)/bridges/ambrg -I$(CAMERA_VIN)/bridges/maxim_96712 -I$(CAMERA_VIN)/sensors/omnivision_os08a10_mipi_brg,$(CAMERA_DSP)/Module.symvers $(DRIVERS_DIR)/private/vin_vout_monitor/Module.symvers $(CAMERA_VIN)/bridges/ambrg/Module.symvers,os08a10_mipi_brg) && \
+	$(call camera-module,$(DRIVERS_DIR)/platform/vout/amblcd/mipi_dsi_lcd_r9611,-I$(CAMERA_DSP)/dsp/include -I$(CAMERA_DSP)/iav/include,$(CAMERA_DSP)/Module.symvers,lcd_r9611)
 
 $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	@mkdir -p $(BUILD_DIR)/modules $(BUILD_DIR)/firmware
@@ -428,9 +496,6 @@ deploy-hvm-ubuntu:
 deploy-hvm-qnx:
 	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-qnx) --reload --enable-serial --test
 
-deploy-nohyper:
-	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-nohyper) --reload --test
-
 # ==============================================================================
 # U-Boot Bootloader & Host Firmware Packaging Targets
 # ==============================================================================
@@ -492,9 +557,6 @@ clean: clean-guest clean-uboot
 			$(MAKE) -C $(DRIVERS_DIR)/$$drv/tools clean 2>/dev/null || true; \
 		fi; \
 	done
-	@if [ -f "$(ROOT_DIR)/nohyper/Makefile" ]; then \
-		$(MAKE) -C $(ROOT_DIR)/nohyper clean 2>/dev/null || true; \
-	fi
 	@echo "Cleaned build artifacts."
 
 distclean: clean distclean-guest

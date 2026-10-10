@@ -1,0 +1,10 @@
+# /etc/amba-virt/late-modules.conf: modules loaded after camera power, in
+# order, and unloaded in reverse at shutdown. Same grammar as modules.conf.
+# Copy this file to /etc/amba-virt/late-modules.conf.
+#
+# Copyright (C) 2026, Ambarella International LLC
+
+vio_monitor.ko
+ambrg.ko
+max96712.ko id=0x01 dts_addr=1 use_max20087=0
+os08a10_mipi_brg.ko brg_id=0x1

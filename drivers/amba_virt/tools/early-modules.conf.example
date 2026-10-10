@@ -1,0 +1,17 @@
+# /etc/amba-virt/early-modules.conf: modules loaded before the 3A service,
+# before camera power. Same grammar as modules.conf: a module file name and
+# optional parameters. Copy this file to /etc/amba-virt/early-modules.conf.
+#
+# Copyright (C) 2026, Ambarella International LLC
+
+hw_timer.ko
+ambcma.ko ama_enable=1 dsp_buf_size=0x40000000
+cavalry.ko
+msg.ko
+ambnl.ko
+dsp.ko
+amba_opti_print.ko
+imgproc.ko
+iav.ko
+amba_otp.ko
+lcd_r9611.ko i2c_addr_map=1 i2c_connected=0

@@ -25,6 +25,9 @@
 	path = guest-os/userspace/nnctrl
 	url = https://github.com/cchiou-amba/nnctrl
 	branch = eve
+[submodule "guest-os/userspace/amba-virt-camera"]
+	path = guest-os/userspace/amba-virt-camera
+	url = https://github.com/cchiou-amba/amba-virt-camera
 
 [submodule "qemu"]
 	path = qemu

@@ -1,5 +1,9 @@
 # EVE Installation Guide for Ambarella N1-655
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 This document details the complete end-to-end installation procedure for Edge
 Virtualization Engine (EVE) on Ambarella N1-655 platforms arriving with blank or
 unformatted eMMC flash storage, assuming a functional bootloader.
@@ -612,9 +616,9 @@ authorized remote management shell, perform comprehensive system health verifica
 
 Once the base operating system is installed and verified healthy, the edge node is
 ready for controller enrollment. Controller onboarding (registering the node with
-ZEDEDA Cloud or an open-source EVE controller) and edge application container
-deployment are covered in:
+ZEDEDA Cloud or an open-source EVE controller) and HVM edge application
+deployment are covered in the documents below. `amba-virt-server` is already
+part of the installed image and needs no separate deployment.
 - [Architecture.md](Architecture.md)
 - [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md)
-- [EVE-Create-NOHYPER-EdgeApp-Instance.md](EVE-Create-NOHYPER-EdgeApp-Instance.md)
 - [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md)

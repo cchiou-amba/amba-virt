@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
 # guest-os/deploy_guest.sh
-# Automated, reproducible deployment script for Ambarella HVM guest VMs and NOHYPER containers:
+# Automated, reproducible deployment script for Ambarella HVM guest VMs:
 #   - Ubuntu 24.04 LTS HVM (n1-655-devkit-ubuntu, n1-655-pro-ubuntu)
 #   - Alpine Linux 3.20 HVM (n1-655-devkit-alpine, n1-655-pro-alpine)
 #   - BlackBerry QNX Neutrino 8.0 HVM (n1-655-devkit-qnx, n1-655-pro-qnx)
-#   - Bare-Metal NOHYPER Containers (n1-655-devkit-nohyper, n1-655-pro-nohyper)
 #
 # Copyright (C) 2026, Ambarella International LLC
 #
@@ -30,10 +29,10 @@ Usage: $0 [options] <target-node>
 
 Arguments:
   <target-node>         SSH host alias (e.g. n1-655-devkit-ubuntu, n1-655-pro-qnx,
-                        n1-655-pro-nohyper, n1-655-devkit-alpine)
+                        n1-655-devkit-alpine)
 
 Options:
-  --distro=DISTRO       Override auto-detected distro (ubuntu, alpine, qnx, nohyper)
+  --distro=DISTRO       Override auto-detected distro (ubuntu, alpine, qnx)
   --reload              Unload existing kernel modules and reinsert fresh ones
   --enable-serial       Enable and start serial-getty / QNX console on target
   --test                Run automated post-deployment smoke test
@@ -47,13 +46,10 @@ Supported Targets & Defaults:
   n1-655-pro-qnx         -> QNX 8.0 HVM     (port 2322, amba-virt-resmgr + devc-seramb)
   n1-655-devkit-alpine   -> Alpine 3.20 HVM (port 2422, musl static binaries)
   n1-655-pro-alpine      -> Alpine 3.20 HVM (port 2422, musl static binaries)
-  n1-655-devkit-nohyper  -> NOHYPER Bare-Metal Container (port 4222)
-  n1-655-pro-nohyper     -> NOHYPER Bare-Metal Container (port 4222)
 
 Examples:
   $0 n1-655-devkit-ubuntu --reload --enable-serial --test
   $0 n1-655-pro-qnx --reload --test
-  $0 n1-655-devkit-nohyper --reload --test
 EOF
 }
 
@@ -118,7 +114,6 @@ if [ -z "${DISTRO}" ]; then
         *ubuntu*)  DISTRO="ubuntu" ;;
         *alpine*)  DISTRO="alpine" ;;
         *qnx*)     DISTRO="qnx" ;;
-        *nohyper*) DISTRO="nohyper" ;;
         *)
             echo "Warning: Could not infer distro from target name '${TARGET_NODE}'. Defaulting to ubuntu."
             DISTRO="ubuntu"
@@ -154,7 +149,7 @@ log_step "Verifying connectivity to target node: ${TARGET_NODE} (Flavor: ${DISTR
 if [ "${DRY_RUN}" -eq 0 ]; then
     if ! ssh -o ConnectTimeout=5 "${TARGET_NODE}" "echo 'Target connected: \$(uname -a)'"; then
         echo "Error: Unable to connect to ${TARGET_NODE} via SSH." >&2
-        echo "Please ensure the guest VM / container is running and host alias is configured in ~/.ssh/config." >&2
+        echo "Please ensure the guest VM is running and host alias is configured in ~/.ssh/config." >&2
         exit 1
     fi
 fi
@@ -163,7 +158,7 @@ STAGING_DIR="${BUILD_GUEST_DIR}/${DISTRO}"
 
 # Deployment by target OS flavor
 case "${DISTRO}" in
-    ubuntu|alpine|nohyper)
+    ubuntu|alpine)
         log_step "Deploying Linux Guest Artifacts (${DISTRO}) to ${TARGET_NODE}..."
 
         # 1. Ensure remote directories exist and are writable for staging

@@ -1,5 +1,9 @@
 # Cavalry Virtualization (N1-655 / EVE-OS)
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 *Copyright (C) 2026, Ambarella International LLC.*
 
 Cavalry is Ambarella’s Vision Processor (VP / VisORC) Linux driver. Userspace
@@ -7,7 +11,9 @@ talks ioctl + mmap on `/dev/cavalry`. The kernel loads `cavalry.bin`, programs
 VisORC MMIO, and submits jobs as **host-physical command descriptors**. The VP
 DMA-reads those addresses.
 
-On this platform the real driver stays in the **NOHYPER** container on EVE-OS.
+On this platform the real driver stays in **EVE Dom0**: `amba-virt-server` loads
+`cavalry.ko` (after `ambcma.ko` with its parameters) from the EVE image at boot
+and is the only process that opens `/dev/cavalry`.
 KVM **HVM** guests (EL1) never load Ambarella `cavalry.ko`. They use the
 vsock + ivshmem transport ([drivers/amba_virt/](../drivers/amba_virt/README.md)) and a
 frontend that preserves the v3 ioctl ABI while supporting both **Path A** (legacy drop-in)
@@ -30,7 +36,7 @@ Host driver: **cavalry_v3** (`compatible = "ambarella,sub-scheduler"`).
 
 ```text
 +-------------------------------------------------------------+                               +-----------------------------------+
-| Linux HVM EL1 (Ubuntu / Alpine)   | QNX 8.0 HVM EL0 (RTOS)  |                               | NOHYPER EL2-side (Host Server)    |
+| Linux HVM EL1 (Ubuntu / Alpine)   | QNX 8.0 HVM EL0 (RTOS)  |                               | EVE Dom0 (Host Server)            |
 |                                   |                         |                               |                                   |
 |   +---------------------------+   |   +-------------------+ |                               |   +---------------------------+   |
 |   | NN App (nnctrl/YOLO)      |   |   | NN App (YOLO/Demo)| |                               |   | amba-virt-server          |   |
@@ -53,7 +59,7 @@ Host driver: **cavalry_v3** (`compatible = "ambarella,sub-scheduler"`).
 
 | Metric | This Architecture | Guest MMIO Passthrough (Rejected) |
 |---|---|---|
-| **Who runs `cavalry.ko`** | NOHYPER only | Guest |
+| **Who runs `cavalry.ko`** | EVE Dom0 only (loaded by `amba-virt-server`) | Guest |
 | **Guest `/dev/cavalry`** | Frontend on `amba_virt` (`amba_cavalry.ko` on Linux, `amba-cavalry-resmgr` on QNX) | Unmodified Ambarella module |
 | **Tensors & Microcode** | ivshmem; host translates or isolates in AMA | Guest GPA must equal HPA |
 | **Multi-guest** | Proxy arbitrates & serializes | Exclusive VisORC lock |
@@ -72,8 +78,18 @@ safely share VisORC hardware without mediation.
 ## 1. What the Host Driver Is
 
 The module matches DT `compatible = "ambarella,sub-scheduler"` and creates
-`/dev/cavalry` (plus `/dev/cavalry_profile`) **inside NOHYPER** (after the
-device is assigned).
+`/dev/cavalry` (plus `/dev/cavalry_profile`) **in EVE Dom0**. The server opens
+it directly; the device is never assigned to an app.
+
+**Who loads it, and in what order.** `amba-virt-server` loads
+`/etc/amba-virt/modules.conf` at start: `ambcma.ko ama_enable=1
+dsp_buf_size=0x40000000`, then `cavalry.ko`, then `amba_virt.ko`, from
+`/lib/modules/$(uname -r)/extra/` in the EVE image. The camera module list
+names `ambcma.ko` and `cavalry.ko` again; a module already loaded with the same
+parameters is accepted, and one loaded with different parameters fails the
+boot. After the camera pipeline starts, the server re-reads
+`AMBA_VIRT_IOC_GET_INFO` before it initializes the Cavalry proxy, so the
+window it maps reflects the loaded `cavalry.ko`.
 
 | Layer | Role |
 |---|---|
@@ -89,7 +105,7 @@ CV7. This document applies to v3 / N1-655.
 
 ## 2. Host Hardware Map (N1-655)
 
-Used by **NOHYPER** `cavalry.ko`, not the guest. From `n1_655.dts` and
+Used by the Dom0 `cavalry.ko`, not the guest. From `n1_655.dts` and
 `cavalry_v3/cavalry_visorc.c`.
 
 ### MMIO (Hardcoded `ioremap`, Not From DT)
@@ -322,7 +338,7 @@ Path A vs. Path B is strictly an architectural property of **Cavalry (VisORC NPU
                   \                         /                                      |
                    v                       v                                       |
 +----------------------------------------------------------------------------------|--------------------+
-| amba-virt-server (Host Daemon in NOHYPER)                                        |                    |
+| amba-virt-server (Host Daemon in EVE Dom0)                                       |                    |
 |   - Unified Service Listener: Port 5555 (Standard well-known port for ALL guests)|                    |
 |   - Authenticated Peer CID Demux: getpeername() -> caller CID                     |                    |
 |   - Dynamic CID -> Tenant Context Lookup: `tenant_ctx[t_idx]`                     |                    |

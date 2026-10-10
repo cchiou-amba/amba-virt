@@ -1,5 +1,9 @@
 # Ambarella UART Virtualization and Physical Serial Console Guide
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 *Copyright (C) 2026, Ambarella International LLC*
 
 ---
@@ -77,8 +81,8 @@ Cross-referenced against the CV3-AD655 Hardware Programming Reference Manual, Da
 - Restricts hardware peripheral DMA channel programming to trusted kernel code, completely preventing tenant authority over physical bus masters.
 - Enforces a 500 ms hardware watchdog timer and guarantees teardown zero-fill memory sanitization upon release or tenant crash.
 
-### 3.2 Per-VM NOHYPER DMA Broker (`drivers/amba_virt/tools/virt_dma_broker.c`)
-- Operates under strict cgroup isolation in the NOHYPER bare-metal container or hostfs.
+### 3.2 DMA Broker in `amba-virt-server` (`drivers/amba_virt/tools/virt_dma_broker.c`)
+- Runs inside `amba-virt-server` in EVE Dom0 and holds no address, FIFO, or channel policy of its own.
 - Forwards guest DMA requests over vsock to `/dev/amba_dma_leaseN` with token-bucket rate limiting (2,000 ops/sec, 50 MiB/sec).
 - Implements controller-neutral endpoint forwarding, maintaining full architectural decoupling between peripheral drivers and DMA controllers.
 

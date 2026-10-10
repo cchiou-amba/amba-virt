@@ -1,5 +1,9 @@
 # Ambarella Virtualized Peripheral DMA Architecture (`amba-dma`)
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 *Document Path: `doc/AmbaVirtDMA.md`*  
 *Copyright (C) 2026, Ambarella International LLC*
 
@@ -35,7 +39,7 @@ For DMA data transfers, the architecture uses a **Dual-Window model**:
 - **DMA32 16 MiB Window**: Low-memory 32-bit IVSHMEM window backed by a dedicated 16 MiB
   slice of the 64 MiB `no-map` pool (`0x6c000000`), required for Generic-DMA1 32-bit descriptors.
 - **Split Authority**: Untrusted guest frontends submit offset-only requests over vsock
-  RPC to the per-VM NOHYPER transport broker; the trusted Dom0 kernel authority
+  RPC to the DMA broker in `amba-virt-server`; the trusted Dom0 kernel authority
   (`amba_virt_dma.ko`) enforces bounds, channel policy, 32-bit DMA masks, single-flight
   execution, and synchronous timeouts.
 
@@ -60,7 +64,7 @@ For DMA data transfers, the architecture uses a **Dual-Window model**:
               (Port 5555)       | | (Zero-Copy Data Plane)    (Port 5555)       | | (Zero-Copy Data)
                                 v v                                             v v
 +===================================================================================================+
-|                                  HOST DOMAIN (EVE OS Dom0 / NOHYPER Broker)                       |
+|                                  HOST DOMAIN (EVE OS Dom0)                                        |
 |                                                                                                   |
 |   +-------------------------------------------------------------------------------------------+   |
 |   | amba-virt-server (Virt Daemon & Security ACL Gatekeeper)                                  |   |

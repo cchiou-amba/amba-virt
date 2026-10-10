@@ -1,8 +1,12 @@
 # EVE Native ivshmem Support
 
+> **Security boundary:** `amba-virt-server` is a trusted root Dom0
+> service in the signed EVE image. The untrusted boundary is the HVM RPC
+> and the guest `/dev/amba_virt` UAPI ([Architecture.md](Architecture.md#security-boundary)).
+
 ## 1. Executive Summary & Objective
 
-The Ambarella virtualization architecture relies on two complementary transport mechanisms between the guest domain (Ubuntu HVM at EL1) and the host container (NOHYPER at EL2):
+The Ambarella virtualization architecture relies on two complementary transport mechanisms between the guest domain (Ubuntu HVM at EL1) and `amba-virt-server` in EVE Dom0 (host userspace on the EL2 kernel):
 
 1. **`virtio-vsock` (Control Plane)**: Low-latency, connection-oriented point-to-point RPC and control messaging (CID 2, port 5555).
 2. **`ivshmem` (Data Plane)**: Zero-copy shared DRAM windows (`ivshmem-plain`, PCI vendor `0x1af4`, device `0x1110`, BAR 2). The architecture uses a **Dual-Window model**:
@@ -56,7 +60,7 @@ Attempts to inject `ivshmem` into an already-running EVE node without modifying 
 4. **Controller & zcli Abstraction Boundary**:
    In ZEDEDA Cloud and `zcli`, the `--adapter` option only assigns entries defined in the edge node's `ioMemberList`. The guest-side `ivshmem` PCI device is emulated and has no such representation, so it cannot be assigned directly.
 
-   That boundary is real but narrower than it first appears, and it is the hinge of the design. The host-side character device `/dev/amba_virt` *is* expressible as an `IO_TYPE_OTHER` member, which is how the NOHYPER container gets it. And an `IO_TYPE_OTHER` member that carries no physical resource at all is inert everywhere on the KVM path, so it can be attached to the HVM purely as a marker: EVE sees an adapter to reserve, and the patched `kvm.go` sees a request for a window. Its `cbattr` carries the parameters. So while `ivshmem` itself is not assignable, the decision to give a given app instance a window is fully controller-driven.
+   That boundary is real but narrower than it first appears, and it is the hinge of the design. The host-side character device `/dev/amba_virt` *is* expressible as an `IO_TYPE_OTHER` member (the retired broker container received it that way; the Dom0 server now opens it directly). And an `IO_TYPE_OTHER` member that carries no physical resource at all is inert everywhere on the KVM path, so it can be attached to the HVM purely as a marker: EVE sees an adapter to reserve, and the patched `kvm.go` sees a request for a window. Its `cbattr` carries the parameters. So while `ivshmem` itself is not assignable, the decision to give a given app instance a window is fully controller-driven.
 
 Therefore, the repository implementation adds native `ivshmem` support to
 EVE's hypervisor template generator instead of relying on runtime injection.
@@ -117,7 +121,7 @@ QEMU's `memory-backend-file` opens the path with `O_CREAT` and sizes it itself, 
 
 The size check matters because the window is mapped as BAR2 and QEMU enforces `PCI region size must be a power of two`. 256M and 512M are fine; 384M is not.
 
-The file is deliberately never shrunk and never unlinked on teardown. A NOHYPER container may already hold a mapping of it, and leaving it in place means an HVM restart reuses the same region instead of invalidating the other end.
+The file is deliberately never shrunk and never unlinked on teardown. The Dom0 server may already hold a mapping of it, and leaving it in place means an HVM restart reuses the same region instead of invalidating the other end.
 
 ```go
 func ensureSharedMemoryFile(w ivshmemWindow) error {
@@ -194,15 +198,15 @@ One caveat: `vmmOverhead` consults `VMMMaxMem` and the global `memory.vmm.limit.
 1. **QEMU Containment**:
    Verified on the node: the QEMU container, `pillar` and `xen-tools` all share the *host's* `/dev/shm`, because EVE bind-mounts it `rbind,rshared`. A file created there by `domainmgr` is the same inode QEMU opens. Mode `0600` is sufficient — QEMU runs as root — and is tighter than the `0666` originally proposed.
 
-2. **NOHYPER Container Access**:
-   NOHYPER containers **do not** share the host's `/dev/shm`. Containerd's default OCI spec gives each one a private `tmpfs`, so a NOHYPER app cannot reach the backing file by path. This invalidates any design in which both ends open `/dev/shm/amba-virt` directly.
+2. **Dom0 Server Access**:
+   `amba-virt-server` runs in Dom0 but reaches the window through the host-side character device `/dev/amba_virt`, created by the host `amba_virt.ko`, which holds the backing file open and hands out mappings of it via `mmap`. No app is assigned `amba_virt`, and no device node is injected into any container.
 
-   The container's only route to the window is the host-side character device `/dev/amba_virt`, created by `kmod/nohyper/amba_virt.ko`, which holds the backing file open and hands out mappings of it via `mmap`. That node is injected into the container by assigning the `amba_virt` `IO_TYPE_OTHER` adapter, which also supplies the cgroup device permission — so no manual `mknod` and no manual cgroup whitelisting.
+   (Historical: under the retired design a NOHYPER broker container held the server. Containerd gives each such container a private `/dev/shm` `tmpfs`, so it could not reach the backing file by path, and `/dev/amba_virt` had to be injected through the `amba_virt` `IO_TYPE_OTHER` adapter. Section 6.1 records that run.)
 
 3. **Load Ordering**:
-   These two facts pull in opposite directions. `/dev/amba_virt` must exist *before* the NOHYPER container is created, because EVE resolves the device node at container-create time and a failed lookup only logs — the app would come up silently missing the device. But the backing file does not exist until the HVM domain starts, which is later and not ordered against it.
+   LinuxKit init runs `/etc/init.d/021-amba-virt-server` before the EVE system services. The server loads `amba_virt.ko` from `/etc/amba-virt/modules.conf` and withholds readiness until `/dev/amba_virt_shm*` exists, so the backing nodes are present before `domainmgr` starts any HVM.
 
-   So the module is loaded at boot from `/etc/init.d/000-mod-params` and no longer requires its backing file at load time. It registers the character device immediately and attaches the window on first use, re-reading the size each time. That also means a window grown by a model change is picked up on the next open rather than needing a module reload.
+   The module does not require its backing file at load time. It registers the character device immediately and attaches the window on first use, re-reading the size each time. That also means a window grown by a model change is picked up on the next open rather than needing a module reload.
 
 ### 3.6 Hardware UART MMIO and vfio-platform Passthrough
 
@@ -334,20 +338,24 @@ After the node reports `Online` following the update:
 | Step | Verification Command | Expected Result |
 |---|---|---|
 | **1. Node Firmware** | `./scripts/zcli -- edge-node show n1-655-devkit` | Active Image matches `$EVE_VER` |
-| **2. Host Module** | EVE host: `lsmod \| grep amba_virt && ls -l /dev/amba_virt` | Loaded at boot; node present *before* any app starts |
+| **2. Host Module** | EVE host: `grep 'is ready' /run/amba-virt/server-daemon.log && ls -l /dev/amba_virt` | Server ready at boot; node present *before* any app starts |
 | **3. Backing Device** | EVE host: `ls -l /dev/amba_virt_shm` | Present before QEMU starts; reported size matches model `shmsize` |
 | **4. QEMU Config** | EVE host: `cat /run/domainmgr/xen/xen1.cfg` | Contains `[object "amba_shm"]` and `[device "amba_shm-dev"]`, both before `[device "eve-vsock0"]` |
 | **5. Cgroup Limit** | EVE host: QEMU container `memory.limit_in_bytes` | Exceeds guest RAM by at least the window size |
 | **6. QEMU Backing** | EVE host: inspect domain QEMU config | `mem-path` matches model `cbattr.shmpath` (`/dev/amba_virt_shm` in production) |
 | **7. Guest PCI Bus** | Ubuntu HVM: `lspci -nn \| grep -E "1af4:1110\|1af4:1053"` | Both `1af4:1053` (vsock) AND `1af4:1110` (ivshmem) are listed |
 | **8. Guest Driver** | Ubuntu HVM: `insmod amba_virt.ko && ls -l /dev/amba_virt` | Driver probes successfully; `/dev/amba_virt` created |
-| **9. Container Device** | NOHYPER container: `ls -l /dev/amba_virt` | Present without any manual `mknod` and without a cgroup whitelist edit |
+| **9. Dom0 Server** | EVE host: `amba-virt-ctl status` | `geometry=match` and one `BIND` line per claimed HVM slice |
 | **10. Vsock Ping** | Ubuntu HVM: `./bin/amba-virt-cli ping` | Server returns `PONG` |
 | **11. Shared DRAM** | Ubuntu HVM: `./bin/amba-virt-cli shm` | Zero-copy data integrity verified with `SHM_ACK` |
 
-Step 9 is the one that distinguishes a working integration from the earlier manual setup: if `/dev/amba_virt` only appears after a hand-run `mknod`, the model entry is not doing its job and the device will vanish on the next container recreate.
+Step 2 is the one that distinguishes a working integration: the server must be ready from the image at boot, with no hand-run `mknod`, `insmod`, or files under `/persist`.
 
 ### 6.1 Historical 16 MiB PoC Results on n1-655-devkit
+
+> **Superseded architecture.** This run used the retired NOHYPER broker
+> container. Its observations are kept as recorded; they are not Dom0 server
+> results.
 
 Steps 1–7 were confirmed on the devkit against EVE
 `0.0.0-amba-ivshmem-fa7d9904` with `ubuntu_24_04_ivshmem.n1-655-devkit`

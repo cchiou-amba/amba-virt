@@ -435,10 +435,107 @@ static struct miscdevice amba_virt_shm1_miscdev = {
 	.mode = 0600,
 };
 
-static int __init amba_virt_host_init(void)
+/* Each HVM BAR is 1 GiB. The cavalry user region is the whole CVMEM
+ * reservation, which is larger; the remainder stays host-private.
+ */
+#define AMBA_VIRT_GUEST_BAR_SIZE (1UL << 30)
+
+static bool shm_nodes_registered;
+
+static int amba_virt_window_ok(phys_addr_t phys, size_t size)
+{
+	phys_addr_t window_end;
+
+	if (!phys || !size || size > U32_MAX ||
+	    !PAGE_ALIGNED(phys) || !PAGE_ALIGNED(size) ||
+	    check_add_overflow(phys, (phys_addr_t)size, &window_end))
+		return -EINVAL;
+	return 0;
+}
+
+static void amba_virt_publish_slices(void)
+{
+	unsigned int s_idx;
+	int ret;
+
+	if (!g_devs[0].shm_phys || shm_nodes_registered)
+		return;
+
+	g_devs[0].gdma_copy = amba_virt_host_gdma_copy;
+
+	memset(&g_slice_list, 0, sizeof(g_slice_list));
+	memset(g_slice_states, 0, sizeof(g_slice_states));
+	ret = amba_virt_slice_compute_geometry(g_devs[0].shm_phys,
+					       g_devs[0].shm_size,
+					       PAGE_SIZE, num_instances,
+					       &g_slice_list);
+	if (!ret && g_slice_list.count > 0) {
+		for (s_idx = 0; s_idx < g_slice_list.count; s_idx++)
+			g_slice_states[s_idx].desc = g_slice_list.slices[s_idx];
+		pr_info("amba_virt: published %u slices (slice_size=%llu, usable_size=%u)\n",
+			g_slice_list.count,
+			(unsigned long long)g_slice_list.slices[0].slice_size,
+			g_slice_list.slices[0].usable_size);
+	} else {
+		pr_warn("amba_virt: slice geometry computation failed (%d)\n", ret);
+	}
+
+	ret = misc_register(&amba_virt_shm_miscdev);
+	if (ret)
+		pr_warn("amba_virt: register shm miscdev failed %d\n", ret);
+	ret = misc_register(&amba_virt_shm0_miscdev);
+	if (ret)
+		pr_warn("amba_virt: register shm0 miscdev failed %d\n", ret);
+	ret = misc_register(&amba_virt_shm1_miscdev);
+	if (ret)
+		pr_warn("amba_virt: register shm1 miscdev failed %d\n", ret);
+	shm_nodes_registered = true;
+}
+
+void amba_virt_ensure_window(struct amba_virt_dev *dev)
 {
 	int (*window_get)(phys_addr_t *phys, size_t *size);
-	phys_addr_t window_end;
+	phys_addr_t phys;
+	size_t size;
+	size_t span;
+
+	(void)dev;
+	if (g_devs[0].shm_phys && g_devs[0].shm_size) {
+		amba_virt_publish_slices();
+		return;
+	}
+
+	window_get = symbol_get(cavalry_user_window_get);
+	if (!window_get)
+		return;
+	phys = 0;
+	size = 0;
+	if (window_get(&phys, &size)) {
+		symbol_put(cavalry_user_window_get);
+		return;
+	}
+	span = (size_t)num_instances * AMBA_VIRT_GUEST_BAR_SIZE;
+	if (span && size > span) {
+		pr_info("amba_virt: cavalry window phys 0x%llx size 0x%zx; guest bars use the first 0x%zx\n",
+			(unsigned long long)phys, size, span);
+		size = span;
+	} else {
+		pr_info("amba_virt: cavalry window phys 0x%llx size 0x%zx\n",
+			(unsigned long long)phys, size);
+	}
+	if (amba_virt_window_ok(phys, size)) {
+		symbol_put(cavalry_user_window_get);
+		pr_err("amba_virt: cavalry window is not a usable guest mapping\n");
+		return;
+	}
+	cavalry_window_held = true;
+	g_devs[0].shm_phys = phys;
+	g_devs[0].shm_size = size;
+	amba_virt_publish_slices();
+}
+
+static int __init amba_virt_host_init(void)
+{
 	int ret = 0;
 	unsigned int i;
 
@@ -448,36 +545,21 @@ static int __init amba_virt_host_init(void)
 	}
 
 	memset(g_devs, 0, sizeof(g_devs));
-	if (!shm_phys) {
-		window_get = symbol_get(cavalry_user_window_get);
-		if (window_get) {
-			ret = window_get(&g_devs[0].shm_phys, &g_devs[0].shm_size);
-			if (!ret)
-				cavalry_window_held = true;
-			else
-				symbol_put(cavalry_user_window_get);
-		}
-	}
+	if (num_instances < 1) num_instances = 1;
+	if (num_instances > AMBA_VIRT_MAX_MINORS) num_instances = AMBA_VIRT_MAX_MINORS;
+
 	if (shm_phys) {
 		g_devs[0].shm_phys = (phys_addr_t)shm_phys;
 		g_devs[0].shm_size = shm_size;
-	}
-	if (g_devs[0].shm_phys &&
-	    (!g_devs[0].shm_size || g_devs[0].shm_size > U32_MAX ||
-	     !PAGE_ALIGNED(g_devs[0].shm_phys) ||
-	     !PAGE_ALIGNED(g_devs[0].shm_size) ||
-	     check_add_overflow(g_devs[0].shm_phys,
-				(phys_addr_t)g_devs[0].shm_size, &window_end))) {
-		pr_err("amba_virt: invalid physical shared window\n");
-		if (cavalry_window_held) {
-			symbol_put(cavalry_user_window_get);
-			cavalry_window_held = false;
+		if (amba_virt_window_ok(g_devs[0].shm_phys, g_devs[0].shm_size)) {
+			pr_err("amba_virt: invalid physical shared window\n");
+			g_devs[0].shm_phys = 0;
+			g_devs[0].shm_size = 0;
+			return -EINVAL;
 		}
-		return -EINVAL;
+	} else {
+		amba_virt_ensure_window(NULL);
 	}
-
-	if (num_instances < 1) num_instances = 1;
-	if (num_instances > AMBA_VIRT_MAX_MINORS) num_instances = AMBA_VIRT_MAX_MINORS;
 
 	g_active_instances = 0;
 	for (i = 0; i < num_instances; i++) {
@@ -513,35 +595,7 @@ static int __init amba_virt_host_init(void)
 		return ret;
 	}
 
-	if (g_devs[0].shm_phys) {
-		unsigned int s_idx;
-		memset(&g_slice_list, 0, sizeof(g_slice_list));
-		memset(g_slice_states, 0, sizeof(g_slice_states));
-		ret = amba_virt_slice_compute_geometry(g_devs[0].shm_phys,
-						       g_devs[0].shm_size,
-						       PAGE_SIZE, 2, &g_slice_list);
-		if (!ret && g_slice_list.count > 0) {
-			for (s_idx = 0; s_idx < g_slice_list.count; s_idx++) {
-				g_slice_states[s_idx].desc = g_slice_list.slices[s_idx];
-			}
-			pr_info("amba_virt: published %u slices (slice_size=%llu, usable_size=%u)\n",
-				g_slice_list.count,
-				(unsigned long long)g_slice_list.slices[0].slice_size,
-				g_slice_list.slices[0].usable_size);
-		} else {
-			pr_warn("amba_virt: slice geometry computation failed (%d)\n", ret);
-		}
-
-		ret = misc_register(&amba_virt_shm_miscdev);
-		if (ret)
-			pr_warn("amba_virt: register shm miscdev failed %d\n", ret);
-		ret = misc_register(&amba_virt_shm0_miscdev);
-		if (ret)
-			pr_warn("amba_virt: register shm0 miscdev failed %d\n", ret);
-		ret = misc_register(&amba_virt_shm1_miscdev);
-		if (ret)
-			pr_warn("amba_virt: register shm1 miscdev failed %d\n", ret);
-	}
+	amba_virt_publish_slices();
 
 	pr_info("amba_virt host: %u instances active (/dev/amba_virt0..%u), vsock base port %u\n",
 		g_active_instances, g_active_instances - 1, vsock_port);
@@ -552,10 +606,11 @@ static void __exit amba_virt_host_exit(void)
 {
 	unsigned int i;
 
-	if (g_devs[0].shm_phys) {
+	if (shm_nodes_registered) {
 		misc_deregister(&amba_virt_shm1_miscdev);
 		misc_deregister(&amba_virt_shm0_miscdev);
 		misc_deregister(&amba_virt_shm_miscdev);
+		shm_nodes_registered = false;
 	}
 	for (i = 0; i < g_active_instances; i++) {
 		amba_virt_core_exit_instance(&g_devs[i]);

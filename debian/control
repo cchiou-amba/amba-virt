@@ -9,5 +9,6 @@ Package: amba-virt-server
 Architecture: arm64
 Depends: ${misc:Depends}
 Description: Ambarella hardware-accelerator virtualization server
- amba-virt-server coordinates hardware-accelerator virtualization,
- kernel module loading via amba-virt-backend, and client sessions.
+ amba-virt-server runs in EVE Dom0. It loads the accelerator kernel
+ modules, brokers the accelerator and camera for HVM guests, and
+ serves their client sessions.

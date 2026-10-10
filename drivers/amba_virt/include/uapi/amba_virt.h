@@ -384,67 +384,6 @@ struct amba_virt_gdma_copy {
 #define AMBA_VIRT_GDMA_F_NONE	0u
 #define AMBA_VIRT_GDMA_F_PITCH	(1u << 0)
 
-/* Backend IPC Opcodes (over persistent TCP on port 5556) */
-#define BACKEND_MSG_AUTH_REQ           0x01u
-#define BACKEND_MSG_AUTH_RESP          0x02u
-#define BACKEND_OP_HEARTBEAT           0x03u
-#define BACKEND_OP_HEARTBEAT_ACK       0x04u
-#define BACKEND_OP_FULL_STATUS         0x05u
-#define BACKEND_OP_FULL_STATUS_RESP    0x06u
-/*
- * BACKEND_OP_MODULE_LOAD (0x07):
- * Payload is either:
- * - Module name without NUL (legacy, parameters empty)
- * - Module name terminated by NUL, followed by optional parameter string
- *   (up to second NUL or hdr.len).
- * Limits: module name <= 63 bytes, no '/'. Parameter string <= 255 bytes
- * containing only [A-Za-z0-9_ =.,]. Max hdr.len is 320 bytes.
- */
-#define BACKEND_OP_MODULE_LOAD         0x07u
-#define BACKEND_OP_MODULE_LOAD_RESP    0x08u
-#define BACKEND_OP_MODULE_UNLOAD       0x09u
-#define BACKEND_OP_MODULE_UNLOAD_RESP  0x0Au
-#define BACKEND_OP_HARDWARE_RESET      0x0Bu
-#define BACKEND_OP_HARDWARE_RESET_RESP 0x0Cu
-#define BACKEND_OP_FIRMWARE_VERSIONS   0x0Du
-#define BACKEND_OP_FIRMWARE_VERSIONS_RESP 0x0Eu
-#define BACKEND_EVENT_MODULE_CHANGED   0x10u
-#define BACKEND_OP_MODULE_STORE        0x11u
-#define BACKEND_OP_MODULE_STORE_RESP   0x12u
-
-/* Module store probe dispositions */
-#define BACKEND_MODULE_IMAGE_PRESENT   0x00u
-#define BACKEND_MODULE_UPLOAD_REQUIRED 0x01u
-
-/* Module name, parameter, and transfer constraints */
-#define BACKEND_MODULE_MAX_NAME_LEN    63u
-#define BACKEND_MODULE_MAX_PARAM_LEN   255u
-#define BACKEND_MODULE_LOAD_MAX_PAYLOAD 320u
-#define BACKEND_MODULE_STORE_MAX_SIZE  (64u * 1024u * 1024u) /* 64 MiB */
-
-#define BACKEND_MSG_MAGIC              0x4156424BU /* 'AVBK' */
-#define BACKEND_TOKEN_MAX_LEN          64
-
-struct backend_msg_hdr {
-	__u32 magic;       /* BACKEND_MSG_MAGIC */
-	__u32 msg_type;    /* BACKEND_OP_* */
-	__u32 seq;
-	__u32 len;         /* Payload length following header */
-	__s32 status;      /* 0 = success, negative = errno */
-};
-
-struct backend_firmware_entry {
-	char  name[32];
-	__u32 size;
-	char  sha256[64];
-	__u32 present;
-};
-
-struct backend_firmware_resp {
-	__u32 count;
-	struct backend_firmware_entry entries[8];
-};
-
 #define AMBA_VIRT_MAX_GUESTS 8
 
 struct amba_virt_guest_list {

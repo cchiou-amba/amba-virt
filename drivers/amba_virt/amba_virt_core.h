@@ -79,6 +79,7 @@ void amba_virt_core_exit(struct amba_virt_dev *dev);
 void amba_virt_core_exit_instance(struct amba_virt_dev *dev);
 
 int amba_virt_attach_shm(struct amba_virt_dev *dev);
+void amba_virt_ensure_window(struct amba_virt_dev *dev);
 int amba_virt_mmap_window(struct amba_virt_dev *dev,
 			  struct vm_area_struct *vma);
 int amba_virt_mmap_slice(struct amba_virt_dev *dev,
