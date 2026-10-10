@@ -12,6 +12,21 @@
   },
   "ioMemberList": [
     {
+      "ztype": "IO_TYPE_ETH",
+      "phylabel": "eth0",
+      "phyaddrs": {
+        "Ifname": "eth0"
+      },
+      "logicallabel": "eth0",
+      "assigngrp": "eth0",
+      "usage": "ADAPTER_USAGE_MANAGEMENT",
+      "cbattr": {},
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
       "ztype": "IO_TYPE_OTHER",
       "phylabel": "UART0",
       "phyaddrs": {},
@@ -73,40 +88,12 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "cavalry",
+      "phylabel": "hwrng",
       "phyaddrs": {
-        "Ifname": "/dev/cavalry"
+        "Ifname": "/dev/hwrng"
       },
-      "logicallabel": "cavalry",
-      "assigngrp": "cavalry",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_USB_CONTROLLER",
-      "phylabel": "USB",
-      "phyaddrs": {},
-      "logicallabel": "USB",
-      "assigngrp": "USB",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "gpio0",
-      "phyaddrs": {
-        "Ifname": "/dev/gpiochip0"
-      },
-      "logicallabel": "gpio0",
-      "assigngrp": "gpio",
+      "logicallabel": "hwrng",
+      "assigngrp": "hwrng",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},
@@ -131,58 +118,11 @@
       "parentassigngrp": ""
     },
     {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "amba_virt",
-      "phyaddrs": {
-        "Ifname": "/dev/amba_virt"
-      },
-      "logicallabel": "amba_virt",
-      "assigngrp": "amba_virt",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "iav",
-      "phyaddrs": {
-        "Ifname": "/dev/iav"
-      },
-      "logicallabel": "iav",
-      "assigngrp": "iav",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "hwrng",
-      "phyaddrs": {
-        "Ifname": "/dev/hwrng"
-      },
-      "logicallabel": "hwrng",
-      "assigngrp": "hwrng",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "cavalry_profile",
-      "phyaddrs": {
-        "Ifname": "/dev/cavalry_profile"
-      },
-      "logicallabel": "cavalry_profile",
-      "assigngrp": "cavalry",
+      "ztype": "IO_TYPE_USB_CONTROLLER",
+      "phylabel": "USB",
+      "phyaddrs": {},
+      "logicallabel": "USB",
+      "assigngrp": "USB",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {},
       "usagePolicy": {},
@@ -207,6 +147,21 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
+      "phylabel": "rng-mmio",
+      "phyaddrs": {},
+      "logicallabel": "rng-mmio",
+      "assigngrp": "rng-mmio",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "rng": "mmio"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
       "phylabel": "amba_shm1",
       "phyaddrs": {},
       "logicallabel": "amba_shm1",
@@ -215,36 +170,6 @@
       "cbattr": {
         "shmpath": "/dev/amba_virt_shm1",
         "shmsize": "1G"
-      },
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_ETH",
-      "phylabel": "eth0",
-      "phyaddrs": {
-        "Ifname": "eth0"
-      },
-      "logicallabel": "eth0",
-      "assigngrp": "eth0",
-      "usage": "ADAPTER_USAGE_MANAGEMENT",
-      "cbattr": {},
-      "usagePolicy": {},
-      "cost": 0,
-      "vfs": null,
-      "parentassigngrp": ""
-    },
-    {
-      "ztype": "IO_TYPE_OTHER",
-      "phylabel": "rng-mmio",
-      "phyaddrs": {},
-      "logicallabel": "rng-mmio",
-      "assigngrp": "rng-mmio",
-      "usage": "ADAPTER_USAGE_UNSPECIFIED",
-      "cbattr": {
-        "rng": "mmio"
       },
       "usagePolicy": {},
       "cost": 0,

@@ -30,9 +30,8 @@ Both are ARM64, 4 CPUs, 32G memory, 32G storage, watchdog on, HSM/LEDs off.
 >   `ambarella_wdt.c` is active (`fff4001000.wdt`, creating `/dev/watchdog`),
 >   confirming the model attribute `"watchdog": "true"`.
 > - **`cavalry`, `cavalry_profile`, `gpio0`, `iav`, and `amba_virt` are
->   Dom0-owned.** `amba-virt-server` in EVE Dom0 loads their modules
->   (`iav.ko` among the camera modules) and owns the nodes. The entries
->   remain published, but must stay **unassigned**, like `hwrng`.
+>   not in the model.** `amba-virt-server` in EVE Dom0 loads their modules
+>   and owns the nodes. They are not assignable.
 > - **`hwrng` is published.** `/dev/hwrng` is created by the active
 >   `ambarella-rng.c` hardware RNG driver and published in the model.
 >
@@ -70,40 +69,35 @@ reference design assigns none of the Ambarella chardevs this way.
 - Same non-empty `assigngrp`: one unit, assignable to one app instance.
 - `usage` `ADAPTER_USAGE_MANAGEMENT`: EVE management port. Do not assign it
   to an app even if `assigngrp` is set.
-- Never assign `cavalry`, `gpio`, `iav`, or `amba_virt` to an app. They
-  belong to `amba-virt-server` in Dom0. HVMs reach Cavalry and the camera
-  through the server, never by passthrough.
-- Assign `amba_shm` only to HVMs (window marker). `shmsize` is `1G`.
-- Current `COM2`/`COM3` entries are legacy delivered configuration. Their
-  populated `Serial=/dev/ttyS*` fields make Pillar emit QEMU `pci-serial`;
-  they are not the planned Ambarella UART virtualization path.
+- `cavalry`, `gpio0`, `iav`, and `amba_virt` are not model adapters.
+  HVMs reach Cavalry and the camera through `amba-virt-server`.
+- Assign `amba_shm` or `amba_shm1` only to HVMs (window markers). Each
+  `shmsize` is `1G`.
 
 ## Shared `ioMemberList`
 
 Both models have the same adapters (`zcli model show … --detail`):
 
-| phylabel | logicallabel | ztype | assigngrp | phyaddrs | usage |
+| phylabel | logicallabel | ztype | assigngrp | phyaddrs / cbattr | usage |
 |---|---|---|---|---|---|
 | USB | USB | `IO_TYPE_USB_CONTROLLER` | USB | — | unspecified |
-| COM1 | COM1 | `IO_TYPE_COM` | COM1 | `Serial=/dev/ttyS0` | unspecified |
-| COM2 | COM2 | `IO_TYPE_COM` | COM2 | `Serial=/dev/ttyS1` | legacy; replace with UART1 adapter bundle |
-| COM3 | COM3 | `IO_TYPE_COM` | COM3 | `Serial=/dev/ttyS2` | legacy; replace with UART2 adapter bundle |
 | eth0 | eth0 | `IO_TYPE_ETH` | eth0 | `Ifname=eth0` | **management** |
-| cavalry | cavalry | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry` | unspecified |
-| cavalry_profile | cavalry_profile | `IO_TYPE_OTHER` | cavalry | `Ifname=/dev/cavalry_profile` | unspecified |
-| gpio0 | gpio0 | `IO_TYPE_OTHER` | gpio | `Ifname=/dev/gpiochip0` | unspecified |
+| UART0 | UART0 | `IO_TYPE_OTHER` | *(empty)* | `cbattr uart=0` | **management** |
+| UART1 | UART1 | `IO_TYPE_OTHER` | uart1 | `cbattr uart=1` | unspecified |
+| UART2 | UART2 | `IO_TYPE_OTHER` | uart2 | `cbattr uart=2` | unspecified |
+| UART3 | UART3 | `IO_TYPE_OTHER` | uart3 | `cbattr uart=3` | unspecified |
+| UART4 | UART4 | `IO_TYPE_OTHER` | uart4 | `cbattr uart=4` | unspecified |
 | hwrng | hwrng | `IO_TYPE_OTHER` | hwrng | `Ifname=/dev/hwrng` | unspecified |
-| iav | iav | `IO_TYPE_OTHER` | iav | `Ifname=/dev/iav` | unspecified |
-| amba_virt | amba_virt | `IO_TYPE_OTHER` | amba_virt | `Ifname=/dev/amba_virt` | unspecified |
-| amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | *(empty)* | unspecified |
+| rng-mmio | rng-mmio | `IO_TYPE_OTHER` | rng-mmio | `cbattr rng=mmio` | unspecified |
+| amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | `shmpath=/dev/amba_virt_shm`, `shmsize=1G` | unspecified |
+| amba_shm1 | amba_shm1 | `IO_TYPE_OTHER` | amba_shm1 | `shmpath=/dev/amba_virt_shm1`, `shmsize=1G` | unspecified |
 
-`amba_shm` has empty `phyaddrs` and `cbattr` `shmpath=/dev/amba_virt_shm`,
-`shmsize=1G`. Assigning it to an HVM is a window marker: `kvm.go` emits
-`ivshmem-plain`. One window is shared by every virtual driver in that HVM
-(Cavalry, DMA, SD/eMMC, …). Do not add a second `amba_shm`. 16M is PoC-only.
+`amba_shm` and `amba_shm1` have empty `phyaddrs`. Assigning one to an HVM is
+a window marker: `kvm.go` emits `ivshmem-plain`. Each window is shared by
+every virtual driver in that HVM. Pulled from the controller on 2026-10-10
+after `cavalry`, `cavalry_profile`, `gpio0`, `iav`, and `amba_virt` were
+removed.
 [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
-
-`amba_virt` is the host chardev the Dom0 server opens to reach the window.
 
 ### Planned UART Adapter Bundles
 
@@ -121,9 +115,9 @@ The UART parser and `amba_shm` bulk-window parser must be mutually exclusive on
 their `cbattr` keys. `IoOther` and `IoNVME` both have numeric value 255, so type
 alone cannot identify the bundle.
 
-The exact UART `cbattr` schema is not implemented yet. Do not publish guessed
-model entries. When implementation lands, replace the current `COM2`/`COM3`
-entries and update the shared table above in the same change.
+The controller already publishes UART0–UART4. Each has empty `phyaddrs` and
+`cbattr` `uart` set to that index. UART0 has an empty `assigngrp` and
+management usage. There are no `COM1`/`COM2`/`COM3` entries.
 
 ### Hardware RNG & VirtIO RNG Virtualization
 
@@ -159,18 +153,11 @@ already be in the environment.
 +--------------------+             +--------------------------------+                 +----------------------+
 ```
 
-Confirm no app holds a Dom0-owned group:
+Confirm an HVM holds a window marker and not a host chardev:
 
 ```bash
 ./scripts/show_instances.sh
 ./scripts/show_instances.sh ubuntu_24_04.n1-655-pro
-```
-
-If `cavalry` / `gpio` / `iav` / `amba_virt` appear on any instance, clear
-them (`set_adapters.sh` keeps networks):
-
-```bash
-./scripts/set_adapters.sh ubuntu_24_04.n1-655-pro --adapter=amba_shm:amba_shm --restart
 ```
 
 ## DTS mapping
