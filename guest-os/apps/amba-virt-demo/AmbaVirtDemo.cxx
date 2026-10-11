@@ -53,6 +53,7 @@ extern "C" {
 #include "HttpServer.hxx"
 #include "StreamBroadcaster.hxx"
 #include "DashboardHtml.hxx"
+#include "IavQualMain.hxx"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -663,6 +664,11 @@ static void PopulateOsInfo(YoloRuntime *rt)
 
 int main(int argc, char **argv)
 {
+    /* The IAV qualification suite, against this guest's /dev/iav. Exit codes: IavQualExit. */
+    if (argc >= 2 && strcmp(argv[1], "--iav-qual") == 0) {
+        return iavQualMain(argc, argv, 2, nullptr);
+    }
+
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 

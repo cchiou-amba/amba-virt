@@ -12,6 +12,7 @@
 #include <linux/kmod.h>
 
 #include <amba_virt.h>
+#include <amba_virt_iav_win.h>
 #include "amba_virt_kernel.h"
 #include "amba_virt_core.h"
 
@@ -35,6 +36,14 @@ static bool amba_virt_claim_retryable(int err)
 	return err == -ECONNRESET || err == -ECONNREFUSED || err == -ENOTCONN ||
 	       err == -ETIMEDOUT || err == -EAGAIN || err == -EPIPE ||
 	       err == -EHOSTUNREACH || err == -ENODEV;
+}
+
+/*
+ * The core calls this before it uses the window. The host module (amba_virt_nohyper.c) finds its
+ * window there; a guest has its BAR from PCI probe and nothing to find.
+ */
+void amba_virt_ensure_window(struct amba_virt_dev *dev)
+{
 }
 
 static struct amba_virt_pci_window bulk_win;
@@ -88,6 +97,14 @@ int amba_virt_rpc(const void *request, u32 request_len, void *response,
 }
 EXPORT_SYMBOL_GPL(amba_virt_rpc);
 
+int amba_virt_rpc_seq(const void *request, u32 request_len, void *response,
+		      u32 *response_len, unsigned int timeout_ms)
+{
+	return amba_virt_rpc_dev_seq(&gdev, request, request_len, response,
+				     response_len, timeout_ms);
+}
+EXPORT_SYMBOL_GPL(amba_virt_rpc_seq);
+
 static int amba_virt_pci_probe(struct pci_dev *pdev,
 			       const struct pci_device_id *id)
 {
@@ -114,6 +131,29 @@ static int amba_virt_pci_probe(struct pci_dev *pdev,
 		dev_err(&pdev->dev, "ivshmem memory BAR missing\n");
 		pci_disable_device(pdev);
 		return -ENODEV;
+	}
+
+	/*
+	 * An IAV window (the host amba_virt_iav_win module) is not a data slice and not a DMA
+	 * window. One with padding says so in the last bytes of the BAR. Leave it unbound for
+	 * iav_virt, which looks for such devices itself.
+	 */
+	if (len > AMBA_VIRT_IAV_WIN_HDR_BYTES) {
+		void __iomem *tail = pci_iomap_range(pdev, bar, len - AMBA_VIRT_IAV_WIN_HDR_BYTES,
+						     AMBA_VIRT_IAV_WIN_HDR_BYTES);
+
+		if (tail) {
+			struct amba_virt_iav_win_hdr hdr;
+
+			memcpy_fromio(&hdr, tail, sizeof(hdr));
+			pci_iounmap(pdev, tail);
+			if (hdr.magic == AMBA_VIRT_IAV_WIN_HDR_MAGIC) {
+				dev_info(&pdev->dev, "amba_virt guest: IAV window %u left for iav_virt\n",
+					 hdr.window_id);
+				pci_disable_device(pdev);
+				return -ENODEV;
+			}
+		}
 	}
 
 	/* Classify window role by BAR size */

@@ -97,6 +97,7 @@ do_clean() {
     make -C "${ROOT_DIR}/guest-os/linux/amba-dma" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/amba-gdma" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/amba-cavalry" clean 2>/dev/null || true
+    make -C "${ROOT_DIR}/guest-os/linux/amba-iav" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/test-gdma" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/client" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/qnx/amba-virt" clean 2>/dev/null || true
@@ -338,6 +339,10 @@ build_ubuntu() {
             make -C /workspace/guest-os/linux/amba-cavalry KDIR_HVM="${KDIR}" clean modules
             cp -vf /workspace/guest-os/linux/amba-cavalry/amba_cavalry.ko /workspace/build/guest/ubuntu/
 
+            echo "[*] Compiling iav_virt.ko..."
+            make -C /workspace/guest-os/linux/amba-iav KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-iav/iav_virt.ko /workspace/build/guest/ubuntu/
+
             echo "[*] Compiling amba_uart.ko..."
             make -C /workspace/guest-os/linux/amba-uart KDIR_HVM="${KDIR}" clean modules
             cp -vf /workspace/guest-os/linux/amba-uart/amba_uart.ko /workspace/build/guest/ubuntu/
@@ -421,6 +426,24 @@ build_alpine() {
             clean modules
         cp -vf "${ROOT_DIR}/guest-os/linux/amba-dma/amba_dma.ko" "${ALPINE_OUT}/"
 
+        log_step "Compiling amba_cavalry.ko natively for Alpine..."
+        make -C "${ROOT_DIR}/guest-os/linux/amba-cavalry" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_GCC_PLUGINS=n \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/amba-cavalry/amba_cavalry.ko" "${ALPINE_OUT}/"
+
+        log_step "Compiling iav_virt.ko natively for Alpine..."
+        make -C "${ROOT_DIR}/guest-os/linux/amba-iav" \
+            KDIR_HVM="${kdir}" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_GCC_PLUGINS=n \
+            clean modules
+        cp -vf "${ROOT_DIR}/guest-os/linux/amba-iav/iav_virt.ko" "${ALPINE_OUT}/"
+
         log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ -static musl/standalone)..."
         make -C "${ROOT_DIR}/guest-os/client" \
             clean all \
@@ -456,6 +479,14 @@ build_alpine() {
                 echo "[*] Compiling amba_uart.ko for Alpine..."
                 make -C /workspace/guest-os/linux/amba-uart KDIR_HVM="${KDIR}" clean modules
                 cp -vf /workspace/guest-os/linux/amba-uart/amba_uart.ko /workspace/build/guest/alpine/
+
+                echo "[*] Compiling amba_cavalry.ko for Alpine..."
+                make -C /workspace/guest-os/linux/amba-cavalry KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/amba-cavalry/amba_cavalry.ko /workspace/build/guest/alpine/
+
+                echo "[*] Compiling iav_virt.ko for Alpine..."
+                make -C /workspace/guest-os/linux/amba-iav KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/amba-iav/iav_virt.ko /workspace/build/guest/alpine/
 
                 echo "[*] Compiling amba-virt-client (static musl)..."
                 make -C /workspace/guest-os/client clean all STATIC=1

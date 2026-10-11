@@ -11,6 +11,7 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/fs.h>
+#include <linux/kref.h>
 #include <linux/mutex.h>
 #include <linux/net.h>
 #include <linux/wait.h>
@@ -20,18 +21,40 @@ struct amba_virt_dma_slave_xfer;
 
 #define AMBA_VIRT_MAX_CONNS 8
 
+/*
+ * One accepted vsock connection. The slot, the receive worker and every sender each hold a
+ * reference, and whoever drops the last one releases the socket, so a socket is never released while
+ * anyone is inside a call on it. Senders take tx_lock, not the table lock, and a send is bounded by
+ * the socket's send timeout: a guest that stops reading is disconnected, and cannot hold up the
+ * others.
+ */
+struct amba_virt_csock {
+	struct kref ref;
+	struct socket *sock;
+	struct mutex tx_lock;
+};
+
 struct amba_virt_conn {
 	struct amba_virt_dev *dev;
-	struct socket *sock;
+	struct amba_virt_csock *csk;
 	unsigned int cid;
 	struct task_struct *rx_thread;
 	bool in_use;
+	atomic_t queued; /* frames of this slot waiting in dev->rx_queue */
 };
+
+/*
+ * Frames one connection may have waiting for the server. A worker that reaches it stops reading its
+ * socket until the server catches up, so the flow control of vsock slows the sender and a guest that
+ * floods requests cannot make Dom0 kernel memory grow without bound.
+ */
+#define AMBA_VIRT_RX_QUEUE_MAX 64
 
 struct amba_virt_rx_msg {
 	struct list_head list;
 	u32 len;
 	u32 client_cid;
+	struct amba_virt_conn *conn;
 	u8  data[AMBA_VIRT_MAX_MSG];
 };
 
@@ -95,6 +118,9 @@ int amba_virt_export_dmabuf_slice(struct amba_virt_dev *dev,
 int amba_virt_vsock_listen(struct amba_virt_dev *dev);
 int amba_virt_vsock_connect(struct amba_virt_dev *dev);
 void amba_virt_vsock_disconnect(struct amba_virt_dev *dev);
+int amba_virt_rpc_dev_seq(struct amba_virt_dev *dev, const void *request,
+			  u32 request_len, void *response, u32 *response_len,
+			  unsigned int timeout_ms);
 int amba_virt_rpc_dev(struct amba_virt_dev *dev, const void *request,
 		      u32 request_len, void *response, u32 *response_len,
 		      unsigned int timeout_ms);

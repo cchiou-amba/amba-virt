@@ -204,7 +204,7 @@ amba-virt-image: linuxkit-ca-image $(DRIVER_DEPENDENCY)
 	done
 	set -e; d=$(AMBA_VIRT_ROOTFS)/etc/amba-virt; install -d $$d; \
 	printf '%s\n' '# Loaded by amba-virt-server when it starts, before any guest connects.' \
-		'ambcma.ko ama_enable=1 dsp_buf_size=0x40000000' 'cavalry.ko' 'amba_virt.ko' > $$d/modules.conf; \
+		'ambcma.ko ama_enable=1 dsp_buf_size=0x40000000' 'cavalry.ko' 'amba_virt.ko' 'amba_virt_iav_win.ko' > $$d/modules.conf; \
 	for c in early-modules late-modules camera; do install -m 0644 $(AMBA_VIRT_TOOLS)/$$c.conf.example $$d/$$c.conf; done; \
 	rel=$$(/sbin/modinfo -F vermagic $(BUILD_DIR)/modules/amba_virt.ko | cut -d' ' -f1); \
 	m=$(AMBA_VIRT_ROOTFS)/lib/modules/$$rel/extra; install -d $$m; \

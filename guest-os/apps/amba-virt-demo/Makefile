@@ -21,6 +21,19 @@ COMMON_SRCS = \
 	$(NANOPB_DIR)/pb_decode.c \
 	$(PROTO_DIR)/amba_virt.pb.c
 
+# The IAV qualification suite (drivers/amba_virt/iav_qual) is built into the demo and run with
+# "amba_virt_demo --iav-qual ...", against the guest's /dev/iav. The window tests need the Dom0
+# window nodes and are not part of it.
+IAV_QUAL_DIR := $(ROOT_DIR)/drivers/amba_virt/iav_qual
+IAV_QUAL_SRCS := $(addprefix $(IAV_QUAL_DIR)/,IavQualConfig.cxx IavQualResults.cxx IavQualContext.cxx \
+	IavQualOutput.cxx IavQualMain.cxx RealBackend.cxx) \
+	$(filter-out $(IAV_QUAL_DIR)/TestIavWindow.cxx,$(wildcard $(IAV_QUAL_DIR)/TestIav*.cxx))
+IAV_QUAL_FLAGS := -DIAVQUAL_NO_LOOPBACK -std=c++17 -I$(IAV_QUAL_DIR) \
+	-I$(ROOT_DIR)/build/pristine-dsp_v6/include \
+	-I$(ROOT_DIR)/build/pristine-dsp_v6/include/uapi \
+	-I$(ROOT_DIR)/build/pristine-dsp_v6/include/uapi/specific
+CPPUTEST_LIBS := -L$(ROOT_DIR)/third_party/cpputest/aarch64/lib -lCppUTest -lCppUTestExt
+
 ifeq ($(OS),qnx)
 CC := qcc
 QNX_TARGET_ARCH ?= gcc_ntoaarch64le
@@ -74,11 +87,11 @@ CXXFLAGS := $(CFLAGS) -std=c++17
 
 DEMO_CXX_SRCS := AmbaVirtDemo.cxx HttpServer.cxx StreamBroadcaster.cxx YoloGeometry.cxx YoloPostprocess.cxx
 
-amba_virt_demo: $(DEMO_CXX_SRCS) $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lstdc++
+amba_virt_demo: $(DEMO_CXX_SRCS) $(COMMON_SRCS) $(IAV_QUAL_SRCS)
+	$(CC) $(CFLAGS) $(IAV_QUAL_FLAGS) -o $@ $^ $(CPPUTEST_LIBS) $(LDFLAGS) -lstdc++
 
-amba_virt_demo-musl: $(DEMO_CXX_SRCS) $(COMMON_SRCS)
-	$(CC) $(CFLAGS) -static -o $@ $^ $(LDFLAGS) -lstdc++
+amba_virt_demo-musl: $(DEMO_CXX_SRCS) $(COMMON_SRCS) $(IAV_QUAL_SRCS)
+	$(CC) $(CFLAGS) $(IAV_QUAL_FLAGS) -static -o $@ $^ $(CPPUTEST_LIBS) $(LDFLAGS) -lstdc++
 
 amba_virt_demo-alpine: amba_virt_demo-musl
 	ln -sf $< $@

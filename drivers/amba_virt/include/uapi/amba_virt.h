@@ -346,13 +346,21 @@ struct amba_virt_query_resp {
 #define AMBA_VIRT_CAP_CAVALRY_REGISTER  0x00000800U
 #define AMBA_VIRT_CAP_IAV_STREAM        0x00001000U
 #define AMBA_VIRT_CAP_DMA_SLAVE         0x00002000U
+#define AMBA_VIRT_CAP_IAV_DEV           0x00004000U /* Virtual /dev/iav through the IAV broker */
 
 #define AMBA_VIRT_ROLE_UNTRUSTED \
 	(AMBA_VIRT_CAP_PING | AMBA_VIRT_CAP_QUERY_SELF | AMBA_VIRT_CAP_CAVALRY_PATH_B | AMBA_VIRT_CAP_CAVALRY_REGISTER)
 
+/*
+ * A standard guest may use the virtual /dev/iav. Guest ids are assigned by the hypervisor at each
+ * VM start, so a policy cannot name them ahead of time. What a guest can do through it is limited
+ * by the broker's allow-list, argument validation and rate limit, and what it can map by the
+ * window adapters its app was given.
+ */
 #define AMBA_VIRT_ROLE_STANDARD \
 	(AMBA_VIRT_ROLE_UNTRUSTED | AMBA_VIRT_CAP_MEM_ALLOC | AMBA_VIRT_CAP_DEV_CONFIG | \
-	 AMBA_VIRT_CAP_GDMA_COPY | AMBA_VIRT_CAP_GDMA_PITCH | AMBA_VIRT_CAP_DMA_SLAVE)
+	 AMBA_VIRT_CAP_GDMA_COPY | AMBA_VIRT_CAP_GDMA_PITCH | AMBA_VIRT_CAP_DMA_SLAVE | \
+	 AMBA_VIRT_CAP_IAV_DEV)
 
 struct amba_virt_acl_rule {
 	__u32 cid;

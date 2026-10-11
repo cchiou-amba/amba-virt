@@ -14,6 +14,7 @@ Environment=AMBA_VIRT_DEMO_MODEL=/opt/cavalry/n1-655_yolox_s_amba_optimized.bin
 Environment=AMBA_VIRT_DEMO_BIND=0.0.0.0:8080
 EnvironmentFile=-/etc/amba-virt-demo.env
 ExecStartPre=/bin/sh -c 'count=0; while ([ ! -c /dev/cavalry ] || [ ! -c /dev/amba_virt ]) && [ $$count -lt 30 ]; do modprobe amba_virt 2>/dev/null || true; modprobe amba_cavalry 2>/dev/null || true; sleep 1; count=$$((count + 1)); done'
+ExecStartPre=-/sbin/modprobe iav_virt
 ExecStart=/usr/local/bin/amba_virt_demo --model $AMBA_VIRT_DEMO_MODEL --bind $AMBA_VIRT_DEMO_BIND
 Restart=always
 RestartSec=3

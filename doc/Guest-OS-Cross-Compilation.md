@@ -38,6 +38,11 @@ On the **Ambarella N1-655** architecture, the hypervisor host runs **EVE-OS** (K
 +--------------------------------------------------------------------+
 ```
 
+`make guest-ubuntu` and `make guest-alpine` also build `amba_cavalry.ko` and `iav_virt.ko`
+(the virtual `/dev/iav`, [IavVirtualization.md](IavVirtualization.md)) for both guests.
+`iav_virt` needs the IAV driver headers from the private tree under `build/`, as the Dom0
+broker does; nothing from that tree is copied into this repository.
+
 Because development workstations and CI/CD runners run on **x86_64 Linux**, all guest artifacts (`amba_virt.ko`, `amba-virt-client`, and `amba-virt-resmgr`) must be cross-compiled cleanly and rapidly.
 
 ---

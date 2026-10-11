@@ -39,5 +39,9 @@ start_pre() {
         eerror "/dev/cavalry or /dev/amba_virt device node not found"
         return 1
     fi
+
+    # The virtual /dev/iav, for legacy IAV applications and the qualification suite. The demo
+    # itself does not need it, so a guest without the IAV window adapters still starts.
+    modprobe iav_virt 2>/dev/null || true
 }
 

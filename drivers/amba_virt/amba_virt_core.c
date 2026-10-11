@@ -221,29 +221,202 @@ out_unlock:
 	return ret;
 }
 
+/*
+ * Like amba_virt_rpc_dev, for requests that begin with a struct amba_virt_msg whose seq the
+ * server copies into its response. Frames whose seq does not match are discarded and the read
+ * goes on until the timeout: a response to an earlier request that timed out (the server was
+ * away and answered it after it came back) must not be taken for this request's response, which
+ * would leave every later request one response out of step. Returns -ETIMEDOUT when no matching
+ * response arrives.
+ */
+int amba_virt_rpc_dev_seq(struct amba_virt_dev *dev, const void *request,
+			  u32 request_len, void *response, u32 *response_len,
+			  unsigned int timeout_ms)
+{
+	struct socket *sock = NULL;
+	u32 capacity, want_seq, received = 0, discarded = 0;
+	unsigned long deadline;
+	int ret;
+
+	if (!dev || dev->is_host || !request || !response || !response_len)
+		return -EINVAL;
+	if (request_len < sizeof(struct amba_virt_msg) || request_len > AMBA_VIRT_MAX_MSG)
+		return -EMSGSIZE;
+	capacity = *response_len;
+	if (capacity < sizeof(struct amba_virt_msg) || capacity > AMBA_VIRT_MAX_MSG)
+		return -EMSGSIZE;
+	want_seq = ((const struct amba_virt_msg *)request)->seq;
+	deadline = jiffies + msecs_to_jiffies(timeout_ms ? timeout_ms : 5000);
+
+	mutex_lock(&dev->rpc_lock);
+	ret = amba_virt_vsock_connect(dev);
+	if (ret)
+		goto out_unlock;
+
+	mutex_lock(&dev->sock_lock);
+	sock = dev->conn_sock;
+	if (!sock) {
+		ret = -ENOTCONN;
+		mutex_unlock(&dev->sock_lock);
+		goto out_unlock;
+	}
+	ret = frame_send(sock, request, request_len);
+	while (!ret) {
+		long left = (long)(deadline - jiffies);
+
+		if (left <= 0) {
+			ret = -ETIMEDOUT;
+			break;
+		}
+		ret = frame_recv(sock, response, capacity, &received, left);
+		if (ret)
+			break;
+		if (received >= sizeof(struct amba_virt_msg) &&
+		    ((struct amba_virt_msg *)response)->seq == want_seq)
+			break;
+		discarded++;
+		if (discarded > 256) {
+			ret = -EPROTO;
+			break;
+		}
+	}
+	mutex_unlock(&dev->sock_lock);
+	if (discarded)
+		pr_info_ratelimited("amba_virt: discarded %u stale response(s) while waiting for seq %u\n",
+				    discarded, want_seq);
+	if (!ret)
+		*response_len = received;
+
+	if (ret && ret != -EINVAL && ret != -EMSGSIZE)
+		amba_virt_vsock_disconnect(dev);
+out_unlock:
+	mutex_unlock(&dev->rpc_lock);
+	return ret;
+}
+
+/* How long a send to a guest may wait for room before the connection is dropped. */
+#define AMBA_VIRT_HOST_SEND_TIMEOUT_S 2
+
+static struct amba_virt_csock *csock_new(struct socket *sock)
+{
+	struct amba_virt_csock *csk = kzalloc(sizeof(*csk), GFP_KERNEL);
+
+	if (!csk)
+		return NULL;
+	kref_init(&csk->ref);
+	mutex_init(&csk->tx_lock);
+	csk->sock = sock;
+	sock_set_sndtimeo(sock->sk, AMBA_VIRT_HOST_SEND_TIMEOUT_S);
+	return csk;
+}
+
+static void csock_release(struct kref *ref)
+{
+	struct amba_virt_csock *csk = container_of(ref, struct amba_virt_csock, ref);
+
+	sock_release(csk->sock);
+	kfree(csk);
+}
+
+static void csock_get(struct amba_virt_csock *csk)
+{
+	kref_get(&csk->ref);
+}
+
+static void csock_put(struct amba_virt_csock *csk)
+{
+	kref_put(&csk->ref, csock_release);
+}
+
+/* Wakes every call blocked on the socket. The caller holds a reference. */
+static void csock_shutdown(struct amba_virt_csock *csk)
+{
+	kernel_sock_shutdown(csk->sock, SHUT_RDWR);
+}
+
+/*
+ * Send one frame. A frame that fails part-way leaves the stream out of step, so any failure
+ * closes the connection; the receive worker then ends and the guest reconnects.
+ */
+static int csock_send(struct amba_virt_csock *csk, const void *payload, u32 len)
+{
+	int ret;
+
+	mutex_lock(&csk->tx_lock);
+	ret = frame_send(csk->sock, payload, len);
+	mutex_unlock(&csk->tx_lock);
+	if (ret && ret != -EINVAL)
+		csock_shutdown(csk);
+	return ret;
+}
+
+/*
+ * A reference to the connection of guest cid (the first one if cid is 0), or NULL. The caller
+ * sends without holding conn_lock and then drops it with csock_put.
+ */
+static struct amba_virt_csock *conn_find_get(struct amba_virt_dev *dev, u32 cid)
+{
+	struct amba_virt_csock *csk = NULL;
+	int i;
+
+	mutex_lock(&dev->conn_lock);
+	for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+		if (dev->conns[i].in_use && dev->conns[i].csk &&
+		    (cid == 0 || dev->conns[i].cid == cid)) {
+			csk = dev->conns[i].csk;
+			csock_get(csk);
+			break;
+		}
+	}
+	mutex_unlock(&dev->conn_lock);
+	return csk;
+}
+
 static int conn_rx_worker(void *data)
 {
 	struct amba_virt_conn *conn = data;
 	struct amba_virt_dev *dev = conn->dev;
-	struct socket *my_sock = conn->sock;
+	struct amba_virt_csock *my_csk;
+	u32 my_cid;
 	u8 *buf;
 	int ret;
 
+	/*
+	 * Take the socket under the lock, and only if this worker is still the slot's worker. A
+	 * second connection from the same CID can replace the slot before this thread first runs.
+	 * The worker holds its own reference, so the socket outlives the slot's.
+	 */
+	mutex_lock(&dev->conn_lock);
+	if (conn->rx_thread != current || conn->csk == NULL) {
+		mutex_unlock(&dev->conn_lock);
+		return 0;
+	}
+	my_csk = conn->csk;
+	csock_get(my_csk);
+	my_cid = conn->cid;
+	mutex_unlock(&dev->conn_lock);
+
 	buf = kmalloc(AMBA_VIRT_MAX_MSG, GFP_KERNEL);
 	if (!buf)
-		return -ENOMEM;
+		goto out_release;
 
-	pr_info("amba_virt: rx worker started for CID %u\n", conn->cid);
+	pr_info("amba_virt: rx worker started for CID %u\n", my_cid);
 
 	while (!kthread_should_stop()) {
 		u32 len = 0;
-		ret = frame_recv(conn->sock, buf, AMBA_VIRT_MAX_MSG, &len,
+
+		/* Do not read ahead of the server (see AMBA_VIRT_RX_QUEUE_MAX). */
+		if (atomic_read(&conn->queued) >= AMBA_VIRT_RX_QUEUE_MAX) {
+			msleep(2);
+			continue;
+		}
+		ret = frame_recv(my_csk->sock, buf, AMBA_VIRT_MAX_MSG, &len,
 				 msecs_to_jiffies(500));
 		if (ret == -ETIMEDOUT)
 			continue;
 		if (ret < 0) {
 			if (ret != -ECONNRESET && ret != -EPIPE && !kthread_should_stop())
-				pr_debug("amba_virt: CID %u rx closed (%d)\n", conn->cid, ret);
+				pr_debug("amba_virt: CID %u rx closed (%d)\n", my_cid, ret);
 			break;
 		}
 		if (len > 0) {
@@ -251,8 +424,10 @@ static int conn_rx_worker(void *data)
 			if (msg) {
 				unsigned long flags;
 				msg->len = len;
-				msg->client_cid = conn->cid;
+				msg->client_cid = my_cid;
+				msg->conn = conn;
 				memcpy(msg->data, buf, len);
+				atomic_inc(&conn->queued);
 
 				spin_lock_irqsave(&dev->rx_lock, flags);
 				list_add_tail(&msg->list, &dev->rx_queue);
@@ -263,29 +438,37 @@ static int conn_rx_worker(void *data)
 		}
 	}
 
+out_release:
 	kfree(buf);
-	pr_info("amba_virt: rx worker exiting for CID %u\n", conn->cid);
+	pr_info("amba_virt: rx worker exiting for CID %u\n", my_cid);
 
-	mutex_lock(&dev->conn_lock);
-	if (conn->sock == my_sock) {
-		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
-		sock_release(conn->sock);
-		conn->sock = NULL;
+	/*
+	 * Give up the slot's reference only while this worker is still the slot's worker. When a new
+	 * connection or module exit has taken the slot, that path owns the slot's reference.
+	 */
+	{
+		struct amba_virt_csock *slot_csk = NULL;
+
+		mutex_lock(&dev->conn_lock);
 		if (conn->rx_thread == current) {
 			/*
-			 * Keep the slice binding. A guest reconnects when an RPC
-			 * times out (for example while the server restarts) and
-			 * claims its slice only once, at probe. The binding is
-			 * dropped when the VM's QEMU releases the slice.
+			 * Keep the slice binding. A guest reconnects when an RPC times out (for example
+			 * while the server restarts) and claims its slice only once, at probe. The binding
+			 * is dropped when the VM's QEMU releases the slice.
 			 */
+			slot_csk = conn->csk;
+			conn->csk = NULL;
 			put_task_struct(conn->rx_thread);
 			conn->rx_thread = NULL;
 			conn->in_use = false;
-			mutex_unlock(&dev->conn_lock);
-			return 0;
+		}
+		mutex_unlock(&dev->conn_lock);
+		if (slot_csk) {
+			csock_shutdown(slot_csk);
+			csock_put(slot_csk);
 		}
 	}
-	mutex_unlock(&dev->conn_lock);
+	csock_put(my_csk);
 	return 0;
 }
 
@@ -295,9 +478,10 @@ static int accept_one(void *data)
 
 	while (!kthread_should_stop()) {
 		struct socket *newsock = NULL;
+		struct amba_virt_csock *newcsk, *old_csk = NULL;
 		struct sockaddr_vm peer_addr = { 0 };
 		unsigned int peer_cid = 0;
-		struct task_struct *t = NULL;
+		struct task_struct *t = NULL, *old_t = NULL;
 		int slot = -1, i;
 		int ret;
 
@@ -322,6 +506,13 @@ static int accept_one(void *data)
 		if (ret >= 0 && peer_addr.svm_family == AF_VSOCK)
 			peer_cid = peer_addr.svm_cid;
 
+		newcsk = csock_new(newsock);
+		if (!newcsk) {
+			kernel_sock_shutdown(newsock, SHUT_RDWR);
+			sock_release(newsock);
+			continue;
+		}
+
 		mutex_lock(&dev->conn_lock);
 		if (peer_cid != 0) {
 			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
@@ -343,24 +534,21 @@ static int accept_one(void *data)
 		if (slot < 0) {
 			mutex_unlock(&dev->conn_lock);
 			pr_warn("amba_virt: connection table full, rejecting CID %u\n", peer_cid);
-			kernel_sock_shutdown(newsock, SHUT_RDWR);
-			sock_release(newsock);
+			csock_shutdown(newcsk);
+			csock_put(newcsk);
 			continue;
 		}
-
-		struct task_struct *old_t = NULL;
-		struct socket *old_sock = NULL;
 
 		if (dev->conns[slot].in_use) {
 			old_t = dev->conns[slot].rx_thread;
 			dev->conns[slot].rx_thread = NULL;
-			old_sock = dev->conns[slot].sock;
-			dev->conns[slot].sock = NULL;
+			old_csk = dev->conns[slot].csk;
+			dev->conns[slot].csk = NULL;
 			dev->conns[slot].in_use = false;
 		}
 
 		dev->conns[slot].dev = dev;
-		dev->conns[slot].sock = newsock;
+		dev->conns[slot].csk = newcsk;
 		dev->conns[slot].cid = peer_cid;
 		dev->conns[slot].in_use = true;
 
@@ -370,18 +558,28 @@ static int accept_one(void *data)
 			get_task_struct(t);
 			dev->conns[slot].rx_thread = t;
 		} else {
+			/* No worker: do not keep a connection nobody reads. */
 			dev->conns[slot].rx_thread = NULL;
+			dev->conns[slot].csk = NULL;
+			dev->conns[slot].in_use = false;
+			csock_shutdown(newcsk);
+			csock_put(newcsk);
 		}
 		mutex_unlock(&dev->conn_lock);
 
-		if (old_sock) {
-			kernel_sock_shutdown(old_sock, SHUT_RDWR);
-			sock_release(old_sock);
-		}
+		/*
+		 * Replace the old connection: shut its socket down so the old worker's recv and any
+		 * sender return, wait for the worker to leave, and drop the slot's reference. The
+		 * socket is released by whoever drops the last reference, never while a call is in it.
+		 */
+		if (old_csk)
+			csock_shutdown(old_csk);
 		if (old_t) {
 			kthread_stop(old_t);
 			put_task_struct(old_t);
 		}
+		if (old_csk)
+			csock_put(old_csk);
 
 		pr_info("amba_virt: accepted vsock connection from CID %u on slot %d\n",
 			peer_cid, slot);
@@ -908,7 +1106,7 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		memset(&glist, 0, sizeof(glist));
 		mutex_lock(&dev->conn_lock);
 		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
-			if (dev->conns[i].in_use && dev->conns[i].sock) {
+			if (dev->conns[i].in_use && dev->conns[i].csk) {
 				if (glist.count < AMBA_VIRT_MAX_GUESTS) {
 					glist.cids[glist.count++] = dev->conns[i].cid;
 				}
@@ -932,17 +1130,27 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		if (!push.len || push.len > AMBA_VIRT_MAX_MSG)
 			return -EINVAL;
 
-		mutex_lock(&dev->conn_lock);
-		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
-			if (dev->conns[i].in_use && dev->conns[i].sock) {
-				if (push.target_cid == 0 || dev->conns[i].cid == push.target_cid) {
-					int sret = frame_send(dev->conns[i].sock, push.data, push.len);
-					if (!sret)
-						sent++;
+		{
+			struct amba_virt_csock *targets[AMBA_VIRT_MAX_CONNS] = { NULL };
+
+			/* Take references under the lock and send with it released. */
+			mutex_lock(&dev->conn_lock);
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (dev->conns[i].in_use && dev->conns[i].csk &&
+				    (push.target_cid == 0 || dev->conns[i].cid == push.target_cid)) {
+					targets[i] = dev->conns[i].csk;
+					csock_get(targets[i]);
 				}
 			}
+			mutex_unlock(&dev->conn_lock);
+			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+				if (!targets[i])
+					continue;
+				if (!csock_send(targets[i], push.data, push.len))
+					sent++;
+				csock_put(targets[i]);
+			}
 		}
-		mutex_unlock(&dev->conn_lock);
 		return sent > 0 ? 0 : -ENOTCONN;
 	}
 
@@ -1080,36 +1288,18 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 			goto out_xfer;
 		}
 
-		/* Host mode: lookup socket by target CID */
-		mutex_lock(&dev->conn_lock);
-		if (xfer->client_cid != 0) {
-			int i;
-			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
-				if (dev->conns[i].in_use && dev->conns[i].cid == xfer->client_cid) {
-					sock = dev->conns[i].sock;
-					break;
-				}
-			}
-		} else {
-			/* Fallback to first available socket */
-			int i;
-			for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
-				if (dev->conns[i].in_use && dev->conns[i].sock) {
-					sock = dev->conns[i].sock;
-					break;
-				}
-			}
-		}
+		/* Host mode: the connection of the target guest (the first one if none is named). */
+		{
+			struct amba_virt_csock *csk = conn_find_get(dev, xfer->client_cid);
 
-		if (!sock) {
-			mutex_unlock(&dev->conn_lock);
-			ret = -ENOTCONN;
+			if (!csk) {
+				ret = -ENOTCONN;
+				goto out_xfer;
+			}
+			ret = csock_send(csk, xfer->data, xfer->len);
+			csock_put(csk);
 			goto out_xfer;
 		}
-
-		ret = frame_send(sock, xfer->data, xfer->len);
-		mutex_unlock(&dev->conn_lock);
-		goto out_xfer;
 	}
 
 	/* RECV */
@@ -1180,6 +1370,7 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		xfer->len = msg->len;
 		xfer->client_cid = msg->client_cid;
 		memcpy(xfer->data, msg->data, msg->len);
+		atomic_dec(&msg->conn->queued);
 		kfree(msg);
 
 		if (copy_to_user((void __user *)arg, xfer, sizeof(*xfer)))
@@ -1333,22 +1524,38 @@ void amba_virt_core_exit_instance(struct amba_virt_dev *dev)
 		put_task_struct(t);
 	}
 
-	mutex_lock(&dev->conn_lock);
-	for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
-		if (dev->conns[i].rx_thread) {
-			struct task_struct *t = dev->conns[i].rx_thread;
+	/*
+	 * Take the connections out of the table under the lock, then stop them with it released: a
+	 * worker that is leaving takes conn_lock, so stopping it while holding the lock deadlocks. The
+	 * sockets are shut down first so every call on them returns; each is released when its last
+	 * reference is dropped.
+	 */
+	{
+		struct task_struct *threads[AMBA_VIRT_MAX_CONNS] = { NULL };
+		struct amba_virt_csock *csks[AMBA_VIRT_MAX_CONNS] = { NULL };
+
+		mutex_lock(&dev->conn_lock);
+		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+			threads[i] = dev->conns[i].rx_thread;
+			csks[i] = dev->conns[i].csk;
 			dev->conns[i].rx_thread = NULL;
-			kthread_stop(t);
-			put_task_struct(t);
+			dev->conns[i].csk = NULL;
+			dev->conns[i].in_use = false;
 		}
-		if (dev->conns[i].sock) {
-			kernel_sock_shutdown(dev->conns[i].sock, SHUT_RDWR);
-			sock_release(dev->conns[i].sock);
-			dev->conns[i].sock = NULL;
+		mutex_unlock(&dev->conn_lock);
+		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++)
+			if (csks[i])
+				csock_shutdown(csks[i]);
+		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++) {
+			if (threads[i]) {
+				kthread_stop(threads[i]);
+				put_task_struct(threads[i]);
+			}
 		}
-		dev->conns[i].in_use = false;
+		for (i = 0; i < AMBA_VIRT_MAX_CONNS; i++)
+			if (csks[i])
+				csock_put(csks[i]);
 	}
-	mutex_unlock(&dev->conn_lock);
 
 	spin_lock_irqsave(&dev->rx_lock, flags);
 	list_for_each_entry_safe(msg, tmp, &dev->rx_queue, list) {

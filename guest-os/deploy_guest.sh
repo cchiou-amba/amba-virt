@@ -19,6 +19,7 @@ DISTRO=""
 RELOAD=0
 ENABLE_SERIAL=0
 RUN_SMOKE_TEST=0
+PROVISION=0
 DRY_RUN=0
 
 BUILD_GUEST_DIR="${ROOT_DIR}/build/guest"
@@ -35,6 +36,8 @@ Options:
   --distro=DISTRO       Override auto-detected distro (ubuntu, alpine, qnx)
   --reload              Unload existing kernel modules and reinsert fresh ones
   --enable-serial       Enable and start serial-getty / QNX console on target
+  --provision           Install the demo service (binary, model, unit, environment) and enable it
+                        so the guest starts the demo on every boot, with no manual step
   --test                Run automated post-deployment smoke test
   --dry-run             Show actions without executing remote commands
   -h, --help            Show this help message
@@ -46,6 +49,10 @@ Supported Targets & Defaults:
   n1-655-pro-qnx         -> QNX 8.0 HVM     (port 2322, amba-virt-resmgr + devc-seramb)
   n1-655-devkit-alpine   -> Alpine 3.20 HVM (port 2422, musl static binaries)
   n1-655-pro-alpine      -> Alpine 3.20 HVM (port 2422, musl static binaries)
+
+Environment:
+  SSH_OPTS              Extra ssh/scp options, e.g. a jump host through Dom0 when a guest's port
+                        forward is not available: SSH_OPTS="-J n1-655-devkit" $0 root@<guest-ip> --distro=alpine
 
 Examples:
   $0 n1-655-devkit-ubuntu --reload --enable-serial --test
@@ -74,6 +81,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --test)
             RUN_SMOKE_TEST=1
+            shift
+            ;;
+        --provision)
+            PROVISION=1
             shift
             ;;
         --dry-run)
@@ -131,7 +142,7 @@ run_remote() {
     if [ "${DRY_RUN}" -eq 1 ]; then
         echo "[DRY-RUN] ssh ${TARGET_NODE} \"${cmd}\""
     else
-        ssh "${TARGET_NODE}" "${cmd}"
+        ssh ${SSH_OPTS:-} "${TARGET_NODE}" "${cmd}"
     fi
 }
 
@@ -141,13 +152,13 @@ copy_to_target() {
     if [ "${DRY_RUN}" -eq 1 ]; then
         echo "[DRY-RUN] scp ${src} ${TARGET_NODE}:${dst}"
     else
-        scp "${src}" "${TARGET_NODE}:${dst}"
+        scp ${SSH_OPTS:-} "${src}" "${TARGET_NODE}:${dst}"
     fi
 }
 
 log_step "Verifying connectivity to target node: ${TARGET_NODE} (Flavor: ${DISTRO})"
 if [ "${DRY_RUN}" -eq 0 ]; then
-    if ! ssh -o ConnectTimeout=5 "${TARGET_NODE}" "echo 'Target connected: \$(uname -a)'"; then
+    if ! ssh ${SSH_OPTS:-} -o ConnectTimeout=5 "${TARGET_NODE}" "echo 'Target connected: \$(uname -a)'"; then
         echo "Error: Unable to connect to ${TARGET_NODE} via SSH." >&2
         echo "Please ensure the guest VM is running and host alias is configured in ~/.ssh/config." >&2
         exit 1
@@ -186,6 +197,47 @@ case "${DISTRO}" in
                 done
                 run_remote "sudo cp /tmp/amba_staging/* /usr/local/bin/ 2>/dev/null || true"
                 run_remote "sudo chmod +x /usr/local/bin/amba-virt* /usr/local/bin/cavalry* 2>/dev/null || true"
+            fi
+        fi
+
+        # 3b. Provision the demo service, so a cold boot of the guest starts it by itself
+        if [ "${PROVISION}" -eq 1 ]; then
+            log_step "Provisioning the demo service on ${TARGET_NODE}..."
+            DEMO_DIR="${ROOT_DIR}/guest-os/apps/amba-virt-demo"
+            MODEL="${ROOT_DIR}/guest-os/apps/cavalry-yolo/n1-655_yolox_s_amba_optimized.bin"
+            if [ "${DISTRO}" = "ubuntu" ]; then
+                DEMO_BIN="${DEMO_DIR}/amba_virt_demo"
+                DEMO_PORT=8080
+            else
+                DEMO_BIN="${DEMO_DIR}/amba_virt_demo-musl"
+                DEMO_PORT=8081
+            fi
+            for f in "${DEMO_BIN}" "${MODEL}" "${DEMO_DIR}/service/amba-virt-demo.env"; do
+                if [ "${DRY_RUN}" -eq 0 ] && [ ! -e "${f}" ]; then
+                    echo "Error: ${f} is missing; build it first (make guest-${DISTRO})." >&2
+                    exit 1
+                fi
+            done
+            copy_to_target "${DEMO_BIN}" "/tmp/amba_staging/amba_virt_demo"
+            copy_to_target "${MODEL}" "/tmp/amba_staging/n1-655_yolox_s_amba_optimized.bin"
+            copy_to_target "${DEMO_DIR}/service/amba-virt-demo.env" "/tmp/amba_staging/amba-virt-demo.env"
+            run_remote "sudo cp /tmp/amba_staging/amba_virt_demo /usr/local/bin/amba_virt_demo && sudo chmod 0755 /usr/local/bin/amba_virt_demo"
+            run_remote "sudo mkdir -p /opt/cavalry && sudo cp /tmp/amba_staging/n1-655_yolox_s_amba_optimized.bin /opt/cavalry/n1-655_yolox_s_amba_optimized.bin && sudo chmod 0644 /opt/cavalry/n1-655_yolox_s_amba_optimized.bin"
+            run_remote "sed 's/^AMBA_VIRT_DEMO_BIND=.*/AMBA_VIRT_DEMO_BIND=0.0.0.0:${DEMO_PORT}/' /tmp/amba_staging/amba-virt-demo.env > /tmp/amba_staging/demo.env.new && sudo cp /tmp/amba_staging/demo.env.new /etc/amba-virt-demo.env && sudo chmod 0644 /etc/amba-virt-demo.env"
+            if [ "${DISTRO}" = "ubuntu" ]; then
+                copy_to_target "${DEMO_DIR}/service/amba-virt-demo.service" "/tmp/amba_staging/amba-virt-demo.service"
+                run_remote "sudo cp /tmp/amba_staging/amba-virt-demo.service /etc/systemd/system/amba-virt-demo.service && sudo systemctl daemon-reload && sudo systemctl enable amba-virt-demo.service"
+            else
+                copy_to_target "${DEMO_DIR}/service/amba-virt-demo.openrc" "/tmp/amba_staging/amba-virt-demo"
+                run_remote "sudo cp /tmp/amba_staging/amba-virt-demo /etc/init.d/amba-virt-demo && sudo chmod 0755 /etc/init.d/amba-virt-demo && sudo rc-update add amba-virt-demo default"
+            fi
+        fi
+
+        # 3c. The installed files must not be empty (a failed copy must stop the deployment)
+        if [ "${PROVISION}" -eq 1 ] && [ "${DRY_RUN}" -eq 0 ]; then
+            if ! run_remote "for f in /usr/local/bin/amba_virt_demo /opt/cavalry/n1-655_yolox_s_amba_optimized.bin /etc/amba-virt-demo.env /lib/modules/\$(uname -r)/extra/iav_virt.ko; do [ -s \$f ] || { echo \"empty or missing: \$f\" >&2; exit 1; }; done"; then
+                echo "Error: provisioning left an empty or missing file on ${TARGET_NODE}." >&2
+                exit 1
             fi
         fi
 

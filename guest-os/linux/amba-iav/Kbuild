@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Ambarella Virtualization Linux Guest IAV frontend (iav_virt) Kbuild
+#
+# The IAV driver headers come from the private IAV tree, as for the Dom0 broker: nothing from
+# that tree is copied into this repository.
+
+VIRT_ROOT := $(src)/../../../drivers/amba_virt
+IAV_INC   := $(src)/../../../build/pristine-dsp_v6/include
+
+ccflags-y += -I$(src) -I$(VIRT_ROOT)/include/uapi -I$(src)/../amba-virt -I$(VIRT_ROOT)/tools
+ccflags-y += -I$(IAV_INC) -I$(IAV_INC)/uapi -I$(IAV_INC)/uapi/specific
+ccflags-y += -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -DAMBA_VIRT_GUEST
+
+obj-m := iav_virt.o

@@ -118,6 +118,34 @@ that wants a group the old one holds cannot coexist with it. Either give the
 new instance only groups the old one does not hold, or delete the old instance
 first and accept the volume loss.
 
+### 4.1 Worked example: the IAV guests
+
+The virtual `/dev/iav` gives a guest two more adapters, a DSP window and a bitstream
+window ([IavVirtualization.md](IavVirtualization.md)). The existing apps cannot take
+them, and the two data slices are held by the old instances, so each node's Ubuntu and
+Alpine guests were replaced:
+
+1. Add the four `amba_iav_*` adapters to the model (`models/*.json`, shape of
+   `amba_shm`), **stop every instance on the node**, then `./scripts/push_models.sh <model>`.
+   Never push a model while an app is active.
+2. `./scripts/clone_app.sh ubuntu_24_04 ubuntu_24_04_iav`, then
+   `./scripts/add_app_direct.sh ubuntu_24_04_iav --if=amba_iav_dsp --if=amba_iav_bsb`
+   (the same for Alpine), then `./scripts/create_app.sh <app> --version=1.0`. The new app
+   uses the same image as the old one.
+3. Delete the old instances (`zcli edge-app-instance delete <name> -f`; their volumes
+   are lost) and create the new ones:
+   Ubuntu `--adapter=amba_shm:amba_shm --adapter=amba_iav_dsp:amba_iav_dsp --adapter=amba_iav_bsb:amba_iav_bsb`;
+   Alpine `--adapter=amba_shm:amba_shm1 --adapter=amba_iav_dsp:amba_iav_dsp1 --adapter=amba_iav_bsb:amba_iav_bsb1`;
+   both with `--no-custom-configuration`.
+4. A fresh guest has the base image only. Provision it (modules, demo, model, service
+   enabled at boot) with `./guest-os/deploy_guest.sh <alias> --provision --reload`. After
+   that a cold boot of the node starts the demo with no manual step.
+
+A guest that takes a dynamic address because the old instance's DHCP lease is still
+held (`/run/zedrouter/dnsmasq.leases/bn1`) has no working port forward until the node
+reboots, which clears the leases. Reach it through Dom0 meanwhile:
+`SSH_OPTS="-J <node>" ./guest-os/deploy_guest.sh <user>@<guest-ip> --distro=<ubuntu|alpine> --provision`.
+
 Two more things that bite when cloning:
 
 - The clone inherits the original's **portmap**, and two instances on one node

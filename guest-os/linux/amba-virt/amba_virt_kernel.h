@@ -22,6 +22,13 @@ int amba_virt_get_dma32_window(phys_addr_t *phys, void __iomem **iomem,
 int amba_virt_rpc(const void *request, u32 request_len, void *response,
 		  u32 *response_len, unsigned int timeout_ms);
 
+/*
+ * Like amba_virt_rpc, for requests that begin with a struct amba_virt_msg whose seq the server
+ * echoes: responses with another seq (late answers to earlier requests) are discarded.
+ */
+int amba_virt_rpc_seq(const void *request, u32 request_len, void *response,
+		      u32 *response_len, unsigned int timeout_ms);
+
 int amba_virt_register_state_notifier(struct notifier_block *nb);
 int amba_virt_unregister_state_notifier(struct notifier_block *nb);
 void amba_virt_dispatch_state_event(struct amba_virt_dev_state_event *evt);

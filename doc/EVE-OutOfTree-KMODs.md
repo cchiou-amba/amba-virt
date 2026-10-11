@@ -211,6 +211,13 @@ from the `vermagic` of `amba_virt.ko`, then builds the layer. `make eve`
 depends on it, so the modules, the kernel that trusts their signer, and the
 server always ship in one image.
 
+`modules.conf` in the layer lists the modules the server loads at start, in order:
+`ambcma.ko`, `cavalry.ko`, `amba_virt.ko`, `amba_virt_iav_win.ko`. `make drivers` builds
+and signs every module under `drivers/amba_virt/`, so a new module there needs no extra
+Makefile rule, only a line in that list. The tools Makefile tracks header dependencies
+(`-MMD`); a change to a UAPI header such as `amba_virt.h` rebuilds the server objects that
+include it.
+
 The former path (Debian package installed with `apt` in a NOHYPER container,
 then streamed to a Dom0 `amba-virt-backend` over TCP port 5556 and stored in
 `/persist/modules`) is retired and deleted.

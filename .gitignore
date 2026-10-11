@@ -23,6 +23,7 @@ drivers/amba_virt/tools/amba-virt-ctl
 drivers/amba_virt/tools/dma_diag
 drivers/amba_virt/tools/send_qmp
 drivers/amba_virt/tools/test_*
+drivers/amba_virt/tools/*.d
 tools/host_mkimage/host_mkimage
 tools/bringup/uart_bench_agent
 tools/bringup/set_debug_chip_id

@@ -41,7 +41,7 @@ LDFLAGS += -static
 endif
 endif
 
-TARGETS := amba-virt-client amba-virt-cli
+TARGETS := amba-virt-client amba-virt-cli iav-attack
 
 .PHONY: all help clean test bench
 
@@ -49,6 +49,15 @@ all: $(TARGETS)
 
 amba-virt-client: $(SRCS) amba_virt_dev.hxx
 	$(CXX) $(CXXFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+
+# The Level 8 adversarial client for the IAV broker (plan_iav_virtualization). It uses the IAV
+# driver headers from the private tree, as the broker does, and the generated ioctl table.
+IAV_ATTACK_FLAGS := -I../../drivers/amba_virt/tools -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 \
+	-I../../build/pristine-dsp_v6/include -I../../build/pristine-dsp_v6/include/uapi \
+	-I../../build/pristine-dsp_v6/include/uapi/specific
+
+iav-attack: IavAttack.cxx
+	$(CXX) $(CXXFLAGS) $(IAV_ATTACK_FLAGS) -o $@ IavAttack.cxx $(LDFLAGS)
 
 amba-virt-cli: amba-virt-cli.cxx amba_virt_dev.hxx
 	$(CXX) $(CXXFLAGS) -o $@ amba-virt-cli.cxx $(LDFLAGS)

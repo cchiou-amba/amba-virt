@@ -65,7 +65,8 @@ The layer is tagged from a digest of the staged rootfs and reaches the EVE
 
 1. LinuxKit init runs `/etc/init.d/021-amba-virt-server` before the EVE
    system services (pillar, `domainmgr`) start.
-2. The server loads `modules.conf` in order with `finit_module`, from
+2. The server loads `modules.conf` (`ambcma.ko`, `cavalry.ko`, `amba_virt.ko`, then
+   `amba_virt_iav_win.ko`, which the IAV windows need) in order with `finit_module`, from
    `/lib/modules/$(uname -r)/extra/`. A module already loaded with the same
    parameters is accepted; one loaded with different parameters fails the
    boot.

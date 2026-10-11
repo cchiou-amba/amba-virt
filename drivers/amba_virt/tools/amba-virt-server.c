@@ -47,6 +47,8 @@
 #include <uapi/specific/iav_ioctl.h>
 #include "iav_tap_abi.h"
 #include "iav_proxy.h"
+#include "iav_broker_server.h"
+#include "amba_virt_iav.h"
 
 static pthread_mutex_t g_gdma_hw_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t msg_count = 0;
@@ -631,6 +633,33 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 			cavalry_proxy_handle_rpc(cav_req, cav_resp, rx->client_cid);
 		}
 		tx->len = sizeof(*out) + sizeof(*cav_resp);
+	} else if (in->type == AMBA_VIRT_MSG_IAV_REQ) {
+		/*
+		 * The virtual /dev/iav. A guest needs the IAV_DEV capability, and the broker validates
+		 * everything else. The response is sent by a broker worker, so a call that blocks in the
+		 * driver does not hold up this loop.
+		 */
+		int brc;
+
+		if (!virt_acl_has_cap(rx->client_cid, AMBA_VIRT_CAP_IAV_DEV))
+			brc = -EPERM;
+		else
+			brc = iav_broker_server_submit(rx->client_cid, in->seq, rx->data + sizeof(*in),
+						       rx->len - sizeof(*in));
+		if (brc < 0) {
+			struct amba_virt_iav_resp refusal;
+
+			out = (struct amba_virt_msg *)tx->data;
+			memset(out, 0, sizeof(*out));
+			out->type = AMBA_VIRT_MSG_IAV_RESP;
+			out->seq = in->seq;
+			memset(&refusal, 0, sizeof(refusal));
+			refusal.proto = AMBA_VIRT_IAV_PROTO;
+			refusal.status = brc;
+			refusal.rc = -1;
+			memcpy(tx->data + sizeof(*out), &refusal, sizeof(refusal));
+			tx->len = sizeof(*out) + sizeof(refusal);
+		}
 	} else if (in->type == AMBA_VIRT_MSG_IAV_TAP_REQ) {
 		const uint8_t *req_payload = rx->data + sizeof(*in);
 		size_t req_len = (rx->len > sizeof(*in)) ? (rx->len - sizeof(*in)) : 0;
@@ -1156,6 +1185,8 @@ static void usage(const char *prog)
 			"                              wait for readiness, exit 0, and keep restarting the worker\n");
 	fprintf(stderr, "  -R, --ready-timeout <sec>   Daemon mode: seconds to wait for readiness (default 120)\n");
 	fprintf(stderr, "  -N, --no-restart            Daemon mode: do not restart the worker when it dies\n");
+	fprintf(stderr, "  -i, --iav-broker <profile>  Virtual /dev/iav: off, consumer (default) or qualification. Guests also\n"
+			"                              need the IAV_DEV capability in the ACL\n");
 	fprintf(stderr, "  -h, --help                  Show this help message\n");
 }
 
@@ -1243,6 +1274,8 @@ static int xioctl(int fd, unsigned long req, void *arg, const char *what)
 
 /* Set by main() from the command line before the worker forks. */
 static int g_enforce_path_b;
+/* The IAV broker profile: 0 consumer, 1 qualification, -1 off. */
+static int g_iav_broker_profile = IAV_PROFILE_CONSUMER;
 static const char *g_modules_conf = MODULES_CONF_DEFAULT_PATH;
 static const char *g_camera_conf_path = CAMERA_CONF_DEFAULT_PATH;
 
@@ -1271,6 +1304,61 @@ static void redirect_output(const char *path)
 		close(nul);
 	}
 }
+
+#ifdef AMBA_VIRT_IAV_QUAL
+/*
+ * Qualification build only (amba-virt-server-qual, never the image). With --iav-qual the server
+ * brings up the camera pipeline, runs the IAV qualification suite once instead of serving, and
+ * shuts the pipeline down again.
+ */
+#include "../iav_qual/iav_qual_server.h"
+
+static int g_iav_qual;
+static int g_iav_qual_ran;
+static int g_iav_serve;
+
+/*
+ * Configure stream 1 as MJPEG 1920x1080 from canvas 0 and start it, exactly as
+ * server_init_iav_tap() does, without the tap, the proxy or the bitstream mapping. The file stays
+ * open until the pipeline shutdown stops the encode through server_stop_iav_tap().
+ */
+static void server_qual_start_stream(void);
+static int g_iav_qual_argc;
+static char **g_iav_qual_argv;
+#endif
+
+#ifdef AMBA_VIRT_IAV_QUAL
+static void server_qual_start_stream(void)
+{
+	struct iav_stream_cfg scfg;
+	struct iav_mjpeg_cfg mcfg;
+	uint32_t start_mask = (1 << 1);
+
+	g_fd_iav = open("/dev/iav", O_RDWR);
+	if (g_fd_iav < 0) {
+		perror("open /dev/iav for the qualification stream");
+		return;
+	}
+	memset(&scfg, 0, sizeof(scfg));
+	scfg.id = 1;
+	scfg.cid = IAV_STMCFG_FORMAT;
+	scfg.arg.format.type = IAV_STREAM_TYPE_MJPEG;
+	scfg.arg.format.enc_src_id = 0;
+	scfg.arg.format.enc_win.width = 1920;
+	scfg.arg.format.enc_win.height = 1080;
+	scfg.arg.format.duration = 0;
+	if (ioctl(g_fd_iav, IAV_IOC_SET_STREAM_CONFIG, &scfg) == 0)
+		printf("amba-virt-server-qual: stream 1 configured as MJPEG 1920x1080\n");
+	memset(&mcfg, 0, sizeof(mcfg));
+	mcfg.id = 1;
+	mcfg.quality = 80;
+	ioctl(g_fd_iav, IAV_IOC_SET_MJPEG_CONFIG, &mcfg);
+	if (ioctl(g_fd_iav, IAV_IOC_START_ENCODE, start_mask) == 0)
+		printf("amba-virt-server-qual: stream 1 encode started\n");
+	else
+		perror("IAV_IOC_START_ENCODE for the qualification stream");
+}
+#endif
 
 /*
  * The server. Runs in the forked worker in daemon mode and in the main process with --foreground.
@@ -1378,6 +1466,24 @@ static int server_run(int ready_fd)
 		}
 	}
 
+#ifdef AMBA_VIRT_IAV_QUAL
+	if (g_iav_qual) {
+		int qrc;
+
+		/*
+		 * The production server starts this stream in server_init_iav_tap(), which the
+		 * qualification run does not call: the tap would take the bitstream buffer. Start the
+		 * same stream here, so the driver is in the state the production server leaves it in.
+		 */
+		server_qual_start_stream();
+		g_iav_qual_ran = 1;
+		qrc = iav_qual_server_run(g_iav_qual_argc, g_iav_qual_argv);
+		if (camera_pipeline_up)
+			virt_camera_pipeline_shutdown();
+		return qrc;
+	}
+#endif
+
 	/* Step 12: encode starts after preview, not before. */
 	if (cavalry_proxy_init(fd, map, info.shm_size, info.shm_phys) < 0) {
 		fprintf(stderr, "Failed to initialize cavalry proxy\n");
@@ -1386,7 +1492,24 @@ static int server_run(int ready_fd)
 		return 1;
 	}
 
+#ifdef AMBA_VIRT_IAV_QUAL
+	if (g_iav_serve) {
+		/*
+		 * The tap and a guest cannot both query frame descriptors of the shared bitstream
+		 * buffer (the driver allows one user), so a candidate server for guests runs without the
+		 * tap, with the stream started as the qualification runs start it.
+		 */
+		server_qual_start_stream();
+	} else
+#endif
 	server_init_iav_tap();
+
+	if (g_iav_broker_profile >= 0) {
+		int brc = iav_broker_server_init(fd, (enum iav_profile)g_iav_broker_profile);
+
+		if (brc < 0)
+			printf("amba-virt-server: IAV broker not started (%d); /dev/iav stays unavailable to guests\n", brc);
+	}
 
 	if (camera_pipeline_up && virt_camera_pipeline_supervise() < 0) {
 		fprintf(stderr, "Failed to start the camera pipeline supervisor\n");
@@ -1479,6 +1602,7 @@ int main(int argc, char **argv)
 		{"foreground",     no_argument,       0, 'F'},
 		{"ready-timeout",  required_argument, 0, 'R'},
 		{"no-restart",     no_argument,       0, 'N'},
+		{"iav-broker",     required_argument, 0, 'i'},
 		{"help",           no_argument,       0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -1487,7 +1611,60 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
-	while ((opt = getopt_long(argc, argv, "bt:l:c:m:C:FR:Nh", long_options, NULL)) != -1) {
+#ifdef AMBA_VIRT_IAV_QUAL
+	if (argc > 1 && strcmp(argv[1], "--iav-qual") == 0) {
+		int rc = iav_qual_server_precheck(argc, argv);
+
+		if (rc != 0)
+			return rc;
+		if (iav_qual_server_hold() != 0) {
+			iav_qual_server_resume();
+			return 4;
+		}
+		g_iav_qual = 1;
+		g_iav_qual_argc = argc;
+		g_iav_qual_argv = argv;
+		rc = server_run(-1);
+		iav_qual_server_resume();
+		/* A bring-up failure before the suite ran is an environment error. */
+		if (rc != 0 && !g_iav_qual_ran)
+			rc = 4;
+		return rc;
+	}
+#endif
+
+#ifdef AMBA_VIRT_IAV_QUAL
+	/*
+	 * A candidate server for guests, started by hand in the development tree: the production
+	 * worker is held, and this process runs the whole server (Cavalry proxy, tap, IAV broker) in
+	 * its place until it is stopped. When it ends, the sentinel resumes the production worker.
+	 * Never part of the image.
+	 */
+	if (argc > 1 && strcmp(argv[1], "--iav-serve") == 0) {
+		int rc = iav_qual_server_hold();
+
+		if (rc != 0) {
+			iav_qual_server_resume();
+			return 4;
+		}
+		g_iav_serve = 1;
+		iav_qual_server_witness_start();
+		{
+			/* Stop this process (not its sentinel, which resumes the production worker). */
+			FILE *pf = fopen("/run/amba-virt/serve.pid", "w");
+
+			if (pf) {
+				fprintf(pf, "%d\n", (int)getpid());
+				fclose(pf);
+			}
+		}
+		rc = server_run(-1);
+		iav_qual_server_resume();
+		return rc;
+	}
+#endif
+
+	while ((opt = getopt_long(argc, argv, "bt:l:c:m:C:FR:Nhi:", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'b':
 			g_enforce_path_b = 1;
@@ -1526,6 +1703,18 @@ int main(int argc, char **argv)
 			break;
 		case 'N':
 			no_restart = 1;
+			break;
+		case 'i':
+			if (strcmp(optarg, "off") == 0) {
+				g_iav_broker_profile = -1;
+			} else if (strcmp(optarg, "consumer") == 0) {
+				g_iav_broker_profile = IAV_PROFILE_CONSUMER;
+			} else if (strcmp(optarg, "qualification") == 0) {
+				g_iav_broker_profile = IAV_PROFILE_QUALIFICATION;
+			} else {
+				fprintf(stderr, "Invalid IAV broker profile '%s' (off, consumer or qualification)\n", optarg);
+				return 1;
+			}
 			break;
 		case 'R':
 			ready_timeout_s = (unsigned int)atoi(optarg);

@@ -197,9 +197,11 @@ Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
 |---|---|---|---|
 | **HVM Guest** | `amba_virt.ko` | PCI ivshmem BAR2 driver + kernel vsock client | Distro `linux-headers-$(uname -r)` |
 | **HVM Guest** | `amba_cavalry.ko` | Guest `/dev/cavalry` frontend driver | Distro kernel headers |
+| **HVM Guest** | `iav_virt.ko` | Guest `/dev/iav` frontend: ioctl marshaling, poll, mmap of the IAV windows ([IavVirtualization.md](IavVirtualization.md)) | Distro kernel headers, IAV driver headers |
 | **HVM Guest** | `amba_gdma.ko` | Guest kernel GDMA export driver | Distro kernel headers |
 | **HVM Guest** | `amba-virt-client` | CppUTest functional test suite & IPC benchmark | `g++` (`-std=c++17`, `-lpthread`) |
 | **EVE Dom0** | `amba_virt.ko` | Shared memory backing file mmap + vsock server | Ambarella `eve-kernel` |
+| **EVE Dom0** | `amba_virt_iav_win.ko` | Exposes the IAV driver's DSP partition and bitstream buffer as mappable nodes for the hypervisor | Ambarella `eve-kernel` |
 | **EVE Dom0** | `amba-virt-server` | Arbitrator daemon, memory pool, ACL, proxy | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`), glibc from `/usr/lib/amba-virt/lib` |
 | **EVE Dom0** | `amba-virt-ctl` | Dom0 host administration CLI utility | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`) |
 
@@ -243,6 +245,31 @@ The `amba-virt-server` source code resides in [`drivers/amba_virt/tools/`](../dr
                  | - Dispatches to proxy |          | - Dispatches to proxy |
                  +-----------------------+          +-----------------------+
 ```
+
+#### Host connection handling (`amba_virt.ko`)
+
+The host module accepts the vsock connections and hands the server the frames. Its rules,
+which hold for any guest, hostile or not:
+
+- **One connection per guest id.** A new connection from a guest id that already has one
+  replaces it: the old socket is shut down so every call on it returns, its receive worker
+  ends, and the slot's reference is dropped.
+- **Reference-counted sockets.** Each connection's socket is shared by the slot, the receive
+  worker and every sender, and is released by whoever drops the last reference. A socket is
+  never released while a call is inside it.
+- **Sends do not hold the connection table lock.** A sender takes a reference under the lock
+  and sends outside it, serialized by a per-connection transmit lock. A send waits at most
+  `AMBA_VIRT_HOST_SEND_TIMEOUT_S` (2 seconds) for room. Any failed send leaves the byte stream
+  out of step, so it closes the connection; the guest reconnects. A guest that stops reading
+  therefore costs only its own connection, never another guest's service.
+- **Bounded receive queue.** A connection may have `AMBA_VIRT_RX_QUEUE_MAX` (64) frames waiting
+  for the server. At that bound its receive worker stops reading, and the flow control of vsock
+  slows the sender, so a guest that floods requests cannot grow Dom0 kernel memory.
+
+The first version of these rules held the table lock across a blocking send and queued without
+a bound. A guest that stopped reading blocked every thread that needs the lock for over 245
+seconds, and one that flooded made the broker serve a backlog. Both were found by the live
+adversarial run and are covered by the live adversarial run ([IavVirtualization.md](IavVirtualization.md)).
 
 ### 3.2 Subsystem Request Dispatch Pipeline
 
@@ -866,10 +893,16 @@ To guarantee robust isolation and zero cross-tenant leakage in a multi-tenant ed
 - **Hardware Silicon Role**: The physical Ambarella VisORC NPU core executes one job stream at a time and raises `IRQ_CAVALRY` upon completion.
 - **Software Role**: `amba-virt-server` wraps physical device interaction in a serialized monitor (`pthread_mutex_t visorc_hw_mutex`). When a tenant dispatches an inference job, it holds `visorc_hw_mutex` until VisORC signals completion via IRQ. Requests from other tenants queue on the mutex, ensuring strictly serialized hardware execution without resource thrashing.
 
+
 #### 7. GDMA Hardware Arbitration (GDMA Mutex & Offset Clamp)
 - **Threat**: Multiple guests dispatch concurrent DMA operations, interleaving channel configurations or programming out-of-bounds addresses.
 - **Hardware Silicon Role**: Physical Ambarella GDMA engine executes 2D pitch copies between physical bus addresses.
 - **Software Role**: `amba-virt-server` clamps all guest GDMA coordinates strictly to the granted device aperture and serializes physical device access with `pthread_mutex_t gdma_hw_mutex`.
+
+#### 8. A Guest That Floods Requests or Stops Reading (Transport Denial of Service)
+- **Threat**: One guest sends requests faster than the server answers, or never reads its responses, to exhaust Dom0 kernel memory or to make the server's threads wait on it, starving the other guests.
+- **Hardware Silicon Role**: None.
+- **Software Role**: The host module bounds the per-connection receive queue (64 frames) so vsock flow control slows the sender, and bounds every send (2 seconds) without holding the table lock, closing the connection on failure. The IAV broker adds per-guest rate limits, session quotas and bounded blocking calls. Verified on both boards by the live adversarial run on the final image: the server kept its worker, threads, descriptors and memory while a guest ran 492 attack probes, and the other guest's results were unchanged.
 
 ---
 
@@ -997,11 +1030,17 @@ The following architectural subsystems represent targeted capabilities planned f
   - Socket disconnect hook triggers immediate deep teardown: frees all handles, deregisters DAGs, reclaims Host AMA buffers, and resets tenant allocations.
   - Tenant quarantine mechanism: Isolate a guest triggering repeated hardware faults without rebooting other tenants.
 
-### 13.4 Virtual IAV (Camera / Video Subsystem) Architectural Hook
-- **Motivation**: Ambarella's key hardware strength is video ISP (IAV).
-- **Design**:
-  - Reserve message opcodes and memory carveout structures for `VIRT_IAV`.
-  - Provide shared ring-buffer mechanisms in shared DRAM for zero-copy camera frame streaming.
+### 13.4 Virtual IAV (Camera / Video Subsystem)
+Implemented: the IAV broker in the server (`iav_broker.c`, `iav_policy.c`,
+`iav_broker_server.c`), the guest `iav_virt.ko`, and the window module
+`amba_virt_iav_win.ko`. Message types `AMBA_VIRT_MSG_IAV_REQ` and `_RESP` carry
+fixed-layout frames; zero-copy frame access is the ivshmem windows. Design, limits,
+trust model and runbook: [IavVirtualization.md](IavVirtualization.md). The server
+configures the window nodes at start.
+
+The broker checks every call against a profile: `consumer` (the default; 15 query and
+descriptor ioctls, everything else refused with `EPERM`) or, for qualification runs only,
+`qualification`. A guest needs the `IAV_DEV` capability in the ACL either way.
 
 ### 13.5 Staged Implementation Roadmap
 
@@ -1095,6 +1134,8 @@ Options for manual runs: `-F` (foreground), `-N` (do not restart the worker), `-
 (readiness timeout, default 120), `-m <modules.conf>`, `-C <camera.conf>`, `-b` (reject Path A),
 `-l <cid>:<lease>` (DMA32 lease binding), `-c <n>` (tap cohort).
 
+Virtual `/dev/iav` option: `-i <profile>` (`off`, `consumer`, the default, or `qualification`).
+
 #### Module Configuration Grammar (`modules.conf`, `early-modules.conf`, `late-modules.conf`)
 - Blank lines and lines starting with `#` are ignored.
 - Each directive line specifies: `<basename>[ <params>]`
@@ -1150,5 +1191,6 @@ rebuilding the image and updating EVE, not by leaving files under `/persist`.
 | `amba_cavalry: host ACL denied registration` (`-EPERM`) | Guest CID lacks `AMBA_VIRT_CAP_DEV_CONFIG` capability | Run `amba-virt-ctl set-acl <cid> standard` in Dom0 or define static profile in `/persist/etc/amba-virt/policies.json`. |
 | `amba_cavalry: Cavalry device already registered` (`-EBUSY`) | Previous driver instance crashed without clean `rmmod` | Pass `force_replace=1` on `insmod` to trigger server-side session cleanup and re-registration. |
 | `amba-virt-ctl: connect failed (/run/amba-virt/admin.sock)` | Server not running or caller is not root | Check the server as above. Run `amba-virt-ctl` as root in Dom0. |
+| Dom0 kernel log: `task 021-amba-virt-s ... blocked for more than N seconds` in `amba_virt_ioctl` | A host module without the bounded send path: a guest that stopped reading held the connection lock | Run an image with the refcounted connection sockets (section 3.1). `amba-virt-ctl evict <cid>` frees a stuck tenant |
 | `mmap: Invalid argument (EINVAL)` | Buffer size exceeds 1 GiB window or is unaligned | Query driver via `AMBA_VIRT_IOC_GET_INFO`. Ensure buffer offsets and mapping sizes are page-aligned and $\le$ `shm_size`. |
 | Latency regression ($p99 > 2000\text{ }\mu\text{s}$) | CPU throttling or core frequency scaling | Inspect CPU governor on host (`cpupower frequency-info`). Check Dom0 and guest CPU load. |

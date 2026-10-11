@@ -188,6 +188,9 @@ and `/dev/iav` are never assigned to an app. Cloud model inventory:
 | Control | virtio-vsock, framed SOCK_STREAM | ioctl-sized messages, PING/ECHO, Cavalry and camera control |
 | Bulk | ivshmem (shared DRAM) | tensors, DVI, CMA-sized buffers |
 
+Which format a vsock message uses (Nanopb or a fixed-layout frame) is set by
+[VsockMessageFormats.md](VsockMessageFormats.md). Follow it for any new message.
+
 **virtio-vsock** is stock on EVE HVMs (`vhost-vsock-pci` / `eve-vsock0`).
 Direction is **guest → host CID 2**. Do **not** use port **2000** (EVE
 VComLink). The transport uses port **5555**. EVE does not publish guest CID↔UUID;
@@ -217,6 +220,14 @@ The `amba_shm` adapter on the HVM is what makes `kvm.go` emit `ivshmem-plain`.
 The server reaches the same DRAM through `/dev/amba_virt`, not by opening the
 backing file. The server withholds readiness until `/dev/amba_virt_shm*`
 exists, so the backing nodes are present before EVE starts any guest.
+
+**IAV windows.** The virtual `/dev/iav` has its own windows, separate from the
+data slices: the real IAV driver's DSP partition and bitstream buffer, exposed by
+the host module `amba_virt_iav_win.ko` as `/dev/amba_virt_iav_dsp`, `_bsb`, `_dsp1`
+and `_bsb1`, and attached to a guest as extra `ivshmem-plain` BARs through the
+`amba_iav_*` adapters. They are not part of the slice and are not the guest's
+staging memory: a guest that maps one reads and writes the DSP's own DRAM. See
+[IavVirtualization.md](IavVirtualization.md).
 
 Do not copy bulk data over vsock.
 

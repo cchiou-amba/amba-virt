@@ -91,6 +91,19 @@ Both models have the same adapters (`zcli model show … --detail`):
 | rng-mmio | rng-mmio | `IO_TYPE_OTHER` | rng-mmio | `cbattr rng=mmio` | unspecified |
 | amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | `shmpath=/dev/amba_virt_shm`, `shmsize=1G` | unspecified |
 | amba_shm1 | amba_shm1 | `IO_TYPE_OTHER` | amba_shm1 | `shmpath=/dev/amba_virt_shm1`, `shmsize=1G` | unspecified |
+| amba_iav_dsp | amba_iav_dsp | `IO_TYPE_OTHER` | amba_iav_dsp | `shmpath=/dev/amba_virt_iav_dsp`, `shmsize=1G` | unspecified |
+| amba_iav_bsb | amba_iav_bsb | `IO_TYPE_OTHER` | amba_iav_bsb | `shmpath=/dev/amba_virt_iav_bsb`, `shmsize=16M` | unspecified |
+| amba_iav_dsp1 | amba_iav_dsp1 | `IO_TYPE_OTHER` | amba_iav_dsp1 | `shmpath=/dev/amba_virt_iav_dsp1`, `shmsize=1G` | unspecified |
+| amba_iav_bsb1 | amba_iav_bsb1 | `IO_TYPE_OTHER` | amba_iav_bsb1 | `shmpath=/dev/amba_virt_iav_bsb1`, `shmsize=16M` | unspecified |
+
+The four `amba_iav_*` adapters are the IAV windows of the virtual `/dev/iav`
+([IavVirtualization.md](IavVirtualization.md)): the DSP partition and the
+bitstream buffer, in two sets so that two guests on one board can each have one.
+`shmsize` must equal the size the server configures on the window node
+(`1G` for the DSP partition, `16M` for the 10 MiB bitstream buffer on N1-655). They
+need the `amba_virt_iav_win.ko` nodes, which exist once the server is ready. Give a
+guest the pair of one set (`amba_iav_dsp` and `amba_iav_bsb`, or the `1` pair) next
+to its data slice, at instance create.
 
 `amba_shm` and `amba_shm1` have empty `phyaddrs`. Assigning one to an HVM is
 a window marker: `kvm.go` emits `ivshmem-plain`. Each window is shared by

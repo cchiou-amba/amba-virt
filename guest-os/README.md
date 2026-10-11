@@ -22,10 +22,10 @@ make guest
 
 ### Build Specific Guest Distributions
 ```bash
-# Ubuntu 24.04 LTS: amba_virt.ko + amba_cavalry.ko + amba-virt-client
+# Ubuntu 24.04 LTS: amba_virt.ko + amba_cavalry.ko + iav_virt.ko + amba-virt-client
 make guest-ubuntu
 
-# Alpine Linux 3.20: amba_virt.ko + amba_cavalry.ko + amba-virt-client (static musl)
+# Alpine Linux 3.20: amba_virt.ko + amba_cavalry.ko + iav_virt.ko + amba-virt-client (static musl)
 make guest-alpine
 
 # BlackBerry QNX 8.0: resource managers + clients + AI runtime suites
@@ -93,9 +93,10 @@ guest-os/
 │   │   ├── amba_virt_hvm.c     # Guest PCI driver (ivshmem, vsock claim)
 │   │   ├── amba_virt_core.c    # Character device & IOCTL handlers
 │   │   └── Makefile            # Out-of-tree kbuild Makefile
-│   └── amba-cavalry/           # Cavalry NPU proxy frontend (amba_cavalry.ko)
-│       ├── amba_cavalry_hvm.c  # /dev/cavalry frontend kernel driver
-│       └── include/            # UAPI cavalry ioctl headers
+│   ├── amba-cavalry/           # Cavalry NPU proxy frontend (amba_cavalry.ko)
+│   │   ├── amba_cavalry_hvm.c  # /dev/cavalry frontend kernel driver
+│   │   └── include/            # UAPI cavalry ioctl headers
+│   └── amba-iav/               # Virtual /dev/iav frontend (iav_virt.ko); see doc/IavVirtualization.md
 ├── qnx/                         # QNX Neutrino RTOS 8.0 drivers (EL0 microkernel)
 │   ├── amba-virt/              # Core transport resource manager (amba-virt-resmgr)
 │   │   ├── amba_virt_resmgr.c  # /dev/amba_virt character device daemon
@@ -115,6 +116,24 @@ guest-os/
 ```
 
 ---
+
+### Virtual `/dev/iav` (`linux/amba-iav/`)
+
+`iav_virt.ko` registers `/dev/iav` (mode 0660) in the guest and runs the real IAV ioctl and
+mmap ABI through the host broker. It needs `amba_virt.ko` (its vsock channel and PCI probe).
+The ABI is the real driver's, so a legacy application is not ported; what is supported is
+limited by a host policy, not by a second API:
+
+Every guest is served 15 query, descriptor and poll ioctls; every other ioctl of the real
+driver fails with `EPERM`, so a guest can query and read frames but not configure or run
+the pipeline.
+
+An ioctl the real driver does not have fails with `ENOTTY`. The guest needs the `IAV_DEV`
+capability (`open` fails with `EPERM` without it); while the host server is away calls fail
+with the transport error (`ETIMEDOUT`, `ENOTCONN`) and the next call reconnects. Frames are
+read zero-copy through the two IAV windows, which a guest has only if its app instance was
+given the `amba_iav_*` adapters. The suite that qualifies all this is built into
+`amba_virt_demo` (`--iav-qual`). Details, limits and the runbook: [../doc/IavVirtualization.md](../doc/IavVirtualization.md).
 
 ## 4. Staged Artifacts & Verification
 
