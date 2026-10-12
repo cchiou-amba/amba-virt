@@ -1151,10 +1151,13 @@ and `-P <slice>` (the ivshmem slice, 0 to 7, whose guest is the primary IAV clie
   pipeline through the virtual `/dev/iav`. Without the line no guest is primary.
 - A line that is not understood is reported on stderr and ignored, so a typo cannot widen what
   a guest may do.
-- The image ships `primary-slice 0`. Slice 0 is the guest given the `amba_shm` adapter, slice 1
-  the guest given `amba_shm1` (see [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md)
-  section 4.1). Guest ids change at every VM start, so the designation is by slice. The file is
-  part of the image; changing it means a new image.
+- The image ships `primary-slice 0`. The `amba_shm` ticket is reserved at
+  Cavalry index 0 (`/dev/amba_virt_shm0`). `amba_shm1` takes the lowest free
+  index at or above 1. Both tickets are `shmassign=server` with `shmsize=1G`.
+  They are admission tickets, not separate memory pools. Guest ids change
+  at every VM start, so the designation is by slice. The file is part of the image; changing
+  it means a new image. Further guests are slices of the same Cavalry parent, granted by the
+  server, not additional `amba_shmN` model resources.
 
 #### Module Configuration Grammar (`modules.conf`, `early-modules.conf`, `late-modules.conf`)
 - Blank lines and lines starting with `#` are ignored.

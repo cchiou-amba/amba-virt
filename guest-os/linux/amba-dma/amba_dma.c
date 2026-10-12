@@ -17,6 +17,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/dmaengine.h>
+#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -418,7 +419,7 @@ static int amba_dma_probe(struct platform_device *pdev)
     return 0;
 }
 
-static int amba_dma_remove(struct platform_device *pdev)
+static int amba_dma_remove_int(struct platform_device *pdev)
 {
     struct amba_dma_device *adev = platform_get_drvdata(pdev);
 
@@ -428,6 +429,16 @@ static int amba_dma_remove(struct platform_device *pdev)
     }
     return 0;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+/* The platform driver remove callback returns void since 6.11 */
+static void amba_dma_remove(struct platform_device *pdev)
+{
+    (void)amba_dma_remove_int(pdev);
+}
+#else
+#define amba_dma_remove amba_dma_remove_int
+#endif
 
 /* Self-instantiating platform device for out-of-tree module */
 static struct platform_device *amba_dma_pdev;

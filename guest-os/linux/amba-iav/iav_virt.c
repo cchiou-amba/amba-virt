@@ -677,7 +677,9 @@ static const struct file_operations iav_virt_fops = {
 	.compat_ioctl = iav_virt_ioctl,
 	.mmap = iav_virt_mmap,
 	.poll = iav_virt_poll,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek = no_llseek,
+#endif
 };
 
 /*
@@ -723,6 +725,15 @@ static int __init iav_virt_init(void)
 	}
 	pr_info("iav_virt: /dev/iav registered, %zu ioctls in the table\n",
 		(size_t)IAV_TABLE_COUNT);
+	{
+		u32 window = 0, usable = 0;
+		int qret = amba_virt_iav_slice_query(&window, &usable);
+
+		if (qret)
+			pr_info("iav_virt: private slice not leased (%d)\n", qret);
+		else
+			pr_info("iav_virt: private slice %u usable %u\n", window, usable);
+	}
 	return 0;
 }
 

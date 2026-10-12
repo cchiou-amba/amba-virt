@@ -95,7 +95,8 @@ windows unbound for it).
   `WAIT_NEXT_IDSP_FRAME`. Nothing that changes pipeline state.
 - **The primary guest (128, the 15 above and 113 more):** the guest the kernel
   has bound to the slice named by `primary-slice` in `/etc/amba-virt/iav.conf`
-  (the image ships `primary-slice 0`, the guest given the `amba_shm` adapter).
+  (the image ships `primary-slice 0`. The `amba_shm` ticket is reserved at
+  Cavalry index 0).
   It may configure and run the pipeline: enter idle and preview, start and stop
   encode, system, stream, pyramid, VCAP, MJPEG, H.264 and H.265 configuration,
   frame-sync and DPTZ controls, VIN and VOUT controls, and decode: enter and leave decode mode, create and destroy a
@@ -106,6 +107,8 @@ windows unbound for it).
   are checked against the overlay window, and a canvas overlay is refused. The guest is identified by the kernel on every call, never by anything
   the request says, and guest ids change at every VM start, so the designation
   is by slice. Without the setting no guest is primary.
+
+Consumer DSP and bitstream windows (`amba_iav_dsp1`, `amba_iav_bsb1`) are writable BARs, the same as the primary's unsuffixed DSP, bitstream, overlay, and decode windows. The N1-655 has no SMMU. QEMU `memory-backend-file` `readonly=on` opens the node read-only, the kernel clears `VM_SHARED` on that mapping, and `iav_win_mmap` rejects it, so QEMU never starts. A store from the guest through those BARs reaches the live frame and bitstream. Ioctl checks do not stop that store. Private JPEG memory is a 512 MiB `ambcma` partition inside `iav@0`, leased as eight 64 MiB slices, one device node `/dev/amba_virt_iav_sliceN` per guest. A private submission is admitted against the caller's slice before any IAV ioctl.
 
 Both sets are checked in as generated lists with a review record
 (`tools/iav-policy/`, `iav_allow_primary.inc`; the record lists, for every held

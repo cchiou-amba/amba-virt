@@ -16,6 +16,7 @@
 #include <linux/dmaengine.h>
 #include <linux/of.h>
 #include <linux/completion.h>
+#include <linux/kernel.h>
 
 #include <amba_virt.h>
 #include <soc/ambarella/gdma.h>
@@ -43,7 +44,11 @@ MODULE_PARM_DESC(shm_size, "Size in bytes of the physical shared window");
 
 static unsigned int num_instances = 2;
 module_param(num_instances, uint, 0644);
-MODULE_PARM_DESC(num_instances, "Number of host amba_virt instances (default 2, max 8)");
+MODULE_PARM_DESC(num_instances, "Number of host vsock listeners (default 2, max 8)");
+
+static unsigned int slice_count = 8;
+module_param(slice_count, uint, 0444);
+MODULE_PARM_DESC(slice_count, "High-memory guest slices carved from the Cavalry parent (1..8)");
 
 static struct amba_virt_dev g_devs[AMBA_VIRT_MAX_MINORS];
 static char g_shm_paths[AMBA_VIRT_MAX_MINORS][128];
@@ -310,14 +315,31 @@ static int amba_virt_shm_release_idx(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static int amba_virt_shm_open(struct inode *inode, struct file *filp)
+struct amba_virt_shm_node {
+	struct miscdevice misc;
+	unsigned int slice_idx;
+	char name[32];
+	bool registered;
+};
+
+static struct amba_virt_shm_node g_shm_nodes[8];
+static struct amba_virt_shm_node g_shm_alias;
+static unsigned int g_shm_node_count;
+
+static int amba_virt_shm_node_open(struct inode *inode, struct file *filp)
 {
-	return amba_virt_shm_open_idx(filp, 0);
+	struct miscdevice *misc = filp->private_data;
+	struct amba_virt_shm_node *node;
+
+	node = container_of(misc, struct amba_virt_shm_node, misc);
+	return amba_virt_shm_open_idx(filp, node->slice_idx);
 }
 
-static int amba_virt_shm_mmap(struct file *filp, struct vm_area_struct *vma)
+static int amba_virt_shm_node_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return amba_virt_mmap_slice(&g_devs[0], vma, 0);
+	unsigned int slice_idx = (unsigned int)(uintptr_t)filp->private_data;
+
+	return amba_virt_mmap_slice(&g_devs[0], vma, slice_idx);
 }
 
 static long amba_virt_shm_ioctl_idx(struct file *filp, unsigned int cmd, unsigned long arg, unsigned int slice_idx)
@@ -351,89 +373,40 @@ static long amba_virt_shm_ioctl_idx(struct file *filp, unsigned int cmd, unsigne
 
 static long amba_virt_shm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	return amba_virt_shm_ioctl_idx(filp, cmd, arg, 0);
+	unsigned int slice_idx = (unsigned int)(uintptr_t)filp->private_data;
+
+	return amba_virt_shm_ioctl_idx(filp, cmd, arg, slice_idx);
 }
 
 static const struct file_operations amba_virt_shm_fops = {
 	.owner = THIS_MODULE,
-	.open = amba_virt_shm_open,
+	.open = amba_virt_shm_node_open,
 	.release = amba_virt_shm_release_idx,
-	.mmap = amba_virt_shm_mmap,
+	.mmap = amba_virt_shm_node_mmap,
 	.unlocked_ioctl = amba_virt_shm_ioctl,
 	.compat_ioctl = amba_virt_shm_ioctl,
 	.llseek = no_llseek,
 };
 
-static struct miscdevice amba_virt_shm_miscdev = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = AMBA_VIRT_SHM_DEV_NAME,
-	.fops = &amba_virt_shm_fops,
-	.mode = 0600,
-};
-
-static int amba_virt_shm0_open(struct inode *inode, struct file *filp)
+static int amba_virt_register_shm_node(struct amba_virt_shm_node *node,
+				       const char *name, unsigned int slice_idx)
 {
-	return amba_virt_shm_open_idx(filp, 0);
+	int ret;
+
+	memset(node, 0, sizeof(*node));
+	node->slice_idx = slice_idx;
+	snprintf(node->name, sizeof(node->name), "%s", name);
+	node->misc.minor = MISC_DYNAMIC_MINOR;
+	node->misc.name = node->name;
+	node->misc.fops = &amba_virt_shm_fops;
+	node->misc.mode = 0600;
+	ret = misc_register(&node->misc);
+	if (ret)
+		pr_warn("amba_virt: register %s failed %d\n", name, ret);
+	else
+		node->registered = true;
+	return ret;
 }
-
-static int amba_virt_shm0_mmap(struct file *filp, struct vm_area_struct *vma)
-{
-	return amba_virt_mmap_slice(&g_devs[0], vma, 0);
-}
-
-static long amba_virt_shm0_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
-{
-	return amba_virt_shm_ioctl_idx(filp, cmd, arg, 0);
-}
-
-static const struct file_operations amba_virt_shm0_fops = {
-	.owner = THIS_MODULE,
-	.open = amba_virt_shm0_open,
-	.release = amba_virt_shm_release_idx,
-	.mmap = amba_virt_shm0_mmap,
-	.unlocked_ioctl = amba_virt_shm0_ioctl,
-	.compat_ioctl = amba_virt_shm0_ioctl,
-	.llseek = no_llseek,
-};
-
-static struct miscdevice amba_virt_shm0_miscdev = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "amba_virt_shm0",
-	.fops = &amba_virt_shm0_fops,
-	.mode = 0600,
-};
-
-static int amba_virt_shm1_open(struct inode *inode, struct file *filp)
-{
-	return amba_virt_shm_open_idx(filp, 1);
-}
-
-static int amba_virt_shm1_mmap(struct file *filp, struct vm_area_struct *vma)
-{
-	return amba_virt_mmap_slice(&g_devs[0], vma, 1);
-}
-
-static long amba_virt_shm1_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
-{
-	return amba_virt_shm_ioctl_idx(filp, cmd, arg, 1);
-}
-
-static const struct file_operations amba_virt_shm1_fops = {
-	.owner = THIS_MODULE,
-	.open = amba_virt_shm1_open,
-	.release = amba_virt_shm_release_idx,
-	.mmap = amba_virt_shm1_mmap,
-	.unlocked_ioctl = amba_virt_shm1_ioctl,
-	.compat_ioctl = amba_virt_shm1_ioctl,
-	.llseek = no_llseek,
-};
-
-static struct miscdevice amba_virt_shm1_miscdev = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "amba_virt_shm1",
-	.fops = &amba_virt_shm1_fops,
-	.mode = 0600,
-};
 
 /* Each HVM BAR is 1 GiB. The cavalry user region is the whole CVMEM
  * reservation, which is larger; the remainder stays host-private.
@@ -446,7 +419,7 @@ static int amba_virt_window_ok(phys_addr_t phys, size_t size)
 {
 	phys_addr_t window_end;
 
-	if (!phys || !size || size > U32_MAX ||
+	if (!phys || !size ||
 	    !PAGE_ALIGNED(phys) || !PAGE_ALIGNED(size) ||
 	    check_add_overflow(phys, (phys_addr_t)size, &window_end))
 		return -EINVAL;
@@ -467,7 +440,7 @@ static void amba_virt_publish_slices(void)
 	memset(g_slice_states, 0, sizeof(g_slice_states));
 	ret = amba_virt_slice_compute_geometry(g_devs[0].shm_phys,
 					       g_devs[0].shm_size,
-					       PAGE_SIZE, num_instances,
+					       PAGE_SIZE, slice_count,
 					       &g_slice_list);
 	if (!ret && g_slice_list.count > 0) {
 		for (s_idx = 0; s_idx < g_slice_list.count; s_idx++)
@@ -480,15 +453,15 @@ static void amba_virt_publish_slices(void)
 		pr_warn("amba_virt: slice geometry computation failed (%d)\n", ret);
 	}
 
-	ret = misc_register(&amba_virt_shm_miscdev);
-	if (ret)
-		pr_warn("amba_virt: register shm miscdev failed %d\n", ret);
-	ret = misc_register(&amba_virt_shm0_miscdev);
-	if (ret)
-		pr_warn("amba_virt: register shm0 miscdev failed %d\n", ret);
-	ret = misc_register(&amba_virt_shm1_miscdev);
-	if (ret)
-		pr_warn("amba_virt: register shm1 miscdev failed %d\n", ret);
+	g_shm_node_count = g_slice_list.count;
+	if (g_shm_node_count > 0)
+		amba_virt_register_shm_node(&g_shm_alias, AMBA_VIRT_SHM_DEV_NAME, 0);
+	for (s_idx = 0; s_idx < g_shm_node_count && s_idx < 8; s_idx++) {
+		char name[32];
+
+		snprintf(name, sizeof(name), "amba_virt_shm%u", s_idx);
+		amba_virt_register_shm_node(&g_shm_nodes[s_idx], name, s_idx);
+	}
 	shm_nodes_registered = true;
 }
 
@@ -514,15 +487,16 @@ void amba_virt_ensure_window(struct amba_virt_dev *dev)
 		symbol_put(cavalry_user_window_get);
 		return;
 	}
-	span = (size_t)num_instances * AMBA_VIRT_GUEST_BAR_SIZE;
-	if (span && size > span) {
-		pr_info("amba_virt: cavalry window phys 0x%llx size 0x%zx; guest bars use the first 0x%zx\n",
-			(unsigned long long)phys, size, span);
-		size = span;
-	} else {
-		pr_info("amba_virt: cavalry window phys 0x%llx size 0x%zx\n",
-			(unsigned long long)phys, size);
+	span = (size_t)slice_count * AMBA_VIRT_GUEST_BAR_SIZE;
+	if (!span || size < span) {
+		symbol_put(cavalry_user_window_get);
+		pr_err("amba_virt: cavalry window 0x%zx is smaller than %u x 1GiB\n",
+		       size, slice_count);
+		return;
 	}
+	pr_info("amba_virt: cavalry window phys 0x%llx size 0x%zx; guest bars use the first 0x%zx\n",
+		(unsigned long long)phys, size, span);
+	size = span;
 	if (amba_virt_window_ok(phys, size)) {
 		symbol_put(cavalry_user_window_get);
 		pr_err("amba_virt: cavalry window is not a usable guest mapping\n");
@@ -547,10 +521,21 @@ static int __init amba_virt_host_init(void)
 	memset(g_devs, 0, sizeof(g_devs));
 	if (num_instances < 1) num_instances = 1;
 	if (num_instances > AMBA_VIRT_MAX_MINORS) num_instances = AMBA_VIRT_MAX_MINORS;
+	if (slice_count < 1)
+		slice_count = 1;
+	if (slice_count > 8)
+		slice_count = 8;
 
 	if (shm_phys) {
+		size_t span = (size_t)slice_count * AMBA_VIRT_GUEST_BAR_SIZE;
+
+		if (!span || shm_size < span) {
+			pr_err("amba_virt: physical window 0x%lx is smaller than %u x 1GiB\n",
+			       shm_size, slice_count);
+			return -EINVAL;
+		}
 		g_devs[0].shm_phys = (phys_addr_t)shm_phys;
-		g_devs[0].shm_size = shm_size;
+		g_devs[0].shm_size = span;
 		if (amba_virt_window_ok(g_devs[0].shm_phys, g_devs[0].shm_size)) {
 			pr_err("amba_virt: invalid physical shared window\n");
 			g_devs[0].shm_phys = 0;
@@ -607,9 +592,14 @@ static void __exit amba_virt_host_exit(void)
 	unsigned int i;
 
 	if (shm_nodes_registered) {
-		misc_deregister(&amba_virt_shm1_miscdev);
-		misc_deregister(&amba_virt_shm0_miscdev);
-		misc_deregister(&amba_virt_shm_miscdev);
+		unsigned int node;
+
+		for (node = 0; node < g_shm_node_count && node < 8; node++) {
+			if (g_shm_nodes[node].registered)
+				misc_deregister(&g_shm_nodes[node].misc);
+		}
+		if (g_shm_alias.registered)
+			misc_deregister(&g_shm_alias.misc);
 		shm_nodes_registered = false;
 	}
 	for (i = 0; i < g_active_instances; i++) {

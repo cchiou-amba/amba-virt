@@ -71,8 +71,15 @@ reference design assigns none of the Ambarella chardevs this way.
   to an app even if `assigngrp` is set.
 - `cavalry`, `gpio0`, `iav`, and `amba_virt` are not model adapters.
   HVMs reach Cavalry and the camera through `amba-virt-server`.
-- Assign `amba_shm` or `amba_shm1` only to HVMs (window markers). Each
-  `shmsize` is `1G`.
+- Assign `amba_shm` or `amba_shm1` only to HVMs. Both are admission
+  tickets for the one Cavalry parent: `cbattr shmassign=server`, with no
+  `shmpath`. ZEDEDA allows one instance to hold a given `assigngrp`, so
+  the second guest keeps the existing `amba_shm1` group. That group no
+  longer names a device. `amba-virt-server` chooses the slice. A bundle
+  that only sets `shmpath` keeps that path and is not a dynamic grant.
+  `amba_iav_slice` is the private-IAV marker (`shmassign=server`,
+  `pool=low`). The low window is emitted from the lease after the
+  guest CID exists, not from a fixed path.
 
 ## Shared `ioMemberList`
 
@@ -89,8 +96,9 @@ Both models have the same adapters (`zcli model show … --detail`):
 | UART4 | UART4 | `IO_TYPE_OTHER` | uart4 | `cbattr uart=4` | unspecified |
 | hwrng | hwrng | `IO_TYPE_OTHER` | hwrng | `Ifname=/dev/hwrng` | unspecified |
 | rng-mmio | rng-mmio | `IO_TYPE_OTHER` | rng-mmio | `cbattr rng=mmio` | unspecified |
-| amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | `shmpath=/dev/amba_virt_shm`, `shmsize=1G` | unspecified |
-| amba_shm1 | amba_shm1 | `IO_TYPE_OTHER` | amba_shm1 | `shmpath=/dev/amba_virt_shm1`, `shmsize=1G` | unspecified |
+| amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | `shmassign=server`, `shmsize=1G` | unspecified |
+| amba_shm1 | amba_shm1 | `IO_TYPE_OTHER` | amba_shm1 | `shmassign=server`, `shmsize=1G` | unspecified |
+| amba_iav_slice | amba_iav_slice | `IO_TYPE_OTHER` | amba_iav_slice | `shmassign=server`, `pool=low` | unspecified |
 | amba_iav_dsp | amba_iav_dsp | `IO_TYPE_OTHER` | amba_iav_dsp | `shmpath=/dev/amba_virt_iav_dsp`, `shmsize=1G` | unspecified |
 | amba_iav_bsb | amba_iav_bsb | `IO_TYPE_OTHER` | amba_iav_bsb | `shmpath=/dev/amba_virt_iav_bsb`, `shmsize=16M` | unspecified |
 | amba_iav_dsp1 | amba_iav_dsp1 | `IO_TYPE_OTHER` | amba_iav_dsp1 | `shmpath=/dev/amba_virt_iav_dsp1`, `shmsize=1G` | unspecified |

@@ -70,6 +70,8 @@ U-Boot writes this map from the detected DRAM size. Both current boards detect 3
 | `/reserved-memory/linux,cma` | above `0x400000000` | 512 MiB | `reusable;` | Kernel CMA in Linux high |
 | `/reserved-memory/cavalry@0` | `0x100000000`–`0x3ffffffff` | 12 GiB | `no-map;` | Cavalry private pool |
 
+The device tree nodes above are unchanged. Inside `iav@0`, after `/dev/iav` exists and before the sensor path, the server pins one 512 MiB private-bank partition and leases eight 64 MiB slices from it. Adding sensors does not grow that pin. The external pyramid, raw, and canvas pools are the pools that grow when a larger sensor script asks for them. The 2026-10-12 boards returned the pin at `0x94000000`.
+
 Do not install a static DTB with `set_global devicetree`. GRUB would replace the tree U-Boot patched. Confirm the running tree with `od -An -tx1` on `/proc/device-tree/memory/reg`, `/proc/device-tree/chosen/sys-dram-size`, and the reserved `iav` and `cavalry` nodes.
 
 ---

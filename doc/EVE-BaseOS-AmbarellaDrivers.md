@@ -122,7 +122,7 @@ The ipcam-mini reserved-memory contract is:
 | `/reserved-memory/linux,cma` | Linux high, above `0x400000000` | 512 MiB | `reusable;` | Kernel CMA. Linux low is smaller than this pool |
 | `/reserved-memory/cavalry@0` | `0x100000000`–`0x3ffffffff` | 12 GiB | `no-map;` | Cavalry private pool. Linux RAM continues from `0x400000000` to the detected DRAM top |
 
-`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it. `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. The Dom0 server loaded `ambcma`, `dsp`, `iav`, and `cavalry` against this map in the 2026-10-10 cold-boot gates on both boards, with camera capture and Cavalry inference passing.
+`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it. `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. The device tree is unchanged. After `/dev/iav` exists, and before the sensor path, the server pins one 512 MiB private-bank `ambcma` partition inside `iav@0` and leases it as eight 64 MiB slices. On the 2026-10-12 image that pin returned pid 193 at `0x94000000`. The address is whatever `ambcma` returns on that boot.
 
 In addition, the device tree declares the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specifies `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation.
 

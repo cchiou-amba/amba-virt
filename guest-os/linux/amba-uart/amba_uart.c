@@ -27,12 +27,58 @@
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <linux/circ_buf.h>
+#include <linux/kfifo.h>
+#include <linux/scatterlist.h>
+#include <linux/dma-mapping.h>
+#include <linux/version.h>
 #include <linux/workqueue.h>
 #include <linux/seq_file.h>
 
 #include <amba_virt.h>
 #include "amba_virt_kernel.h"
 #include "amba_uart.h"
+
+/*
+ * The transmit buffer of a serial port is a circ_buf in port->state->xmit up to kernel 6.9 and a kfifo in
+ * port->state->port.xmit_fifo since 6.10. These helpers are the only places that know which.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+static inline bool amba_xmit_empty(struct uart_port *port)
+{
+	return kfifo_is_empty(&port->state->port.xmit_fifo);
+}
+
+static inline unsigned int amba_xmit_pending(struct uart_port *port)
+{
+	return kfifo_len(&port->state->port.xmit_fifo);
+}
+
+static inline bool amba_xmit_pop(struct uart_port *port, unsigned char *ch)
+{
+	return kfifo_get(&port->state->port.xmit_fifo, ch);
+}
+#else
+static inline bool amba_xmit_empty(struct uart_port *port)
+{
+	return uart_circ_empty(&port->state->xmit);
+}
+
+static inline unsigned int amba_xmit_pending(struct uart_port *port)
+{
+	return uart_circ_chars_pending(&port->state->xmit);
+}
+
+static inline bool amba_xmit_pop(struct uart_port *port, unsigned char *ch)
+{
+	struct circ_buf *xmit = &port->state->xmit;
+
+	if (uart_circ_empty(xmit))
+		return false;
+	*ch = xmit->buf[xmit->tail];
+	xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+	return true;
+}
+#endif
 
 #define DRIVER_NAME		"amba_uart"
 #define DEV_NAME		"ttyAMBA"
@@ -168,7 +214,7 @@ static void amba_uart_stop_tx(struct uart_port *port)
 
 static void amba_uart_transmit_chars(struct uart_port *port)
 {
-	struct circ_buf *xmit = &port->state->xmit;
+	unsigned char ch;
 	int count;
 
 	if (port->x_char) {
@@ -178,27 +224,28 @@ static void amba_uart_transmit_chars(struct uart_port *port)
 		return;
 	}
 
-	if (uart_tx_stopped(port) || uart_circ_empty(xmit)) {
+	if (uart_tx_stopped(port) || amba_xmit_empty(port)) {
 		amba_uart_stop_tx(port);
 		return;
 	}
 
 	count = port->fifosize;
-	while (count-- > 0 && !uart_circ_empty(xmit)) {
+	while (count-- > 0 && !amba_xmit_empty(port)) {
 		u32 us = amba_uart_read(port, UART_US_OFFSET);
 		if (us & UART_US_TFNF) {
-			amba_uart_write(port, xmit->buf[xmit->tail], UART_TH_OFFSET);
-			xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+			if (!amba_xmit_pop(port, &ch))
+				break;
+			amba_uart_write(port, ch, UART_TH_OFFSET);
 			port->icount.tx++;
 		} else {
 			break;
 		}
 	}
 
-	if (uart_circ_empty(xmit))
+	if (amba_xmit_empty(port))
 		amba_uart_stop_tx(port);
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (amba_xmit_pending(port) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 }
 
@@ -246,20 +293,18 @@ static void amba_uart_tx_work(struct work_struct *work)
 {
 	struct amba_uart_port *amb_port = container_of(work, struct amba_uart_port, tx_work);
 	struct uart_port *port = &amb_port->port;
-	struct circ_buf *xmit = &port->state->xmit;
 	unsigned long flags;
-	unsigned int count, c;
-	int tail, ret;
+	unsigned int count;
+	int ret;
 	u32 transferred = 0;
 
 	spin_lock_irqsave(&port->lock, flags);
-	if (amb_port->tx_dma_in_progress || uart_tx_stopped(port) || uart_circ_empty(xmit)) {
+	if (amb_port->tx_dma_in_progress || uart_tx_stopped(port) || amba_xmit_empty(port)) {
 		spin_unlock_irqrestore(&port->lock, flags);
 		return;
 	}
 
-	tail = xmit->tail;
-	count = uart_circ_chars_pending(xmit);
+	count = amba_xmit_pending(port);
 	if (count == 0) {
 		spin_unlock_irqrestore(&port->lock, flags);
 		return;
@@ -278,13 +323,31 @@ static void amba_uart_tx_work(struct work_struct *work)
 	if (count > 4096)
 		count = 4096;
 
-	c = CIRC_CNT_TO_END(xmit->head, tail, UART_XMIT_SIZE);
-	if (c >= count) {
-		memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[tail], count);
-	} else {
-		memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[tail], c);
-		memcpy_toio((void __iomem *)(amb_port->tx_dma_buf + c), &xmit->buf[0], count - c);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+	{
+		struct scatterlist sg[2];
+		unsigned int i, off = 0;
+		int nents = kfifo_dma_out_prepare(&port->state->port.xmit_fifo, sg, ARRAY_SIZE(sg), count);
+
+		for (i = 0; i < nents; i++) {
+			memcpy_toio((void __iomem *)(amb_port->tx_dma_buf + off), sg_virt(&sg[i]), sg[i].length);
+			off += sg[i].length;
+		}
+		count = off;
 	}
+#else
+	{
+		struct circ_buf *xmit = &port->state->xmit;
+		unsigned int c = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
+
+		if (c >= count) {
+			memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[xmit->tail], count);
+		} else {
+			memcpy_toio((void __iomem *)amb_port->tx_dma_buf, &xmit->buf[xmit->tail], c);
+			memcpy_toio((void __iomem *)(amb_port->tx_dma_buf + c), &xmit->buf[0], count - c);
+		}
+	}
+#endif
 	wmb();
 	amb_port->tx_dma_len = count;
 	amb_port->tx_dma_in_progress = true;
@@ -306,7 +369,11 @@ static void amba_uart_tx_work(struct work_struct *work)
 	amba_uart_write(port, amba_uart_read(port, UART_DMAE_OFFSET) & ~0x02, UART_DMAE_OFFSET);
 
 	if (ret == 0 && transferred > 0) {
-		xmit->tail = (xmit->tail + transferred) & (UART_XMIT_SIZE - 1);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+		kfifo_skip_count(&port->state->port.xmit_fifo, transferred);
+#else
+		port->state->xmit.tail = (port->state->xmit.tail + transferred) & (UART_XMIT_SIZE - 1);
+#endif
 		port->icount.tx += transferred;
 	} else {
 		dev_warn_ratelimited(port->dev, "DMA TX fallback to PIO (ret=%d)\n", ret);
@@ -314,10 +381,10 @@ static void amba_uart_tx_work(struct work_struct *work)
 	}
 	amb_port->tx_dma_len = 0;
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (amba_xmit_pending(port) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 
-	if (!uart_circ_empty(xmit) && !uart_tx_stopped(port)) {
+	if (!amba_xmit_empty(port) && !uart_tx_stopped(port)) {
 		u32 ie = amba_uart_read(port, UART_IE_OFFSET);
 		if (!(ie & UART_IE_ETBEI))
 			amba_uart_write(port, ie | UART_IE_ETBEI, UART_IE_OFFSET);
@@ -385,7 +452,6 @@ static void amba_uart_rx_work(struct work_struct *work)
 static void amba_uart_start_tx(struct uart_port *port)
 {
 	struct amba_uart_port *amb_port = container_of(port, struct amba_uart_port, port);
-	struct circ_buf *xmit = &port->state->xmit;
 
 	if (port->x_char) {
 		amba_uart_write(port, port->x_char, UART_TH_OFFSET);
@@ -394,13 +460,13 @@ static void amba_uart_start_tx(struct uart_port *port)
 		return;
 	}
 
-	if (uart_tx_stopped(port) || uart_circ_empty(xmit)) {
+	if (uart_tx_stopped(port) || amba_xmit_empty(port)) {
 		amba_uart_stop_tx(port);
 		return;
 	}
 
 	/* Bulk DMA acceleration for streams > 256 bytes */
-	if (amb_port->dma_enabled && uart_circ_chars_pending(xmit) > 256) {
+	if (amb_port->dma_enabled && amba_xmit_pending(port) > 256) {
 		if (!amb_port->tx_dma_in_progress)
 			schedule_work(&amb_port->tx_work);
 		return;
@@ -569,7 +635,7 @@ static irqreturn_t amba_uart_interrupt(int irq, void *dev_id)
 			if (amb_port->tx_dma_in_progress) {
 				amba_uart_stop_tx(port);
 			} else {
-				if (!uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
+				if (!amba_xmit_empty(port) && !uart_tx_stopped(port))
 					amba_uart_transmit_chars(port);
 				else
 					amba_uart_stop_tx(port);
@@ -715,7 +781,7 @@ static enum hrtimer_restart amba_uart_poll_timer(struct hrtimer *t)
 	spin_lock_irqsave(&port->lock, flags);
 	if (!amb_port->rx_dma_in_progress)
 		amba_uart_receive_chars(port);
-	if (!amb_port->tx_dma_in_progress && !uart_circ_empty(&port->state->xmit) && !uart_tx_stopped(port))
+	if (!amb_port->tx_dma_in_progress && !amba_xmit_empty(port) && !uart_tx_stopped(port))
 		amba_uart_transmit_chars(port);
 	spin_unlock_irqrestore(&port->lock, flags);
 
@@ -1039,7 +1105,7 @@ static int amba_uart_platform_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int amba_uart_platform_remove(struct platform_device *pdev)
+static int amba_uart_platform_remove_int(struct platform_device *pdev)
 {
 	struct amba_uart_port *amb_port = platform_get_drvdata(pdev);
 
@@ -1052,6 +1118,16 @@ static int amba_uart_platform_remove(struct platform_device *pdev)
 
 	return 0;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+/* The platform driver remove callback returns void since 6.11 */
+static void amba_uart_platform_remove(struct platform_device *pdev)
+{
+	(void)amba_uart_platform_remove_int(pdev);
+}
+#else
+#define amba_uart_platform_remove amba_uart_platform_remove_int
+#endif
 
 static const struct of_device_id amba_uart_of_match[] = {
 	{ .compatible = "ambarella,uart" },

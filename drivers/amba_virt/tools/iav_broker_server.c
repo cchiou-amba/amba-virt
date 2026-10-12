@@ -20,6 +20,8 @@
 #include "amba_virt.h"
 #include "amba_virt_iav_win.h"
 #include "iav_broker_server.h"
+#include "iav_slice_rpc.h"
+#include "virt_low_lease.h"
 
 #define WORKERS			4
 #define QUEUE_DEPTH		32
@@ -336,6 +338,36 @@ void iav_broker_server_set_primary_slice(int slice)
 	g_primary_slice = slice;
 }
 
+static int real_slice_of(void *ctx, uint32_t cid, uint32_t *window)
+{
+	uint32_t usable = 0;
+
+	(void)ctx;
+	if (!window)
+		return -EINVAL;
+	return iav_slice_rpc_held(cid, window, &usable);
+}
+
+static void apply_guest_pool(uint64_t base, uint32_t partition_id)
+{
+	struct virt_iav_guest_pool pool;
+
+	memset(&pool, 0, sizeof(pool));
+	pool.partition_id = partition_id;
+	pool.parent_base = base;
+	pool.parent_bytes = VIRT_LOW_LEASE_COUNT * VIRT_LOW_LEASE_BYTES;
+	pool.slice_count = VIRT_LOW_LEASE_COUNT;
+	pool.slice_bytes = VIRT_LOW_LEASE_BYTES;
+	iav_broker_set_guest_pool(&g_broker, &pool);
+}
+
+void iav_broker_server_set_guest_pool(uint64_t base, uint32_t partition_id)
+{
+	if (!g_active || base == 0)
+		return;
+	apply_guest_pool(base, partition_id);
+}
+
 /* The primary guest is the one the kernel has bound to the configured slice. */
 static int real_is_primary(void *ctx, uint32_t cid)
 {
@@ -375,6 +407,7 @@ int iav_broker_server_init(int dev_fd, enum iav_profile profile)
 	ops.random32 = real_random32;
 	ops.now_ms = real_now_ms;
 	ops.is_primary = real_is_primary;
+	ops.slice_of = real_slice_of;
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.profile = profile;
 	cfg.rate_per_sec = 20000;
@@ -412,6 +445,13 @@ int iav_broker_server_init(int dev_fd, enum iav_profile profile)
 	}
 	g_threads_started = 1;
 	g_active = 1;
+	{
+		uint64_t base = 0;
+		uint32_t pid = 0;
+
+		if (virt_low_lease_geometry(&base, &pid) == 0)
+			apply_guest_pool(base, pid);
+	}
 	printf("iav_broker: started, profile %s\n",
 	       profile == IAV_PROFILE_QUALIFICATION ? "qualification" : "consumer");
 	return 0;

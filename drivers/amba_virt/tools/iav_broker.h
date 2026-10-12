@@ -22,6 +22,7 @@
 
 #include "amba_virt_iav.h"
 #include "iav_policy.h"
+#include "virt_iav_guest_slice.h"
 
 #define IAV_BROKER_MAX_SESSIONS		64
 #define IAV_BROKER_MAX_CIDS		16
@@ -47,6 +48,8 @@ struct iav_broker_ops {
 	 * binding and never a value the guest sent. NULL: no guest is primary.
 	 */
 	int (*is_primary)(void *ctx, uint32_t cid);
+	/* The slice EVE leased to this CID. 0 on success. NULL refuses every private submission. */
+	int (*slice_of)(void *ctx, uint32_t cid, uint32_t *window);
 };
 
 struct iav_broker_window {
@@ -96,6 +99,8 @@ struct iav_broker {
 	/* Counters, for the admin view and for tests. */
 	uint64_t n_requests;
 	uint64_t n_refused;
+	int guest_pool_set;
+	struct virt_iav_guest_pool guest_pool;
 };
 
 /* Returns 0 or a negative errno. */
@@ -109,6 +114,7 @@ void iav_broker_destroy(struct iav_broker *b);
  * page aligned, ranges disjoint, ids unique and below AMBA_VIRT_IAV_MAX_WINDOWS.
  */
 int iav_broker_set_windows(struct iav_broker *b, const struct iav_broker_window *w, unsigned int n);
+void iav_broker_set_guest_pool(struct iav_broker *b, const struct virt_iav_guest_pool *pool);
 
 /*
  * Handle one request from the guest with kernel-reported id cid. req is the payload after the

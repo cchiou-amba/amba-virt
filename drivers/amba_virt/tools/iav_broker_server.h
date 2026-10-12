@@ -32,6 +32,7 @@ int iav_broker_server_init(int dev_fd, enum iav_profile profile);
  * default, means none. Call before iav_broker_server_init.
  */
 void iav_broker_server_set_primary_slice(int slice);
+void iav_broker_server_set_guest_pool(uint64_t base, uint32_t partition_id);
 void iav_broker_server_shutdown(void);
 
 /* True once the broker is running. */

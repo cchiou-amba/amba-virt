@@ -18,4 +18,16 @@ PB_BIND(ambarella_virt_v1_IavTapRunResponse, ambarella_virt_v1_IavTapRunResponse
 PB_BIND(ambarella_virt_v1_RpcError, ambarella_virt_v1_RpcError, AUTO)
 
 
+PB_BIND(ambarella_virt_v1_IavSliceQueryRequest, ambarella_virt_v1_IavSliceQueryRequest, AUTO)
+
+
+PB_BIND(ambarella_virt_v1_IavSliceQueryResponse, ambarella_virt_v1_IavSliceQueryResponse, AUTO)
+
+
+PB_BIND(ambarella_virt_v1_IavSliceReleaseRequest, ambarella_virt_v1_IavSliceReleaseRequest, AUTO)
+
+
+PB_BIND(ambarella_virt_v1_IavSliceReleaseResponse, ambarella_virt_v1_IavSliceReleaseResponse, AUTO)
+
+
 

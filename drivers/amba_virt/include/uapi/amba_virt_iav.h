@@ -32,6 +32,7 @@ enum amba_virt_iav_op {
 	AMBA_VIRT_IAV_OP_MAP = 4,	/* authorize a mapping: arg_value = address, arg2 = length */
 	AMBA_VIRT_IAV_OP_POLL = 5,	/* wait up to arg_value ms for the events in cmd */
 	AMBA_VIRT_IAV_OP_INFO = 6,	/* list the windows bound to the calling guest */
+	AMBA_VIRT_IAV_OP_SLICE = 7,	/* a private buffer; admitted before any driver ioctl */
 };
 
 /* Window ids. The identity of a window is fixed; its size and base come from OP_INFO. */
@@ -49,7 +50,14 @@ enum amba_virt_iav_op {
  */
 #define AMBA_VIRT_IAV_POLL_SLICE_MS	20u
 
-/* Request: follows struct amba_virt_msg. arg_len bytes of argument follow it. */
+/* Argument of AMBA_VIRT_IAV_OP_SLICE. phys must be zero: the guest does not name memory. */
+struct amba_virt_iav_slice_req {
+	__u32 claimed_slice;
+	__u32 partition_id;
+	__u64 offset;
+	__u64 length;
+	__u64 phys;
+};
 struct amba_virt_iav_req {
 	__u32 proto;		/* AMBA_VIRT_IAV_PROTO */
 	__u32 op;		/* enum amba_virt_iav_op */

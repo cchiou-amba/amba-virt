@@ -40,6 +40,27 @@ typedef struct _ambarella_virt_v1_RpcError {
     char detail[128];
 } ambarella_virt_v1_RpcError;
 
+/* The guest asks which private IAV slice EVE already reserved for its CID. */
+typedef struct _ambarella_virt_v1_IavSliceQueryRequest {
+    uint32_t window_kind;
+} ambarella_virt_v1_IavSliceQueryRequest;
+
+typedef struct _ambarella_virt_v1_IavSliceQueryResponse {
+    int32_t status;
+    uint32_t window_id;
+    uint32_t usable_length;
+} ambarella_virt_v1_IavSliceQueryResponse;
+
+/* Symmetric with the query. The server acknowledges it and keeps the lease. */
+typedef struct _ambarella_virt_v1_IavSliceReleaseRequest {
+    uint32_t window_id;
+} ambarella_virt_v1_IavSliceReleaseRequest;
+
+typedef struct _ambarella_virt_v1_IavSliceReleaseResponse {
+    int32_t status;
+    bool lease_retained;
+} ambarella_virt_v1_IavSliceReleaseResponse;
+
 typedef struct _ambarella_virt_v1_RpcEnvelope {
     uint32_t api_major;
     uint32_t api_minor;
@@ -48,6 +69,10 @@ typedef struct _ambarella_virt_v1_RpcEnvelope {
     union _ambarella_virt_v1_RpcEnvelope_body {
         ambarella_virt_v1_IavTapRunRequest iav_tap_run_request;
         ambarella_virt_v1_IavTapRunResponse iav_tap_run_response;
+        ambarella_virt_v1_IavSliceQueryRequest iav_slice_query_request;
+        ambarella_virt_v1_IavSliceQueryResponse iav_slice_query_response;
+        ambarella_virt_v1_IavSliceReleaseRequest iav_slice_release_request;
+        ambarella_virt_v1_IavSliceReleaseResponse iav_slice_release_response;
         ambarella_virt_v1_RpcError error;
     } body;
 } ambarella_virt_v1_RpcEnvelope;
@@ -62,10 +87,18 @@ extern "C" {
 #define ambarella_virt_v1_IavTapRunRequest_init_default {0, 0, 0, 0, 0, 0, 0, 0}
 #define ambarella_virt_v1_IavTapRunResponse_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define ambarella_virt_v1_RpcError_init_default  {0, ""}
+#define ambarella_virt_v1_IavSliceQueryRequest_init_default {0}
+#define ambarella_virt_v1_IavSliceQueryResponse_init_default {0, 0, 0}
+#define ambarella_virt_v1_IavSliceReleaseRequest_init_default {0}
+#define ambarella_virt_v1_IavSliceReleaseResponse_init_default {0, 0}
 #define ambarella_virt_v1_RpcEnvelope_init_zero  {0, 0, 0, 0, {ambarella_virt_v1_IavTapRunRequest_init_zero}}
 #define ambarella_virt_v1_IavTapRunRequest_init_zero {0, 0, 0, 0, 0, 0, 0, 0}
 #define ambarella_virt_v1_IavTapRunResponse_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define ambarella_virt_v1_RpcError_init_zero     {0, ""}
+#define ambarella_virt_v1_IavSliceQueryRequest_init_zero {0}
+#define ambarella_virt_v1_IavSliceQueryResponse_init_zero {0, 0, 0}
+#define ambarella_virt_v1_IavSliceReleaseRequest_init_zero {0}
+#define ambarella_virt_v1_IavSliceReleaseResponse_init_zero {0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define ambarella_virt_v1_IavTapRunRequest_session_id_tag 1
@@ -89,11 +122,22 @@ extern "C" {
 #define ambarella_virt_v1_IavTapRunResponse_jpeg_len_tag 11
 #define ambarella_virt_v1_RpcError_status_tag    1
 #define ambarella_virt_v1_RpcError_detail_tag    2
+#define ambarella_virt_v1_IavSliceQueryRequest_window_kind_tag 1
+#define ambarella_virt_v1_IavSliceQueryResponse_status_tag 1
+#define ambarella_virt_v1_IavSliceQueryResponse_window_id_tag 2
+#define ambarella_virt_v1_IavSliceQueryResponse_usable_length_tag 3
+#define ambarella_virt_v1_IavSliceReleaseRequest_window_id_tag 1
+#define ambarella_virt_v1_IavSliceReleaseResponse_status_tag 1
+#define ambarella_virt_v1_IavSliceReleaseResponse_lease_retained_tag 2
 #define ambarella_virt_v1_RpcEnvelope_api_major_tag 1
 #define ambarella_virt_v1_RpcEnvelope_api_minor_tag 2
 #define ambarella_virt_v1_RpcEnvelope_request_id_tag 3
 #define ambarella_virt_v1_RpcEnvelope_iav_tap_run_request_tag 10
 #define ambarella_virt_v1_RpcEnvelope_iav_tap_run_response_tag 11
+#define ambarella_virt_v1_RpcEnvelope_iav_slice_query_request_tag 12
+#define ambarella_virt_v1_RpcEnvelope_iav_slice_query_response_tag 13
+#define ambarella_virt_v1_RpcEnvelope_iav_slice_release_request_tag 14
+#define ambarella_virt_v1_RpcEnvelope_iav_slice_release_response_tag 15
 #define ambarella_virt_v1_RpcEnvelope_error_tag  100
 
 /* Struct field encoding specification for nanopb */
@@ -103,11 +147,19 @@ X(a, STATIC,   SINGULAR, UINT32,   api_minor,         2) \
 X(a, STATIC,   SINGULAR, FIXED64,  request_id,        3) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,iav_tap_run_request,body.iav_tap_run_request),  10) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,iav_tap_run_response,body.iav_tap_run_response),  11) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,iav_slice_query_request,body.iav_slice_query_request),  12) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,iav_slice_query_response,body.iav_slice_query_response),  13) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,iav_slice_release_request,body.iav_slice_release_request),  14) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,iav_slice_release_response,body.iav_slice_release_response),  15) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,error,body.error), 100)
 #define ambarella_virt_v1_RpcEnvelope_CALLBACK NULL
 #define ambarella_virt_v1_RpcEnvelope_DEFAULT NULL
 #define ambarella_virt_v1_RpcEnvelope_body_iav_tap_run_request_MSGTYPE ambarella_virt_v1_IavTapRunRequest
 #define ambarella_virt_v1_RpcEnvelope_body_iav_tap_run_response_MSGTYPE ambarella_virt_v1_IavTapRunResponse
+#define ambarella_virt_v1_RpcEnvelope_body_iav_slice_query_request_MSGTYPE ambarella_virt_v1_IavSliceQueryRequest
+#define ambarella_virt_v1_RpcEnvelope_body_iav_slice_query_response_MSGTYPE ambarella_virt_v1_IavSliceQueryResponse
+#define ambarella_virt_v1_RpcEnvelope_body_iav_slice_release_request_MSGTYPE ambarella_virt_v1_IavSliceReleaseRequest
+#define ambarella_virt_v1_RpcEnvelope_body_iav_slice_release_response_MSGTYPE ambarella_virt_v1_IavSliceReleaseResponse
 #define ambarella_virt_v1_RpcEnvelope_body_error_MSGTYPE ambarella_virt_v1_RpcError
 
 #define ambarella_virt_v1_IavTapRunRequest_FIELDLIST(X, a) \
@@ -143,19 +195,54 @@ X(a, STATIC,   SINGULAR, STRING,   detail,            2)
 #define ambarella_virt_v1_RpcError_CALLBACK NULL
 #define ambarella_virt_v1_RpcError_DEFAULT NULL
 
+#define ambarella_virt_v1_IavSliceQueryRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   window_kind,       1)
+#define ambarella_virt_v1_IavSliceQueryRequest_CALLBACK NULL
+#define ambarella_virt_v1_IavSliceQueryRequest_DEFAULT NULL
+
+#define ambarella_virt_v1_IavSliceQueryResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, INT32,    status,            1) \
+X(a, STATIC,   SINGULAR, UINT32,   window_id,         2) \
+X(a, STATIC,   SINGULAR, UINT32,   usable_length,     3)
+#define ambarella_virt_v1_IavSliceQueryResponse_CALLBACK NULL
+#define ambarella_virt_v1_IavSliceQueryResponse_DEFAULT NULL
+
+#define ambarella_virt_v1_IavSliceReleaseRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   window_id,         1)
+#define ambarella_virt_v1_IavSliceReleaseRequest_CALLBACK NULL
+#define ambarella_virt_v1_IavSliceReleaseRequest_DEFAULT NULL
+
+#define ambarella_virt_v1_IavSliceReleaseResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, INT32,    status,            1) \
+X(a, STATIC,   SINGULAR, BOOL,     lease_retained,    2)
+#define ambarella_virt_v1_IavSliceReleaseResponse_CALLBACK NULL
+#define ambarella_virt_v1_IavSliceReleaseResponse_DEFAULT NULL
+
 extern const pb_msgdesc_t ambarella_virt_v1_RpcEnvelope_msg;
 extern const pb_msgdesc_t ambarella_virt_v1_IavTapRunRequest_msg;
 extern const pb_msgdesc_t ambarella_virt_v1_IavTapRunResponse_msg;
 extern const pb_msgdesc_t ambarella_virt_v1_RpcError_msg;
+extern const pb_msgdesc_t ambarella_virt_v1_IavSliceQueryRequest_msg;
+extern const pb_msgdesc_t ambarella_virt_v1_IavSliceQueryResponse_msg;
+extern const pb_msgdesc_t ambarella_virt_v1_IavSliceReleaseRequest_msg;
+extern const pb_msgdesc_t ambarella_virt_v1_IavSliceReleaseResponse_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define ambarella_virt_v1_RpcEnvelope_fields &ambarella_virt_v1_RpcEnvelope_msg
 #define ambarella_virt_v1_IavTapRunRequest_fields &ambarella_virt_v1_IavTapRunRequest_msg
 #define ambarella_virt_v1_IavTapRunResponse_fields &ambarella_virt_v1_IavTapRunResponse_msg
 #define ambarella_virt_v1_RpcError_fields &ambarella_virt_v1_RpcError_msg
+#define ambarella_virt_v1_IavSliceQueryRequest_fields &ambarella_virt_v1_IavSliceQueryRequest_msg
+#define ambarella_virt_v1_IavSliceQueryResponse_fields &ambarella_virt_v1_IavSliceQueryResponse_msg
+#define ambarella_virt_v1_IavSliceReleaseRequest_fields &ambarella_virt_v1_IavSliceReleaseRequest_msg
+#define ambarella_virt_v1_IavSliceReleaseResponse_fields &ambarella_virt_v1_IavSliceReleaseResponse_msg
 
 /* Maximum encoded size of messages (where known) */
 #define AMBARELLA_VIRT_V1_AMBA_VIRT_PB_H_MAX_SIZE ambarella_virt_v1_RpcEnvelope_size
+#define ambarella_virt_v1_IavSliceQueryRequest_size 6
+#define ambarella_virt_v1_IavSliceQueryResponse_size 23
+#define ambarella_virt_v1_IavSliceReleaseRequest_size 6
+#define ambarella_virt_v1_IavSliceReleaseResponse_size 13
 #define ambarella_virt_v1_IavTapRunRequest_size  40
 #define ambarella_virt_v1_IavTapRunResponse_size 76
 #define ambarella_virt_v1_RpcEnvelope_size       166

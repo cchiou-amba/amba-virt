@@ -118,6 +118,12 @@ that wants a group the old one holds cannot coexist with it. Either give the
 new instance only groups the old one does not hold, or delete the old instance
 first and accept the volume loss.
 
+The adapter names in the examples below are the instances that were created on the
+2026-10-12 images. They are not a pattern for the next distro: do not add
+`amba_shm2`, `amba_shm3`, or another numbered pool. A new guest asks the server
+for a slice of the one Cavalry parent (`cbattr shmassign=server`). That grant is
+not what these running instances use.
+
 ### 4.1 Worked example: the IAV guests
 
 The virtual `/dev/iav` gives a guest two more adapters, a DSP window and a bitstream

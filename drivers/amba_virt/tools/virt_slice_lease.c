@@ -1,0 +1,472 @@
+/*
+ * virt_slice_lease.c
+ *
+ * Reserves one published high-memory slice for a domain UUID.
+ * The grant is idempotent, epoch-checked on release, and rewritten
+ * to the store before the caller is told it succeeded.
+ *
+ * Copyright (C) 2026, Ambarella International LLC
+ */
+
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "virt_slice_lease.h"
+
+#define LEASE_MAX 8
+
+struct lease_slot {
+	int in_use;
+	char uuid[64];
+	uint32_t index;
+	uint64_t epoch;
+	uint64_t bytes;
+};
+
+static struct lease_slot g_slots[LEASE_MAX];
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_matched;
+static uint32_t g_count;
+static uint64_t g_slice_bytes;
+static uint64_t g_next_epoch = 1;
+static char g_store[256] = VIRT_SLICE_LEASE_STORE;
+
+static int uuid_ok(const char *uuid)
+{
+	size_t n;
+	size_t i;
+
+	if (!uuid)
+		return 0;
+	n = strlen(uuid);
+	if (n < 1 || n > 36)
+		return 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)uuid[i];
+
+		if (c != '-' && !isxdigit(c))
+			return 0;
+	}
+	return 1;
+}
+
+static int parse_u64(const char *s, uint64_t *out)
+{
+	char *end = NULL;
+	unsigned long long v;
+
+	if (!s || !*s)
+		return -1;
+	errno = 0;
+	v = strtoull(s, &end, 10);
+	if (errno || end == s || !end || *end)
+		return -1;
+	*out = (uint64_t)v;
+	return 0;
+}
+
+static void store_dir(const char *path, char *dir, size_t dir_len)
+{
+	const char *slash = strrchr(path, '/');
+
+	if (!slash || slash == path) {
+		snprintf(dir, dir_len, ".");
+		return;
+	}
+	if ((size_t)(slash - path) >= dir_len) {
+		snprintf(dir, dir_len, ".");
+		return;
+	}
+	memcpy(dir, path, (size_t)(slash - path));
+	dir[slash - path] = '\0';
+}
+
+static int save_locked(void)
+{
+	char dir[256];
+	char tmp[288];
+	FILE *fp;
+	uint32_t i;
+
+	store_dir(g_store, dir, sizeof(dir));
+	if (mkdir(dir, 0755) < 0 && errno != EEXIST)
+		return -1;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", g_store);
+	fp = fopen(tmp, "w");
+	if (!fp)
+		return -1;
+	if (fchmod(fileno(fp), 0600) < 0) {
+		fclose(fp);
+		unlink(tmp);
+		return -1;
+	}
+	for (i = 0; i < LEASE_MAX; i++) {
+		if (!g_slots[i].in_use)
+			continue;
+		if (fprintf(fp, "%s %u %llu %llu\n", g_slots[i].uuid, g_slots[i].index,
+			    (unsigned long long)g_slots[i].epoch,
+			    (unsigned long long)g_slots[i].bytes) < 0) {
+			fclose(fp);
+			unlink(tmp);
+			return -1;
+		}
+	}
+	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+		fclose(fp);
+		unlink(tmp);
+		return -1;
+	}
+	fclose(fp);
+	if (rename(tmp, g_store) < 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+static void clear_slot(struct lease_slot *slot)
+{
+	memset(slot, 0, sizeof(*slot));
+}
+
+static struct lease_slot *find_uuid(const char *uuid)
+{
+	uint32_t i;
+
+	for (i = 0; i < LEASE_MAX; i++) {
+		if (g_slots[i].in_use && strcmp(g_slots[i].uuid, uuid) == 0)
+			return &g_slots[i];
+	}
+	return NULL;
+}
+
+static int index_taken(uint32_t index)
+{
+	uint32_t i;
+
+	for (i = 0; i < LEASE_MAX; i++) {
+		if (g_slots[i].in_use && g_slots[i].index == index)
+			return 1;
+	}
+	return 0;
+}
+
+static void format_ok(char *resp, size_t resp_len, const struct lease_slot *slot)
+{
+	snprintf(resp, resp_len, "OK index=%u path=/dev/amba_virt_shm%u epoch=%llu\n",
+		 slot->index, slot->index, (unsigned long long)slot->epoch);
+}
+
+static int reserve_range_locked(const char *uuid, uint64_t bytes,
+			       uint32_t min_index, int exact,
+			       char *resp, size_t resp_len)
+{
+	struct lease_slot *slot;
+	struct lease_slot *free_slot = NULL;
+	uint32_t index;
+	uint32_t i;
+
+	if (!g_matched || g_count == 0 || g_slice_bytes == 0) {
+		snprintf(resp, resp_len, "ERR GEOMETRY\n");
+		return 0;
+	}
+	if (!uuid_ok(uuid)) {
+		snprintf(resp, resp_len, "ERR INVAL\n");
+		return 0;
+	}
+	if (bytes == 0) {
+		snprintf(resp, resp_len, "ERR ZERO\n");
+		return 0;
+	}
+	if ((bytes % 4096) != 0) {
+		snprintf(resp, resp_len, "ERR ALIGN\n");
+		return 0;
+	}
+	if (bytes != g_slice_bytes) {
+		snprintf(resp, resp_len, "ERR SIZE\n");
+		return 0;
+	}
+	slot = find_uuid(uuid);
+	if (slot) {
+		format_ok(resp, resp_len, slot);
+		return 0;
+	}
+	if (g_next_epoch == 0) {
+		snprintf(resp, resp_len, "ERR EXHAUSTED\n");
+		return 0;
+	}
+	if (exact) {
+		if (min_index >= g_count || index_taken(min_index)) {
+			snprintf(resp, resp_len, "ERR EXHAUSTED\n");
+			return 0;
+		}
+		index = min_index;
+	} else {
+		for (index = min_index; index < g_count; index++) {
+			if (!index_taken(index))
+				break;
+		}
+		if (index >= g_count) {
+			snprintf(resp, resp_len, "ERR EXHAUSTED\n");
+			return 0;
+		}
+	}
+	for (i = 0; i < LEASE_MAX; i++) {
+		if (!g_slots[i].in_use) {
+			free_slot = &g_slots[i];
+			break;
+		}
+	}
+	if (!free_slot) {
+		snprintf(resp, resp_len, "ERR EXHAUSTED\n");
+		return 0;
+	}
+	memset(free_slot, 0, sizeof(*free_slot));
+	snprintf(free_slot->uuid, sizeof(free_slot->uuid), "%s", uuid);
+	free_slot->index = index;
+	free_slot->epoch = g_next_epoch++;
+	free_slot->bytes = bytes;
+	free_slot->in_use = 1;
+	if (save_locked() != 0) {
+		clear_slot(free_slot);
+		snprintf(resp, resp_len, "ERR PERSIST\n");
+		return 0;
+	}
+	format_ok(resp, resp_len, free_slot);
+	return 0;
+}
+
+static int reserve_locked(const char *uuid, uint64_t bytes, char *resp, size_t resp_len)
+{
+	return reserve_range_locked(uuid, bytes, 0, 0, resp, resp_len);
+}
+
+static int release_locked(const char *uuid, uint64_t epoch, char *resp, size_t resp_len)
+{
+	struct lease_slot *slot;
+
+	if (!uuid_ok(uuid)) {
+		snprintf(resp, resp_len, "ERR INVAL\n");
+		return 0;
+	}
+	slot = find_uuid(uuid);
+	if (!slot) {
+		snprintf(resp, resp_len, "ERR NOT_FOUND\n");
+		return 0;
+	}
+	if (slot->epoch != epoch) {
+		snprintf(resp, resp_len, "ERR STALE\n");
+		return 0;
+	}
+	{
+		struct lease_slot saved = *slot;
+
+		clear_slot(slot);
+		if (save_locked() != 0) {
+			*slot = saved;
+			snprintf(resp, resp_len, "ERR PERSIST\n");
+			return 0;
+		}
+	}
+	snprintf(resp, resp_len, "OK\n");
+	return 0;
+}
+
+static int query_locked(const char *uuid, char *resp, size_t resp_len)
+{
+	struct lease_slot *slot;
+
+	if (!uuid_ok(uuid)) {
+		snprintf(resp, resp_len, "ERR INVAL\n");
+		return 0;
+	}
+	slot = find_uuid(uuid);
+	if (!slot) {
+		snprintf(resp, resp_len, "ERR NOT_FOUND\n");
+		return 0;
+	}
+	format_ok(resp, resp_len, slot);
+	return 0;
+}
+
+void virt_slice_lease_reset(void)
+{
+	pthread_mutex_lock(&g_lock);
+	memset(g_slots, 0, sizeof(g_slots));
+	g_matched = 0;
+	g_count = 0;
+	g_slice_bytes = 0;
+	g_next_epoch = 1;
+	snprintf(g_store, sizeof(g_store), "%s", VIRT_SLICE_LEASE_STORE);
+	pthread_mutex_unlock(&g_lock);
+}
+
+void virt_slice_lease_set_store(const char *path)
+{
+	pthread_mutex_lock(&g_lock);
+	if (path && path[0] && strlen(path) < sizeof(g_store))
+		snprintf(g_store, sizeof(g_store), "%s", path);
+	pthread_mutex_unlock(&g_lock);
+}
+
+int virt_slice_lease_set_geometry(int matched, uint32_t count, uint64_t slice_bytes)
+{
+	uint32_t i;
+	int drop = 0;
+
+	pthread_mutex_lock(&g_lock);
+	if (matched && count >= 1 && count <= LEASE_MAX && slice_bytes != 0 &&
+	    (slice_bytes % 4096) == 0) {
+		g_matched = 1;
+		g_count = count;
+		g_slice_bytes = slice_bytes;
+		for (i = 0; i < LEASE_MAX; i++) {
+			if (!g_slots[i].in_use)
+				continue;
+			if (g_slots[i].index >= g_count || g_slots[i].bytes != g_slice_bytes) {
+				clear_slot(&g_slots[i]);
+				drop = 1;
+			}
+		}
+	} else {
+		g_matched = 0;
+		g_count = 0;
+		g_slice_bytes = 0;
+	}
+	if (drop)
+		save_locked();
+	pthread_mutex_unlock(&g_lock);
+	return 0;
+}
+
+int virt_slice_lease_load(void)
+{
+	FILE *fp;
+	char line[256];
+
+	pthread_mutex_lock(&g_lock);
+	fp = fopen(g_store, "r");
+	if (!fp) {
+		pthread_mutex_unlock(&g_lock);
+		return 0;
+	}
+	while (fgets(line, sizeof(line), fp)) {
+		char uuid[64];
+		unsigned int index = 0;
+		unsigned long long epoch = 0;
+		unsigned long long bytes = 0;
+		struct lease_slot *slot;
+		uint32_t i;
+
+		if (line[0] == '#' || line[0] == '\n')
+			continue;
+		if (sscanf(line, "%63s %u %llu %llu", uuid, &index, &epoch, &bytes) != 4)
+			continue;
+		if (!uuid_ok(uuid) || epoch == 0 || bytes == 0)
+			continue;
+		if (!g_matched || index >= g_count || bytes != g_slice_bytes)
+			continue;
+		if (find_uuid(uuid) || index_taken(index))
+			continue;
+		slot = NULL;
+		for (i = 0; i < LEASE_MAX; i++) {
+			if (!g_slots[i].in_use) {
+				slot = &g_slots[i];
+				break;
+			}
+		}
+		if (!slot)
+			break;
+		memset(slot, 0, sizeof(*slot));
+		snprintf(slot->uuid, sizeof(slot->uuid), "%s", uuid);
+		slot->index = index;
+		slot->epoch = (uint64_t)epoch;
+		slot->bytes = (uint64_t)bytes;
+		slot->in_use = 1;
+		if (epoch >= g_next_epoch) {
+			if (epoch == UINT64_MAX)
+				g_next_epoch = 0;
+			else
+				g_next_epoch = (uint64_t)epoch + 1;
+		}
+	}
+	fclose(fp);
+	pthread_mutex_unlock(&g_lock);
+	return 0;
+}
+
+int virt_slice_lease_admin(const char *req, char *resp, size_t resp_len)
+{
+	char cmd[64];
+	char uuid[64];
+	char num[64];
+	char extra[64];
+	uint64_t value = 0;
+	uint64_t index_value = 0;
+	int fields;
+
+	if (!resp || resp_len == 0)
+		return -1;
+	resp[0] = '\0';
+	if (!req) {
+		snprintf(resp, resp_len, "ERR INVAL\n");
+		return 0;
+	}
+	cmd[0] = uuid[0] = num[0] = extra[0] = '\0';
+	fields = sscanf(req, "%63s %63s %63s %63s", cmd, uuid, num, extra);
+	if (fields < 1) {
+		snprintf(resp, resp_len, "ERR INVAL\n");
+		return 0;
+	}
+
+	pthread_mutex_lock(&g_lock);
+	if (strcmp(cmd, "RESERVE_SLICE") == 0) {
+		if (parse_u64(num, &value) != 0)
+			snprintf(resp, resp_len, "ERR INVAL\n");
+		else
+			reserve_locked(uuid, value, resp, resp_len);
+	} else if (strcmp(cmd, "RESERVE_SLICE_AT") == 0 ||
+		   strcmp(cmd, "RESERVE_SLICE_MIN") == 0) {
+		if (fields < 4 || parse_u64(num, &value) != 0 ||
+		    parse_u64(extra, &index_value) != 0 ||
+		    index_value > UINT32_MAX)
+			snprintf(resp, resp_len, "ERR INVAL\n");
+		else
+			reserve_range_locked(uuid, value, (uint32_t)index_value,
+					     strcmp(cmd, "RESERVE_SLICE_AT") == 0,
+					     resp, resp_len);
+	} else if (strcmp(cmd, "RELEASE_SLICE") == 0) {
+		if (parse_u64(num, &value) != 0)
+			snprintf(resp, resp_len, "ERR INVAL\n");
+		else
+			release_locked(uuid, value, resp, resp_len);
+	} else if (strcmp(cmd, "QUERY_SLICE") == 0) {
+		query_locked(uuid, resp, resp_len);
+	} else {
+		snprintf(resp, resp_len, "ERR UNKNOWN_CMD\n");
+	}
+	pthread_mutex_unlock(&g_lock);
+	return 0;
+}
+
+int virt_slice_lease_index_used(uint32_t index)
+{
+	unsigned i;
+	int used = 0;
+
+	pthread_mutex_lock(&g_lock);
+	for (i = 0; i < LEASE_MAX; i++) {
+		if (g_slots[i].in_use && g_slots[i].index == index)
+			used = 1;
+	}
+	pthread_mutex_unlock(&g_lock);
+	return used;
+}

@@ -37,6 +37,7 @@
 #include "virt_camera_conf.h"
 #include "virt_camera_pipeline.h"
 #include "virt_daemon.h"
+#include "virt_slice_lease.h"
 #include "virt_dma_broker.h"
 #include "virt_driver_matrix.h"
 #include "virt_host_ops.h"
@@ -48,6 +49,7 @@
 #include "iav_tap_abi.h"
 #include "iav_proxy.h"
 #include "iav_broker_server.h"
+#include "iav_slice_rpc.h"
 #include "amba_virt_iav.h"
 
 static pthread_mutex_t g_gdma_hw_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -323,20 +325,66 @@ static struct server_ctx g_ctx;
 static struct amba_virt_slice_list g_active_slices;
 static int g_geometry_matched = 0;
 static int g_pool_ready = 0;
+static uint64_t g_window_bytes = 0;
+static int g_leases_loaded = 0;
 
 int server_get_geometry_info(uint64_t *window_phys, uint64_t *window_bytes, uint32_t *slices, int *matched)
 {
 	if (window_phys) *window_phys = g_ctx.info.shm_phys;
-	if (window_bytes) *window_bytes = g_ctx.info.shm_size;
+	if (window_bytes) *window_bytes = g_window_bytes ? g_window_bytes : g_ctx.info.shm_size;
 	if (slices) *slices = g_active_slices.count;
 	if (matched) *matched = g_geometry_matched;
 	return 0;
+}
+
+int server_get_slice(uint32_t index, uint64_t *phys, uint64_t *bytes, uint32_t *usable)
+{
+	if (index >= g_active_slices.count)
+		return -1;
+	if (phys)
+		*phys = g_active_slices.slices[index].phys;
+	if (bytes)
+		*bytes = g_active_slices.slices[index].slice_size;
+	if (usable)
+		*usable = g_active_slices.slices[index].usable_size;
+	return 0;
+}
+
+static int server_sum_slices(const struct amba_virt_slice_list *list, uint64_t *sum_out)
+{
+	uint64_t sum = 0;
+	uint32_t i;
+
+	if (!list || list->count == 0 || list->count > 8)
+		return -1;
+	for (i = 0; i < list->count; i++) {
+		if (list->slices[i].slice_size == 0 || sum > UINT64_MAX - list->slices[i].slice_size)
+			return -1;
+		if (i > 0 && list->slices[i].slice_size != list->slices[0].slice_size)
+			return -1;
+		sum += list->slices[i].slice_size;
+	}
+	*sum_out = sum;
+	return 0;
+}
+
+static uint64_t server_published_window_bytes(int fd, const struct amba_virt_info *info)
+{
+	struct amba_virt_slice_list enumerated;
+	uint64_t sum = 0;
+
+	memset(&enumerated, 0, sizeof(enumerated));
+	if (ioctl(fd, AMBA_VIRT_IOC_ENUM_SLICES, &enumerated) == 0 &&
+	    server_sum_slices(&enumerated, &sum) == 0 && sum)
+		return sum;
+	return info->shm_size;
 }
 
 static void server_check_geometry(int fd, const struct amba_virt_info *info)
 {
 	struct amba_virt_slice_list computed;
 	struct amba_virt_slice_list enumerated;
+	uint64_t sum = 0;
 	int ret;
 
 	g_geometry_matched = 0;
@@ -344,21 +392,36 @@ static void server_check_geometry(int fd, const struct amba_virt_info *info)
 	memset(&computed, 0, sizeof(computed));
 	memset(&enumerated, 0, sizeof(enumerated));
 
-	if (!info->shm_size || !info->shm_phys)
+	if (!info->shm_phys) {
+		virt_slice_lease_set_geometry(0, 0, 0);
 		return;
+	}
 
-	ret = amba_virt_slice_compute_geometry(info->shm_phys, info->shm_size, 4096, 2, &computed);
-	if (ret < 0 || computed.count == 0)
+	if (ioctl(fd, AMBA_VIRT_IOC_ENUM_SLICES, &enumerated) < 0 ||
+	    server_sum_slices(&enumerated, &sum) != 0) {
+		virt_slice_lease_set_geometry(0, 0, 0);
 		return;
+	}
+	g_window_bytes = sum;
 
-	if (ioctl(fd, AMBA_VIRT_IOC_ENUM_SLICES, &enumerated) < 0)
+	ret = amba_virt_slice_compute_geometry(info->shm_phys, sum, 4096,
+						enumerated.count, &computed);
+	if (ret < 0 || computed.count == 0) {
+		virt_slice_lease_set_geometry(0, 0, 0);
 		return;
+	}
 
 	if (amba_virt_slice_compare_list(&computed, &enumerated)) {
 		g_active_slices = enumerated;
 		g_geometry_matched = 1;
+		virt_slice_lease_set_geometry(1, enumerated.count, enumerated.slices[0].slice_size);
+		if (!g_leases_loaded) {
+			virt_slice_lease_load();
+			g_leases_loaded = 1;
+		}
 		printf("amba-virt-server: geometry=match slices=%u\n", g_active_slices.count);
 	} else {
+		virt_slice_lease_set_geometry(0, 0, 0);
 		printf("amba-virt-server: geometry=reject (enumerated does not match window geometry)\n");
 	}
 }
@@ -677,6 +740,38 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 					    resp_payload, max_resp_len, &resp_len,
 					    rx->client_cid);
 		tx->len = sizeof(*out) + resp_len;
+	} else if (in->type == AMBA_VIRT_MSG_IAV_SLICE_REQ) {
+		const uint8_t *req_payload = rx->data + sizeof(*in);
+		size_t req_len = (rx->len > sizeof(*in)) ? (rx->len - sizeof(*in)) : 0;
+		uint8_t *resp_payload;
+		size_t max_resp_len, resp_len = 0;
+
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_IAV_SLICE_RESP;
+		out->seq = in->seq;
+		resp_payload = tx->data + sizeof(*out);
+		max_resp_len = sizeof(tx->data) - sizeof(*out);
+		iav_slice_rpc_handle(req_payload, req_len, resp_payload, max_resp_len,
+				     &resp_len, rx->client_cid);
+		tx->len = sizeof(*out) + resp_len;
+	} else if (in->type == AMBA_VIRT_MSG_POOLS_REQ) {
+		char text[AMBA_VIRT_MAX_MSG];
+
+		out = (struct amba_virt_msg *)tx->data;
+		memset(out, 0, sizeof(*out));
+		out->type = AMBA_VIRT_MSG_POOLS_RESP;
+		out->seq = in->seq;
+		if (virt_admin_format_pools(text, sizeof(text)) != 0) {
+			tx->len = sizeof(*out);
+		} else {
+			size_t n = strlen(text);
+
+			if (n > sizeof(tx->data) - sizeof(*out))
+				n = sizeof(tx->data) - sizeof(*out);
+			memcpy(tx->data + sizeof(*out), text, n);
+			tx->len = sizeof(*out) + n;
+		}
 	} else if (in->type == AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ) {
 		struct amba_virt_dev_bounds_req *b_req;
 		struct amba_virt_dev_bounds_resp *b_resp;
@@ -1456,11 +1551,15 @@ static int server_run(int ready_fd)
 	printf("amba-virt-server proto=%u role=%u shm=%u phys=0x%lx port=%u (listening)\n",
 	       info.proto, info.role, info.shm_size, (unsigned long)info.shm_phys, info.vsock_port);
 
-	if (info.shm_size) {
-		map = mmap(NULL, info.shm_size, PROT_READ | PROT_WRITE,
-			   MAP_SHARED, fd, 0);
-		if (map == MAP_FAILED)
-			perror("mmap (continuing without shm)");
+	{
+		uint64_t window_bytes = server_published_window_bytes(fd, &info);
+
+		if (window_bytes) {
+			map = mmap(NULL, (size_t)window_bytes, PROT_READ | PROT_WRITE,
+				   MAP_SHARED, fd, 0);
+			if (map == MAP_FAILED)
+				perror("mmap (continuing without shm)");
+		}
 	}
 
 	/*
@@ -1495,11 +1594,15 @@ static int server_run(int ready_fd)
 			return 1;
 		printf("amba-virt-server proto=%u role=%u shm=%u phys=0x%lx port=%u (after camera)\n",
 		       info.proto, info.role, info.shm_size, (unsigned long)info.shm_phys, info.vsock_port);
-		if (info.shm_size && map == MAP_FAILED) {
-			map = mmap(NULL, info.shm_size, PROT_READ | PROT_WRITE,
-				   MAP_SHARED, fd, 0);
-			if (map == MAP_FAILED)
-				perror("mmap (continuing without shm)");
+		if (map == MAP_FAILED) {
+			uint64_t window_bytes = server_published_window_bytes(fd, &info);
+
+			if (window_bytes) {
+				map = mmap(NULL, (size_t)window_bytes, PROT_READ | PROT_WRITE,
+					   MAP_SHARED, fd, 0);
+				if (map == MAP_FAILED)
+					perror("mmap (continuing without shm)");
+			}
 		}
 	}
 
@@ -1522,7 +1625,7 @@ static int server_run(int ready_fd)
 #endif
 
 	/* Step 12: encode starts after preview, not before. */
-	if (cavalry_proxy_init(fd, map, info.shm_size, info.shm_phys) < 0) {
+	if (cavalry_proxy_init(fd, map, (size_t)server_published_window_bytes(fd, &info), info.shm_phys) < 0) {
 		fprintf(stderr, "Failed to initialize cavalry proxy\n");
 		if (camera_pipeline_up)
 			virt_camera_pipeline_shutdown();

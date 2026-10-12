@@ -10,6 +10,7 @@
 
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
@@ -698,7 +699,9 @@ static const struct file_operations amba_cavalry_fops = {
 	.mmap = amba_cavalry_mmap,
 	.unlocked_ioctl = amba_cavalry_ioctl,
 	.compat_ioctl = amba_cavalry_ioctl,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek = no_llseek,
+#endif
 };
 
 static int cavalry_state_notifier_call(struct notifier_block *nb, unsigned long action, void *data)

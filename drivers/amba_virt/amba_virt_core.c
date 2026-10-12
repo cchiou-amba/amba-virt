@@ -24,6 +24,7 @@
 #include <linux/dma-buf.h>
 #include <linux/scatterlist.h>
 #include <linux/fdtable.h>
+#include <linux/limits.h>
 
 #include <amba_virt.h>
 #include <linux/notifier.h>
@@ -1035,7 +1036,13 @@ static long amba_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		memset(&info, 0, sizeof(info));
 		info.proto = AMBA_VIRT_PROTO;
 		info.role = dev->is_host ? AMBA_VIRT_ROLE_HOST : AMBA_VIRT_ROLE_GUEST;
-		info.shm_size = (u32)dev->shm_size;
+		if (dev->shm_size > U32_MAX) {
+			info.shm_size = U32_MAX;
+			pr_warn_once("amba_virt: shm window 0x%zx exceeds the U32 GET_INFO field; ENUM_SLICES is authoritative\n",
+				     dev->shm_size);
+		} else {
+			info.shm_size = (u32)dev->shm_size;
+		}
 		info.shm_phys = (u64)dev->shm_phys;
 		info.vsock_cid = dev->vsock_cid;
 		info.vsock_port = dev->vsock_port;

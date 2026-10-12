@@ -28,6 +28,7 @@ static void usage(const char *prog)
 	fprintf(stderr, "  module unload <name>                 Drain and unload host kernel module\n");
 	fprintf(stderr, "  pipeline start <npu|camera>          Start composite subsystem pipeline\n");
 	fprintf(stderr, "  firmware                             Query firmware inventory status\n");
+	fprintf(stderr, "  pools                                Show the Cavalry and low-pool inventory\n");
 	fprintf(stderr, "  list-guests                          List all registered guest tenants\n");
 	fprintf(stderr, "  get-guest <cid>                      Get detailed info for tenant CID\n");
 	fprintf(stderr, "  set-quota <cid> <size[M]>            Set quota ceiling for tenant CID\n");
@@ -153,6 +154,14 @@ int main(int argc, char **argv)
 
 	if (strcmp(action, "firmware") == 0) {
 		snprintf(cmd_buf, sizeof(cmd_buf), "FIRMWARE\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return 0;
+	}
+
+	if (strcmp(action, "pools") == 0) {
+		snprintf(cmd_buf, sizeof(cmd_buf), "POOLS\n");
 		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
 			return 1;
 		printf("%s", resp_buf);

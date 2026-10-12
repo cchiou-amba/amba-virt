@@ -48,6 +48,7 @@ Supported Targets & Defaults:
   n1-655-devkit-qnx      -> QNX 8.0 HVM     (port 2322, amba-virt-resmgr + devc-seramb)
   n1-655-pro-qnx         -> QNX 8.0 HVM     (port 2322, amba-virt-resmgr + devc-seramb)
   n1-655-devkit-alpine   -> Alpine 3.20 HVM (port 2422, musl static binaries)
+  n1-655-devkit-<name>   -> any guest-os/<name>/ that has a deploy-guest.conf (glibc, systemd)
   n1-655-pro-alpine      -> Alpine 3.20 HVM (port 2422, musl static binaries)
 
 Environment:
@@ -126,10 +127,26 @@ if [ -z "${DISTRO}" ]; then
         *alpine*)  DISTRO="alpine" ;;
         *qnx*)     DISTRO="qnx" ;;
         *)
-            echo "Warning: Could not infer distro from target name '${TARGET_NODE}'. Defaulting to ubuntu."
-            DISTRO="ubuntu"
+            # AMBA-GUEST-EXTENSIONS: a guest that ships guest-os/<name>/deploy-guest.conf is matched by <name> in the target
+            for ext in "${SCRIPT_DIR}"/*/deploy-guest.conf; do
+                [ -f "${ext}" ] || continue
+                ext_name="$(basename "$(dirname "${ext}")")"
+                case "${TARGET_NODE}" in *"${ext_name}"*) DISTRO="${ext_name}" ;; esac
+            done
+            if [ -z "${DISTRO}" ]; then
+                echo "Warning: Could not infer distro from target name '${TARGET_NODE}'. Defaulting to ubuntu."
+                DISTRO="ubuntu"
+            fi
             ;;
     esac
+fi
+
+# A guest with its own recipe sets EXT_LINUX_DISTRO (the Linux/systemd deploy path) and EXT_DEMO_PORT
+EXT_LINUX_DISTRO=""
+EXT_DEMO_PORT=""
+if [[ "${DISTRO}" =~ ^[a-z0-9_]+$ ]] && [ -f "${SCRIPT_DIR}/${DISTRO}/deploy-guest.conf" ]; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/${DISTRO}/deploy-guest.conf"
 fi
 
 log_step() {
@@ -169,7 +186,7 @@ STAGING_DIR="${BUILD_GUEST_DIR}/${DISTRO}"
 
 # Deployment by target OS flavor
 case "${DISTRO}" in
-    ubuntu|alpine)
+    ubuntu|alpine|"${EXT_LINUX_DISTRO:-ubuntu}")
         log_step "Deploying Linux Guest Artifacts (${DISTRO}) to ${TARGET_NODE}..."
 
         # 1. Ensure remote directories exist and are writable for staging
@@ -205,7 +222,10 @@ case "${DISTRO}" in
             log_step "Provisioning the demo service on ${TARGET_NODE}..."
             DEMO_DIR="${ROOT_DIR}/guest-os/apps/amba-virt-demo"
             MODEL="${ROOT_DIR}/guest-os/apps/cavalry-yolo/n1-655_yolox_s_amba_optimized.bin"
-            if [ "${DISTRO}" = "ubuntu" ]; then
+            if [ -n "${EXT_DEMO_PORT}" ]; then
+                DEMO_BIN="${DEMO_DIR}/amba_virt_demo"
+                DEMO_PORT="${EXT_DEMO_PORT}"
+            elif [ "${DISTRO}" = "ubuntu" ]; then
                 DEMO_BIN="${DEMO_DIR}/amba_virt_demo"
                 DEMO_PORT=8080
             else
@@ -224,13 +244,18 @@ case "${DISTRO}" in
             run_remote "sudo cp /tmp/amba_staging/amba_virt_demo /usr/local/bin/amba_virt_demo && sudo chmod 0755 /usr/local/bin/amba_virt_demo"
             run_remote "sudo mkdir -p /opt/cavalry && sudo cp /tmp/amba_staging/n1-655_yolox_s_amba_optimized.bin /opt/cavalry/n1-655_yolox_s_amba_optimized.bin && sudo chmod 0644 /opt/cavalry/n1-655_yolox_s_amba_optimized.bin"
             run_remote "sed 's/^AMBA_VIRT_DEMO_BIND=.*/AMBA_VIRT_DEMO_BIND=0.0.0.0:${DEMO_PORT}/' /tmp/amba_staging/amba-virt-demo.env > /tmp/amba_staging/demo.env.new && sudo cp /tmp/amba_staging/demo.env.new /etc/amba-virt-demo.env && sudo chmod 0644 /etc/amba-virt-demo.env"
-            if [ "${DISTRO}" = "ubuntu" ]; then
+            if [ "${DISTRO}" = "ubuntu" ] || [ -n "${EXT_LINUX_DISTRO}" ]; then
                 copy_to_target "${DEMO_DIR}/service/amba-virt-demo.service" "/tmp/amba_staging/amba-virt-demo.service"
                 run_remote "sudo cp /tmp/amba_staging/amba-virt-demo.service /etc/systemd/system/amba-virt-demo.service && sudo systemctl daemon-reload && sudo systemctl enable amba-virt-demo.service"
             else
                 copy_to_target "${DEMO_DIR}/service/amba-virt-demo.openrc" "/tmp/amba_staging/amba-virt-demo"
                 run_remote "sudo cp /tmp/amba_staging/amba-virt-demo /etc/init.d/amba-virt-demo && sudo chmod 0755 /etc/init.d/amba-virt-demo && sudo rc-update add amba-virt-demo default"
             fi
+        fi
+
+        # 3b2. Hosts with SELinux: give what was copied its default label (restorecon exists only where SELinux does)
+        if [ "${PROVISION}" -eq 1 ]; then
+            run_remote "if command -v restorecon >/dev/null 2>&1; then sudo restorecon -RF /usr/local/bin /etc/systemd/system /etc/amba-virt-demo.env /opt/cavalry /lib/modules/\$(uname -r)/extra 2>/dev/null || true; fi"
         fi
 
         # 3c. The installed files must not be empty (a failed copy must stop the deployment)

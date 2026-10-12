@@ -20,7 +20,7 @@ SERVER_LDFLAGS ?= -Wl,--dynamic-linker=/usr/lib/amba-virt/lib/ld-linux-aarch64.s
 	-Wl,--disable-new-dtags -Wl,-rpath,/usr/lib/amba-virt/lib
 
 TARGETS := amba-virt-server amba-virt-ctl iav_frame_tap iav_proxy_test
-SERVER_SRCS := amba-virt-server.c cavalry_proxy.c amba_virt_slice.c iav_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_query.c virt_host_ops.c virt_daemon.c virt_ready.c virt_dma_broker.c hmac_sha256.c virt_module_loader.c virt_camera_conf.c virt_gpio.c virt_camera_pipeline.c iav_broker.c iav_policy.c iav_broker_server.c
+SERVER_SRCS := amba-virt-server.c cavalry_proxy.c amba_virt_slice.c iav_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_slice_lease.c virt_query.c virt_host_ops.c virt_daemon.c virt_ready.c virt_dma_broker.c hmac_sha256.c virt_module_loader.c virt_camera_conf.c virt_gpio.c virt_camera_pipeline.c iav_broker.c iav_policy.c iav_broker_server.c iav_slice_rpc.c iav_low_pool.c virt_low_lease.c virt_iav_guest_slice.c virt_pool_inventory.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 NANOPB_OBJS := pb_common.o pb_encode.o pb_decode.o amba_virt.pb.o
 
@@ -103,7 +103,7 @@ TEST_CFLAGS := -O2 -Wall -Wextra -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../inclu
 test_virt_mem_pool: test_virt_mem_pool.c virt_mem_pool.c
 	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
 
-test_admin_ipc: test_admin_ipc.c virt_admin_ipc.c virt_acl.c virt_mem_pool.c virt_host_ops.c hmac_sha256.c cavalry_proxy.c ../amba_virt_slice.c virt_query.c
+test_admin_ipc: test_admin_ipc.c virt_admin_ipc.c virt_slice_lease.c virt_acl.c virt_mem_pool.c virt_host_ops.c hmac_sha256.c cavalry_proxy.c ../amba_virt_slice.c virt_query.c
 	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
 
 test_virt_query: test_virt_query.c virt_query.c virt_mem_pool.c virt_acl.c cavalry_proxy.c ../amba_virt_slice.c
@@ -187,15 +187,48 @@ virt_mem_pool.host.o: virt_mem_pool.c
 amba_virt_slice.host.o: ../amba_virt_slice.c
 	gcc $(TEST_CFLAGS) -I. -I.. -fsanitize=address,undefined -c -o $@ $<
 
-test_host_cavalry_eve_sync: test/test_main.cxx test/TestHostCavalryEveSync.cxx cavalry_proxy.host.o virt_mem_pool.host.o amba_virt_slice.host.o
-	g++ $(CPPUTEST_CFLAGS) -I.. -o $@ $^ $(CPPUTEST_LDFLAGS)
+virt_slice_lease.host.o: virt_slice_lease.c
+	gcc $(TEST_CFLAGS) -I. -I.. -fsanitize=address,undefined -c -o $@ $<
+
+test_host_cavalry_eve_sync: test/test_main.cxx test/TestHostCavalryEveSync.cxx test/TestHostSliceLease.cxx cavalry_proxy.host.o virt_mem_pool.host.o amba_virt_slice.host.o virt_slice_lease.host.o
+
+test_iav_slice_rpc: test_iav_slice_rpc.c iav_slice_rpc.c iav_slice_client.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
+	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -o $@ $^
+
+test_host_iav_low_pool: test/test_main.cxx test/TestHostIavLowPool.cxx iav_low_pool.c
+	gcc -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 $(IAV_CFLAGS) -I. -include stdint.h -c -o iav_low_pool.host.o iav_low_pool.c
+	g++ -O1 -g -Wall -Wextra -Werror -std=c++17 -I. -Itest $(CPPUTEST_CFLAGS) -o $@ test/test_main.cxx test/TestHostIavLowPool.cxx iav_low_pool.host.o $(CPPUTEST_LDFLAGS)
+
+test_host_iav_low_slice: test/test_main.cxx test/TestHostIavLowSlice.cxx ../iav_low_slice.c
+	gcc -O1 -g -Wall -Wextra -Werror -I.. -c -o iav_low_slice.host.o ../iav_low_slice.c
+	g++ -O1 -g -Wall -Wextra -Werror -std=c++17 -I.. -Itest $(CPPUTEST_CFLAGS) -o $@ test/test_main.cxx test/TestHostIavLowSlice.cxx iav_low_slice.host.o $(CPPUTEST_LDFLAGS)
+
+test_host_low_lease: test/test_main.cxx test/TestHostLowLease.cxx virt_low_lease.c virt_slice_lease.c iav_slice_rpc.c virt_host_ops.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
+	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -c -o virt_low_lease.low.o virt_low_lease.c
+	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -c -o virt_slice_lease.low.o virt_slice_lease.c
+	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -c -o iav_slice_rpc.low.o iav_slice_rpc.c
+	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. -c -o virt_host_ops.low.o virt_host_ops.c
+	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o pb_common.low.o $(NANOPB_DIR)/pb_common.c
+	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o pb_encode.low.o $(NANOPB_DIR)/pb_encode.c
+	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o pb_decode.low.o $(NANOPB_DIR)/pb_decode.c
+	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o amba_virt.pb.low.o $(PROTO_DIR)/amba_virt.pb.c
+	g++ -O1 -g -Wall -Wextra -Werror -std=c++17 -I. -I../include/uapi $(CPPUTEST_CFLAGS) -o $@ test/test_main.cxx test/TestHostLowLease.cxx virt_low_lease.low.o virt_slice_lease.low.o iav_slice_rpc.low.o virt_host_ops.low.o pb_common.low.o pb_encode.low.o pb_decode.low.o amba_virt.pb.low.o $(CPPUTEST_LDFLAGS)
+
+iav_low_pool_pin: iav_low_pool_main.c iav_low_pool.c
+	$(CC) $(CFLAGS) -static -include stdint.h -o $@ iav_low_pool_main.c iav_low_pool.c
+
+iav_low_pool_show: iav_low_pool_show.c iav_low_pool.c
+	$(CC) $(CFLAGS) -static -include stdint.h -o $@ iav_low_pool_show.c iav_low_pool.c
+
+iav_slice_isolation: iav_slice_isolation.c
+	$(CC) $(CFLAGS) -static -o $@ iav_slice_isolation.c
 
 test_host_iav_physical_frame_arm64: $(HOST_CPPUTEST_SRCS) iav_proxy.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
 	aarch64-linux-gnu-g++ $(TEST_CFLAGS) $(IAV_CFLAGS) $(NANOPB_CFLAGS) -I. -std=c++17 -static -o $@ $^ -L../../../third_party/cpputest/aarch64/lib -lCppUTest -lCppUTestExt -lpthread -lm
 
 # ---- IAV broker host tests (plan_iav_virtualization, Envelope 2) ----
 # The broker is C, so it is built with gcc and linked into the CppUTest binary. Sanitizers on.
-IAV_BROKER_C := iav_broker.c iav_policy.c
+IAV_BROKER_C := iav_broker.c iav_policy.c virt_iav_guest_slice.c
 IAV_BROKER_OUT := ../../../build/iav-broker
 IAV_BROKER_CFLAGS := -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined
 IAV_BROKER_CXXFLAGS := -O1 -g -Wall -Wextra -std=c++17 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. -Itest $(IAV_CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined
@@ -209,7 +242,8 @@ $(IAV_BROKER_TSAN_BIN): test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_T
 	mkdir -p $(IAV_BROKER_OUT)/tsanobj
 	gcc -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -fsanitize=thread -c -o $(IAV_BROKER_OUT)/tsanobj/iav_broker.o iav_broker.c
 	gcc -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -fsanitize=thread -c -o $(IAV_BROKER_OUT)/tsanobj/iav_policy.o iav_policy.c
-	g++ -O1 -g -Wall -Wextra -std=c++17 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. -Itest $(IAV_CFLAGS) -fsanitize=thread -o $@ test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_OUT)/tsanobj/iav_broker.o $(IAV_BROKER_OUT)/tsanobj/iav_policy.o -lCppUTest -lCppUTestExt -lpthread
+	gcc -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -fsanitize=thread -c -o $(IAV_BROKER_OUT)/tsanobj/virt_iav_guest_slice.o virt_iav_guest_slice.c
+	g++ -O1 -g -Wall -Wextra -std=c++17 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. -Itest $(IAV_CFLAGS) -fsanitize=thread -o $@ test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_OUT)/tsanobj/iav_broker.o $(IAV_BROKER_OUT)/tsanobj/iav_policy.o $(IAV_BROKER_OUT)/tsanobj/virt_iav_guest_slice.o -lCppUTest -lCppUTestExt -lpthread
 
 test_host_iav_broker_tsan_run: $(IAV_BROKER_TSAN_BIN)
 	setarch $(shell uname -m) -R $(IAV_BROKER_TSAN_BIN) -v

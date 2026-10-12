@@ -96,6 +96,16 @@ int iav_broker_init(struct iav_broker *b, const struct iav_broker_ops *ops,
 	return 0;
 }
 
+void iav_broker_set_guest_pool(struct iav_broker *b, const struct virt_iav_guest_pool *pool)
+{
+	if (b == NULL || pool == NULL)
+		return;
+	pthread_mutex_lock(&b->lock);
+	b->guest_pool = *pool;
+	b->guest_pool_set = 1;
+	pthread_mutex_unlock(&b->lock);
+}
+
 void iav_broker_destroy(struct iav_broker *b)
 {
 	unsigned int i;
@@ -551,6 +561,51 @@ static int op_ioctl(struct iav_broker *b, uint32_t cid, const struct amba_virt_i
 	return reply_build(r, 0, rc < 0 ? -1 : rc, err, 0, 0, buf, out_len);
 }
 
+static int op_slice(struct iav_broker *b, uint32_t cid, const struct amba_virt_iav_req *q,
+		    const uint8_t *arg, struct reply *r)
+{
+	struct amba_virt_iav_slice_req in;
+	struct virt_iav_guest_pool pool;
+	struct virt_iav_guest_req req;
+	struct virt_iav_guest_dma dma;
+	struct iav_session *s;
+	uint32_t window = 0;
+	uint32_t scratch = 0;
+	int set, serr, rc, err;
+
+	if (q->arg_len != sizeof(in))
+		return refuse(r, EMSGSIZE);
+	memcpy(&in, arg, sizeof(in));
+	pthread_mutex_lock(&b->lock);
+	set = b->guest_pool_set;
+	pool = b->guest_pool;
+	pthread_mutex_unlock(&b->lock);
+	if (!set || b->ops.slice_of == NULL || b->ops.slice_of(b->ops.ctx, cid, &window) != 0)
+		return refuse(r, EPERM);
+
+	memset(&req, 0, sizeof(req));
+	req.caller_slice = window;
+	req.claimed_slice = in.claimed_slice;
+	req.partition_id = in.partition_id;
+	req.offset = in.offset;
+	req.length = in.length;
+	req.phys = in.phys;
+	memset(&dma, 0, sizeof(dma));
+	if (virt_iav_guest_slice_admit(&pool, &req, &dma) != 0)
+		return refuse(r, EPERM);
+
+	serr = session_acquire(b, cid, q->handle, &s);
+	if (serr)
+		return refuse(r, -serr);
+	pthread_mutex_lock(&s->lock);
+	errno = 0;
+	rc = b->ops.ioctl(b->ops.ctx, s->fd, q->cmd, (unsigned long)&scratch);
+	err = rc < 0 ? errno : 0;
+	pthread_mutex_unlock(&s->lock);
+	session_release(b, s);
+	return reply_build(r, 0, rc < 0 ? -1 : rc, err, 0, dma.phys, NULL, 0);
+}
+
 static int op_poll(struct iav_broker *b, uint32_t cid, const struct amba_virt_iav_req *q,
 		   struct reply *r)
 {
@@ -719,6 +774,9 @@ int iav_broker_handle(struct iav_broker *b, uint32_t cid, const void *req, size_
 		break;
 	case AMBA_VIRT_IAV_OP_INFO:
 		ret = op_info(b, &q, &r);
+		break;
+	case AMBA_VIRT_IAV_OP_SLICE:
+		ret = op_slice(b, cid, &q, (const uint8_t *)req + sizeof(q), &r);
 		break;
 	default:
 		ret = refuse(&r, ENOSYS);

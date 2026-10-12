@@ -80,6 +80,36 @@ TEST(CavalryEveSync, test_window_length_and_usable_size)
 }
 
 /*
+ * Eight 1 GiB slices from an 8 GiB window keep slice 0 at the parent base
+ * and slice 1 one gibibyte above it. Counts outside 1..8 are rejected.
+ */
+TEST(CavalryEveSync, test_eight_one_gib_slices)
+{
+    const uint32_t page_sz = 4096;
+    const uint64_t gib = 1ULL << 30;
+    struct amba_virt_slice_list list;
+    int ret;
+
+    memset(&list, 0, sizeof(list));
+    ret = amba_virt_slice_compute_geometry(0x100000000ULL, 8 * gib, page_sz, 8, &list);
+    LONGS_EQUAL(0, ret);
+    LONGS_EQUAL(8, list.count);
+    UNSIGNED_LONGS_EQUAL(0, list.slices[0].index);
+    UNSIGNED_LONGS_EQUAL(gib, list.slices[0].slice_size);
+    UNSIGNED_LONGS_EQUAL(gib - page_sz, list.slices[0].usable_size);
+    UNSIGNED_LONGS_EQUAL(0x100000000ULL, list.slices[0].phys);
+    UNSIGNED_LONGS_EQUAL(0x140000000ULL, list.slices[1].phys);
+    UNSIGNED_LONGS_EQUAL(0x100000000ULL + 7 * gib, list.slices[7].phys);
+
+    memset(&list, 0, sizeof(list));
+    ret = amba_virt_slice_compute_geometry(0x100000000ULL, 8 * gib, page_sz, 0, &list);
+    CHECK_TRUE(ret < 0 || list.count == 0);
+    memset(&list, 0, sizeof(list));
+    ret = amba_virt_slice_compute_geometry(0x100000000ULL, 9 * gib, page_sz, 9, &list);
+    CHECK_TRUE(ret < 0 || list.count == 0);
+}
+
+/*
  * Test 2: Unaligned or uneven window produces an empty list
  */
 TEST(CavalryEveSync, test_unaligned_or_uneven_window_rejected)

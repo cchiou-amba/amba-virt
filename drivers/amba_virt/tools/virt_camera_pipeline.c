@@ -13,6 +13,10 @@
  */
 
 #define _GNU_SOURCE
+#include "iav_low_pool.h"
+#include "iav_broker_server.h"
+#include "virt_low_lease.h"
+
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -943,6 +947,19 @@ static int step_late_modules(const struct virt_camera_conf *c)
     return rc;
 }
 
+static int publish_guest_slices(void)
+{
+    uint64_t base = iav_low_pool_pinned_base();
+    uint32_t pid = iav_low_pool_pinned_pid();
+    int rc;
+
+    virt_low_lease_set_partition(pid);
+    rc = virt_low_lease_arm_module(base);
+    if (rc == 0)
+        iav_broker_server_set_guest_pool(base, pid);
+    return rc;
+}
+
 int virt_camera_pipeline_run(const struct virt_camera_conf *conf)
 {
     int rc;
@@ -955,6 +972,12 @@ int virt_camera_pipeline_run(const struct virt_camera_conf *conf)
     STEP(2, "select firmware", step_firmware(&g_p.conf));
     STEP(3, "load the early modules", step_early_modules(&g_p.conf));
     STEP(4, "create the device nodes", step_device_nodes());
+    /*
+     * /dev/iav now exists. Pin the guest pool before starting any DSP,
+     * 3A, camera-power, sensor-module, or resource-script work.
+     */
+    STEP(4, "pin the guest low pool", iav_low_pool_pin_dev());
+    STEP(4, "publish the guest slices", publish_guest_slices());
     STEP(5, "start dsp_monitor_service", start_monitor(&g_p.conf));
     STEP(6, "load the microcode", load_microcode(g_p.conf.firmware_dir));
     STEP(7, "enter idle", enter_idle());

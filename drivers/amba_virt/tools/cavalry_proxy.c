@@ -776,7 +776,26 @@ int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size
 	memset(g_hw_slices, 0, sizeof(g_hw_slices));
 
 	struct amba_virt_slice_list geom_list;
-	if (amba_virt_slice_compute_geometry(phys_base, shm_size, 4096, 2, &geom_list) == 0) {
+	uint32_t bar_count = 0;
+
+	memset(&geom_list, 0, sizeof(geom_list));
+	if (fd_amba_virt >= 0) {
+		if (ioctl(fd_amba_virt, AMBA_VIRT_IOC_ENUM_SLICES, &geom_list) < 0 ||
+		    geom_list.count == 0) {
+			fprintf(stderr, "cavalry_proxy: ENUM_SLICES failed\n");
+			return -1;
+		}
+	} else if (shm_size && (shm_size % (1ULL << 30)) == 0) {
+		uint64_t n = (uint64_t)shm_size / (1ULL << 30);
+
+		if (n >= 1 && n <= MAX_HARDWARE_SLICES)
+			bar_count = (uint32_t)n;
+	}
+	if (fd_amba_virt < 0 &&
+	    (bar_count == 0 ||
+	     amba_virt_slice_compute_geometry(phys_base, shm_size, 4096, bar_count, &geom_list) != 0))
+		geom_list.count = 0;
+	if (geom_list.count > 0) {
 		for (uint32_t s = 0; s < geom_list.count && s < MAX_HARDWARE_SLICES; s++) {
 			g_hw_slices[s].index = geom_list.slices[s].index;
 			g_hw_slices[s].usable_size = geom_list.slices[s].usable_size;

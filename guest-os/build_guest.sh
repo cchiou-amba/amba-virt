@@ -36,7 +36,7 @@ usage() {
 Usage: $0 [options]
 
 Options:
-  --distro=NAME       Target guest OS: ubuntu, alpine, qnx, or all (default: all)
+  --distro=NAME       Target guest OS: ubuntu, alpine, qnx, all (default: all), or <name> of a guest-os/<name>/ that has a build-guest.sh
   --qnx-image         Also build full QNX 8.0 HVM disk image (qnx-8.0-arm64-cloudimg.qcow2)
   --clean             Clean guest output staging directories (preserves cached headers)
   --distclean         Full clean including cached guest kernel headers
@@ -92,6 +92,9 @@ log_step() {
 do_clean() {
     echo "=== Cleaning guest build artifacts ==="
     rm -rf "${UBUNTU_OUT}" "${ALPINE_OUT}" "${QNX_OUT}"
+    for ext in "${SCRIPT_DIR}"/*/build-guest.sh; do
+        [ -f "${ext}" ] && rm -rf "${BUILD_DIR}/$(basename "$(dirname "${ext}")")"
+    done
     make -C "${ROOT_DIR}/guest-os/linux/amba-virt" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/amba-uart" clean 2>/dev/null || true
     make -C "${ROOT_DIR}/guest-os/linux/amba-dma" clean 2>/dev/null || true
@@ -605,8 +608,15 @@ case "${DISTRO}" in
         build_qnx
         ;;
     *)
-        echo "Error: Unsupported distro '${DISTRO}'. Supported: ubuntu, alpine, qnx, all" >&2
-        exit 1
+        # AMBA-GUEST-EXTENSIONS: a guest that ships guest-os/<name>/build-guest.sh defines build_distro() there
+        if [[ "${DISTRO}" =~ ^[a-z0-9_]+$ ]] && [ -f "${SCRIPT_DIR}/${DISTRO}/build-guest.sh" ]; then
+            # shellcheck source=/dev/null
+            source "${SCRIPT_DIR}/${DISTRO}/build-guest.sh"
+            build_distro
+        else
+            echo "Error: Unsupported distro '${DISTRO}'. Supported: ubuntu, alpine, qnx, all, or a guest-os/<name>/ with a build-guest.sh" >&2
+            exit 1
+        fi
         ;;
 esac
 

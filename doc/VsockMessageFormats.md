@@ -67,6 +67,7 @@ Both kinds ride inside the existing `struct amba_virt_msg` framing
 |---|---|---|
 | Control RPC (camera, Cavalry, DMA, admin, IAV tap) | Nanopb | `protocol/amba_virt/` |
 | IAV `/dev/iav` proxy (`AMBA_VIRT_MSG_IAV_REQ` / `_RESP`) | Fixed-layout frame | `drivers/amba_virt/include/uapi/amba_virt_iav.h` |
+| Private IAV slice query and release (`AMBA_VIRT_MSG_IAV_SLICE_REQ` / `_RESP`) | Nanopb | `protocol/amba_virt/amba_virt.proto` |
 
 ## 5. Revisit
 

@@ -19,6 +19,10 @@ message RpcEnvelope {
   oneof body {
     IavTapRunRequest iav_tap_run_request = 10;
     IavTapRunResponse iav_tap_run_response = 11;
+    IavSliceQueryRequest iav_slice_query_request = 12;
+    IavSliceQueryResponse iav_slice_query_response = 13;
+    IavSliceReleaseRequest iav_slice_release_request = 14;
+    IavSliceReleaseResponse iav_slice_release_response = 15;
     RpcError error = 100;
   }
 }
@@ -51,4 +55,25 @@ message IavTapRunResponse {
 message RpcError {
   int32 status = 1;
   string detail = 2;
+}
+
+/* The guest asks which private IAV slice EVE already reserved for its CID. */
+message IavSliceQueryRequest {
+  uint32 window_kind = 1;
+}
+
+message IavSliceQueryResponse {
+  int32 status = 1;
+  uint32 window_id = 2;
+  uint32 usable_length = 3;
+}
+
+/* Symmetric with the query. The server acknowledges it and keeps the lease. */
+message IavSliceReleaseRequest {
+  uint32 window_id = 1;
+}
+
+message IavSliceReleaseResponse {
+  int32 status = 1;
+  bool lease_retained = 2;
 }

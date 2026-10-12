@@ -122,7 +122,7 @@
       "assigngrp": "amba_shm",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
-        "shmpath": "/dev/amba_virt_shm",
+        "shmassign": "server",
         "shmsize": "1G"
       },
       "usagePolicy": {},
@@ -168,8 +168,24 @@
       "assigngrp": "amba_shm1",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
-        "shmpath": "/dev/amba_virt_shm1",
+        "shmassign": "server",
         "shmsize": "1G"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_iav_slice",
+      "phyaddrs": {},
+      "logicallabel": "amba_iav_slice",
+      "assigngrp": "amba_iav_slice",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmassign": "server",
+        "pool": "low"
       },
       "usagePolicy": {},
       "cost": 0,

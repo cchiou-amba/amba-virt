@@ -23,6 +23,9 @@
 #include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
 #include "virt_query.h"
+#include "virt_slice_lease.h"
+#include "virt_low_lease.h"
+#include "virt_pool_inventory.h"
 
 static pthread_t g_admin_thread;
 static int g_admin_running = 0;
@@ -35,6 +38,70 @@ __attribute__((weak)) int server_get_geometry_info(uint64_t *window_phys, uint64
 	if (window_bytes) *window_bytes = 0;
 	if (slices) *slices = 0;
 	if (matched) *matched = 0;
+	return 0;
+}
+
+__attribute__((weak)) int server_get_slice(uint32_t index, uint64_t *phys, uint64_t *bytes, uint32_t *usable)
+{
+	(void)index;
+	if (phys)
+		*phys = 0;
+	if (bytes)
+		*bytes = 0;
+	if (usable)
+		*usable = 0;
+	return -1;
+}
+
+int virt_admin_format_pools(char *buf, size_t len)
+{
+	struct virt_pool_view cavalry;
+	struct virt_pool_view low;
+	uint64_t parent = 0, bytes = 0, slice_bytes = 0;
+	uint32_t count = 0, usable = 0;
+	uint64_t low_base = 0;
+	uint32_t low_pid = 0;
+	int matched = 0;
+	uint32_t i;
+
+	if (!buf || len == 0)
+		return -1;
+	memset(&cavalry, 0, sizeof(cavalry));
+	memset(&low, 0, sizeof(low));
+	server_get_geometry_info(&parent, &bytes, &count, &matched);
+	cavalry.name = "cavalry";
+	cavalry.parent_base = parent;
+	cavalry.parent_bytes = bytes;
+	cavalry.count = count > VIRT_POOL_INVENTORY_MAX ? VIRT_POOL_INVENTORY_MAX : count;
+	cavalry.geometry_match = matched;
+	for (i = 0; i < cavalry.count; i++) {
+		if (server_get_slice(i, &cavalry.slices[i].base, &slice_bytes, &usable) == 0) {
+			cavalry.slices[i].bytes = slice_bytes;
+			cavalry.slices[i].leased = virt_slice_lease_index_used(i);
+			if (i == 0) {
+				cavalry.slice_bytes = slice_bytes;
+				cavalry.usable = usable;
+			}
+		}
+	}
+	low.name = "low";
+	low.count = VIRT_LOW_LEASE_COUNT;
+	low.slice_bytes = VIRT_LOW_LEASE_BYTES;
+	low.usable = VIRT_LOW_LEASE_USABLE;
+	low.parent_bytes = VIRT_LOW_LEASE_COUNT * VIRT_LOW_LEASE_BYTES;
+	if (virt_low_lease_geometry(&low_base, &low_pid) == 0) {
+		low.parent_base = low_base;
+		low.geometry_match = 1;
+	}
+	for (i = 0; i < low.count; i++) {
+		low.slices[i].base = low.parent_base + (uint64_t)i * low.slice_bytes;
+		low.slices[i].bytes = low.slice_bytes;
+		low.slices[i].leased = virt_low_lease_index_used(i);
+	}
+	if (virt_pool_inventory_write(buf, len, &cavalry, &low) != 0) {
+		snprintf(buf, len, "ERR POOLS\n");
+		return -1;
+	}
 	return 0;
 }
 
@@ -301,6 +368,18 @@ static void handle_client(int client_fd)
 		} else {
 			snprintf(resp_buf, sizeof(resp_buf), "ERR FIRMWARE_QUERY_FAILED (%d)\n", ret);
 		}
+	} else if (strcmp(cmd, "RESERVE_SLICE") == 0 ||
+		   strcmp(cmd, "RESERVE_SLICE_AT") == 0 ||
+		   strcmp(cmd, "RESERVE_SLICE_MIN") == 0 ||
+		   strcmp(cmd, "RELEASE_SLICE") == 0 ||
+		   strcmp(cmd, "QUERY_SLICE") == 0) {
+		virt_slice_lease_admin(req_buf, resp_buf, sizeof(resp_buf));
+	} else if (strcmp(cmd, "RESERVE_LOW") == 0 ||
+		   strcmp(cmd, "RELEASE_LOW") == 0 ||
+		   strcmp(cmd, "QUERY_LOW") == 0) {
+		virt_low_lease_admin(req_buf, resp_buf, sizeof(resp_buf));
+	} else if (strcmp(cmd, "POOLS") == 0) {
+		virt_admin_format_pools(resp_buf, sizeof(resp_buf));
 	} else {
 		snprintf(resp_buf, sizeof(resp_buf), "ERR UNKNOWN_CMD\n");
 	}

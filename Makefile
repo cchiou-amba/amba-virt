@@ -212,7 +212,8 @@ amba-virt-image: linuxkit-ca-image $(DRIVER_DEPENDENCY)
 	m=$(AMBA_VIRT_ROOTFS)/lib/modules/$$rel/extra; install -d $$m; \
 	for k in $$(cat $$d/modules.conf $$d/early-modules.conf $$d/late-modules.conf | sed 's/#.*//' | awk 'NF {print $$1}' | sort -u); do \
 		install -m 0644 $(BUILD_DIR)/modules/$$k $$m/$$k; \
-	done
+	done; \
+	install -m 0644 $(BUILD_DIR)/modules/amba_iav_pool.ko $$m/amba_iav_pool.ko
 	install -d $(AMBA_VIRT_ROOTFS)/etc/init.d
 	ln -s /usr/bin/amba-virt-server $(AMBA_VIRT_ROOTFS)/etc/init.d/021-amba-virt-server
 	set -e; hash=$$(tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -C $(AMBA_VIRT_ROOTFS) -cf - . | sha256sum | cut -c1-40); \
@@ -532,6 +533,24 @@ deploy-hvm-ubuntu:
 
 deploy-hvm-qnx:
 	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-qnx) --reload --enable-serial --test
+
+# AMBA-GUEST-EXTENSIONS: guests with their own recipe under guest-os/<name>/ (build-guest.sh, deploy-guest.conf,
+# <name>-build/) get guest-<name>, guest-<name>-image, guest-<name>-install and deploy-hvm-<name>. They are not part of guest-all.
+guest-%-image:
+	@$(ROOT_DIR)/guest-os/$*/$*-build/build.sh
+
+guest-%-install:
+	@if [ -z "$$ZCLI_TOKEN" ]; then \
+		echo "Error: ZCLI_TOKEN is unset in environment. Export ZCLI_TOKEN before running." >&2; \
+		exit 1; \
+	fi
+	@$(ROOT_DIR)/guest-os/$*/$*-build/deploy.sh
+
+guest-%:
+	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=$*
+
+deploy-hvm-%:
+	@$(ROOT_DIR)/guest-os/deploy_guest.sh $(or $(TARGET),n1-655-devkit-$*) --reload --enable-serial --test
 
 # ==============================================================================
 # U-Boot Bootloader & Host Firmware Packaging Targets
