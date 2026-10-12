@@ -239,6 +239,70 @@
       "cost": 0,
       "vfs": null,
       "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_iav_dec",
+      "phyaddrs": {},
+      "logicallabel": "amba_iav_dec",
+      "assigngrp": "amba_iav_dec",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_iav_dec",
+        "shmsize": "8M"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_iav_dec1",
+      "phyaddrs": {},
+      "logicallabel": "amba_iav_dec1",
+      "assigngrp": "amba_iav_dec1",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_iav_dec1",
+        "shmsize": "8M"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_iav_ovl",
+      "phyaddrs": {},
+      "logicallabel": "amba_iav_ovl",
+      "assigngrp": "amba_iav_ovl",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_iav_ovl",
+        "shmsize": "8M"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
+    },
+    {
+      "ztype": "IO_TYPE_OTHER",
+      "phylabel": "amba_iav_ovl1",
+      "phyaddrs": {},
+      "logicallabel": "amba_iav_ovl1",
+      "assigngrp": "amba_iav_ovl1",
+      "usage": "ADAPTER_USAGE_UNSPECIFIED",
+      "cbattr": {
+        "shmpath": "/dev/amba_virt_iav_ovl1",
+        "shmsize": "8M"
+      },
+      "usagePolicy": {},
+      "cost": 0,
+      "vfs": null,
+      "parentassigngrp": ""
     }
   ]
 }

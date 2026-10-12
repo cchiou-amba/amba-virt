@@ -73,10 +73,10 @@ endif
 
 .PHONY: all help eve eve-kernel eve-kernel-headers eve-kernel-keys \
 	amba-virt-image \
-	drivers camera-drivers $(OOT_DRIVERS) everything clean distclean \
+	drivers camera-drivers camera-ambds $(OOT_DRIVERS) everything clean distclean \
 	diag test-gdma \
 	mode set-mode-development set-mode-production mode-dev mode-prod \
-	guest guest-all guest-ubuntu guest-ubuntu-image guest-ubuntu-install \
+	iav-ref guest guest-all guest-ubuntu guest-ubuntu-image guest-ubuntu-install \
 	guest-alpine guest-qnx guest-qnx-image \
 	guest-windows clean-guest distclean-guest \
 	u-boot host-mkimage host_mkimage u-boot-pkg u-boot-package clean-uboot
@@ -192,6 +192,8 @@ amba-virt-image: linuxkit-ca-image $(DRIVER_DEPENDENCY)
 	rm -rf $(AMBA_VIRT_ROOTFS)
 	$(MAKE) -C $(AMBA_VIRT_CAMERA) CROSS_COMPILE=aarch64-linux-gnu- install DESTDIR=$(AMBA_VIRT_ROOTFS)
 	install -m 0755 $(AMBA_VIRT_TOOLS)/amba-virt-server $(AMBA_VIRT_TOOLS)/amba-virt-ctl $(AMBA_VIRT_ROOTFS)/usr/bin/
+	install -d $(AMBA_VIRT_ROOTFS)/usr/share/amba-virt/lua_scripts
+	install -m 0644 $(AMBA_VIRT_TOOLS)/lua/*.lua $(AMBA_VIRT_ROOTFS)/usr/share/amba-virt/lua_scripts/
 	set -e; for l in $(AMBA_VIRT_SYSROOT_LIBS); do \
 		src=$$(readlink -f $$(aarch64-linux-gnu-gcc -print-file-name=$$l)); \
 		install -m 0755 $$src $(AMBA_VIRT_ROOTFS)$(AMBA_VIRT_LIBDIR)/$$l; \
@@ -205,7 +207,7 @@ amba-virt-image: linuxkit-ca-image $(DRIVER_DEPENDENCY)
 	set -e; d=$(AMBA_VIRT_ROOTFS)/etc/amba-virt; install -d $$d; \
 	printf '%s\n' '# Loaded by amba-virt-server when it starts, before any guest connects.' \
 		'ambcma.ko ama_enable=1 dsp_buf_size=0x40000000' 'cavalry.ko' 'amba_virt.ko' 'amba_virt_iav_win.ko' > $$d/modules.conf; \
-	for c in early-modules late-modules camera; do install -m 0644 $(AMBA_VIRT_TOOLS)/$$c.conf.example $$d/$$c.conf; done; \
+	for c in early-modules late-modules camera iav; do install -m 0644 $(AMBA_VIRT_TOOLS)/$$c.conf.example $$d/$$c.conf; done; \
 	rel=$$(/sbin/modinfo -F vermagic $(BUILD_DIR)/modules/amba_virt.ko | cut -d' ' -f1); \
 	m=$(AMBA_VIRT_ROOTFS)/lib/modules/$$rel/extra; install -d $$m; \
 	for k in $$(cat $$d/modules.conf $$d/early-modules.conf $$d/late-modules.conf | sed 's/#.*//' | awk 'NF {print $$1}' | sort -u); do \
@@ -380,7 +382,37 @@ camera-drivers: $(call my-depend,eve-kernel-headers)
 	$(call camera-module,$(CAMERA_VIN)/bridges/ambrg,-I$(CAMERA_VIN)/bridges/ambrg,$(CAMERA_DSP)/Module.symvers $(DRIVERS_DIR)/private/vin_vout_monitor/Module.symvers,ambrg) && \
 	$(call camera-module,$(CAMERA_VIN)/bridges/maxim_96712,-I$(CAMERA_VIN)/bridges/ambrg -I$(CAMERA_VIN)/bridges/maxim_96712,$(CAMERA_DSP)/Module.symvers $(DRIVERS_DIR)/private/vin_vout_monitor/Module.symvers $(CAMERA_VIN)/bridges/ambrg/Module.symvers,max96712) && \
 	$(call camera-module,$(CAMERA_VIN)/sensors/omnivision_os08a10_mipi_brg,-I$(CAMERA_VIN)/bridges/ambrg -I$(CAMERA_VIN)/bridges/maxim_96712 -I$(CAMERA_VIN)/sensors/omnivision_os08a10_mipi_brg,$(CAMERA_DSP)/Module.symvers $(DRIVERS_DIR)/private/vin_vout_monitor/Module.symvers $(CAMERA_VIN)/bridges/ambrg/Module.symvers,os08a10_mipi_brg) && \
-	$(call camera-module,$(DRIVERS_DIR)/platform/vout/amblcd/mipi_dsi_lcd_r9611,-I$(CAMERA_DSP)/dsp/include -I$(CAMERA_DSP)/iav/include,$(CAMERA_DSP)/Module.symvers,lcd_r9611)
+	$(call camera-module,$(DRIVERS_DIR)/platform/vout/amblcd/mipi_dsi_lcd_r9611,-I$(CAMERA_DSP)/dsp/include -I$(CAMERA_DSP)/iav/include,$(CAMERA_DSP)/Module.symvers,lcd_r9611) && \
+	$(MAKE) --no-print-directory camera-ambds
+
+# Virtual video source (the "dummy sensor"): a VIN with no hardware behind it. The IAV driver puts every decoder
+# channel on a virtual VIN, so hardware JPEG decode beside the camera needs it. The upstream Kbuild belongs to
+# Cooper's build system, so the three sources are copied to build/ and built there with a plain Kbuild; the
+# upstream tree stays untouched.
+AMBDS_SRC := $(CAMERA_VIN)/sensors/ambds
+AMBDS_BUILD := $(BUILD_DIR)/camera-chain/ambds
+
+camera-ambds: $(call my-depend,eve-kernel-headers)
+	@mkdir -p $(BUILD_DIR)/modules $(AMBDS_BUILD)
+	@hdr=$$(echo $(BUILD_DIR)/usr/src/linux-headers-*); \
+	sign_bin=$(BUILD_DIR)/bin/sign-file; \
+	key=$(BUILD_DIR)/certs/signing_key.pem; \
+	cert=$(BUILD_DIR)/certs/signing_key.x509; \
+	if [ ! -x "$$sign_bin" ] || [ ! -f "$$key" ]; then \
+		echo "camera-ambds: sign-file or signing key missing in $(BUILD_DIR)" >&2; exit 1; \
+	fi; \
+	if [ ! -f "$(CAMERA_DSP)/Module.symvers" ]; then \
+		echo "camera-ambds: $(CAMERA_DSP)/Module.symvers missing; build ambvideo first" >&2; exit 1; \
+	fi; \
+	cp -f $(AMBDS_SRC)/ambds.c $(AMBDS_SRC)/ambds.h $(AMBDS_SRC)/ambds_table.c $(AMBDS_BUILD)/ && \
+	echo "obj-m := ambds.o" > $(AMBDS_BUILD)/Kbuild && \
+	echo "Building camera-chain driver: ambds..." && \
+	$(MAKE) -C $$hdr M=$(AMBDS_BUILD) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- clean && \
+	$(MAKE) -C $$hdr M=$(AMBDS_BUILD) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+		EXTRA_CFLAGS="$(CAMERA_CFLAGS)" KBUILD_EXTRA_SYMBOLS="$(CAMERA_DSP)/Module.symvers" modules && \
+	echo "Signing $(AMBDS_BUILD)/ambds.ko with $$(basename $$key)..." && \
+	"$$sign_bin" sha256 "$$key" "$$cert" $(AMBDS_BUILD)/ambds.ko && \
+	cp -f $(AMBDS_BUILD)/ambds.ko $(BUILD_DIR)/modules/
 
 $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 	@mkdir -p $(BUILD_DIR)/modules $(BUILD_DIR)/firmware
@@ -450,6 +482,11 @@ guest: guest-all
 
 guest-all:
 	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=all
+
+# The IAV reference applications (plan_iav_virtualization_phase2, section 4a): static aarch64, one binary for the bare
+# board and the guests.
+iav-ref:
+	@$(MAKE) --no-print-directory -C $(ROOT_DIR)/guest-os/apps/iav-ref
 
 guest-ubuntu:
 	@$(ROOT_DIR)/guest-os/build_guest.sh --distro=ubuntu

@@ -7,7 +7,10 @@
 # Copyright (C) 2026, Ambarella International LLC
 
 firmware_dir=/usr/lib/amba-virt/firmware
-resource_script=/usr/share/ambarella/lua_scripts/n1_655_vin0_1080p_linear.lua
+# The resource script is amba-virt's own: Cooper's n1_655_vin0_1080p_linear.lua plus a JPEG decoder channel on a
+# virtual video source (the ambds module in late-modules.conf), which gives guests hardware JPEG decode beside the
+# camera. For the plain camera pipeline without a decoder use /usr/share/ambarella/lua_scripts/n1_655_vin0_1080p_linear.lua.
+resource_script=/usr/share/amba-virt/lua_scripts/n1_655_vin0_1080p_linear_plus_jpeg_decoder.lua
 vout_script=/usr/share/ambarella/lua_scripts/vout0_dsi.lua
 app_img_profile=10
 poc_chip=/dev/gpiochip0

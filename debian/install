@@ -5,6 +5,7 @@ drivers/amba_virt/amba_virt.ko usr/lib/amba-virt/modules/
 drivers/amba_virt/amba_virt_uart.ko usr/lib/amba-virt/modules/
 drivers/amba_virt/amba_virt_dma.ko usr/lib/amba-virt/modules/
 drivers/amba_virt/tools/camera.conf.example etc/amba-virt/
+drivers/amba_virt/tools/lua/n1_655_vin0_1080p_linear_plus_jpeg_decoder.lua usr/share/amba-virt/lua_scripts/
 drivers/amba_virt/tools/early-modules.conf.example usr/share/amba-virt/
 drivers/amba_virt/tools/late-modules.conf.example usr/share/amba-virt/
 build/cooper-golden/root/lib/firmware/cavalry.bin usr/lib/amba-virt/firmware/
