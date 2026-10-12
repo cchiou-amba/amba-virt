@@ -42,6 +42,13 @@ public:
     void setPollReady(bool ready);
     void advance(uint64_t ms);
     void setSeed(uint32_t seed);
+    /* Let the ioctls of the primary set reach the driver without a violation. */
+    void allowPrimarySet(bool on) { _primarySet = on; }
+    /* The guest id the broker is told is the primary client; 0: none. */
+    void setPrimaryCid(uint32_t cid) { _primaryCid = cid; }
+    /* Keep a copy of the argument of the next call of cmd that reaches the driver (len bytes). */
+    void captureArgOf(unsigned long cmd, size_t len);
+    std::vector<uint8_t> capturedArg();
     /* Run something inside the next open, before it returns, to race it against a disconnect. */
     void setOpenHook(std::function<void()> hook);
 
@@ -66,6 +73,11 @@ public:
     static const uint64_t BsbBase = 0x84300000ull;
     static const uint64_t BsbLen = 0xa00000ull;
     static const uint64_t BsbWindow = 0x1000000ull;
+    static const uint64_t DecBase = 0x91900000ull;
+    static const uint64_t DecLen = 0x600000ull;
+    static const uint64_t DecWindow = 0x800000ull;
+    static const uint64_t OvlBase = 0x28000000ull;
+    static const uint64_t OvlLen = 0x800000ull;
     static const unsigned int BlockMaxMs = 2000;
 
 private:
@@ -91,6 +103,12 @@ private:
     int _openErr;
     int _eagain;
     unsigned long _failCmd;
+    unsigned long _capCmd;
+    size_t _capLen;
+    std::vector<uint8_t> _capBuf;
+    bool _primarySet;
+    uint32_t _primaryCid;
+    static int cIsPrimary(void *ctx, uint32_t cid);
     int _failErr;
     bool _pollReady;
     uint64_t _now;

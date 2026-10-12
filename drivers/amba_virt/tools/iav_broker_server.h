@@ -24,6 +24,14 @@
  * broker does not start, and requests are refused.
  */
 int iav_broker_server_init(int dev_fd, enum iav_profile profile);
+
+/*
+ * The ivshmem slice whose guest gets IAV_PROFILE_PRIMARY: the only guest that may configure and
+ * run the pipeline. The guest is the one the kernel has bound to that slice, so the hypervisor's
+ * choice of which app holds which slice decides it, and a guest cannot claim it. Negative, the
+ * default, means none. Call before iav_broker_server_init.
+ */
+void iav_broker_server_set_primary_slice(int slice);
 void iav_broker_server_shutdown(void);
 
 /* True once the broker is running. */

@@ -1,0 +1,212 @@
+# IAV ioctl review record.
+# One row per ioctl of the IAV driver: name, a one-line description in our own words, and the reason the call is not
+# served (empty when it is served). The support table in doc/IavVirtualization.md is generated from this file and
+# the broker's allow-list by tools/iav-policy/gen_iav_support_table.py. Edit the reason when a phase serves a call
+# or when the reason changes; the host test fails when this file and the allow-list disagree.
+#
+# Copyright (C) 2026, Ambarella International LLC
+IAV_IOC_ABORT_ENCODE	Abort a stream start or stop that is still in transition.	
+IAV_IOC_ALLOC_ANON_MEM_PART	Allocate an anonymous memory partition the application can map.	allocates or frees memory the guest windows are built from; the server owns it
+IAV_IOC_ALLOC_ANON_MEM_PART_FD	Allocate an anonymous partition and return a dma-buf file descriptor for it.	returns a file descriptor a guest cannot hold
+IAV_IOC_ALLOC_MEM_PART	Allocate a named IAV/DSP memory partition.	allocates or frees memory the guest windows are built from; the server owns it
+IAV_IOC_APPLY_CANVAS_FRAME_SYNC_PROC	Apply canvas frame-synchronized operations.	
+IAV_IOC_APPLY_FRAME_SYNC_PROC	Apply frame-synchronized operations for the video DSP.	
+IAV_IOC_APPLY_IDSP_ENC_SYNC_PROC	Apply frame-synchronized operations between the image DSP and the encoder.	
+IAV_IOC_APPLY_IDSP_SYNC_PROC	Apply frame-synchronized operations at the image DSP stage.	
+IAV_IOC_APPLY_MULTI_REGION_DPTZ_CTRL	Apply multi-region digital pan/tilt/zoom parameters.	
+IAV_IOC_APPLY_VIDEO_PROC	Apply the video processing set up by the configuration call (privacy mask, DPTZ, canvas and others).	
+IAV_IOC_APPLY_WARP_CTRL	Apply lens-distortion (LDC) and fisheye warp parameters.	
+IAV_IOC_APPLY_WARP_CTRL_IDSP_FRAME_SYNC	Apply warp parameters synchronized to an image DSP frame.	
+IAV_IOC_CE_GO_MAP_HANDSHAKE_BUFFER	Hand a contrast-enhancement gain/offset map buffer to the DSP.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_CE_GO_MAP_REQUEST_BUFFER	Take a contrast-enhancement gain/offset map buffer for processing.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_CFG_CANVAS_FRAME_SYNC_PROC	Configure canvas frame-synchronized operations.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_CFG_FRAME_SYNC_PROC	Configure frame-synchronized operations.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_CFG_MULTI_REGION_DPTZ_CTRL	Configure multi-region digital pan/tilt/zoom parameters.	
+IAV_IOC_CFG_VIDEO_PROC	Configure privacy mask, digital pan/tilt/zoom and related processing.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_CFG_WARP_CTRL	Configure lens-distortion and fisheye warp parameters.	carries offsets into a data partition the guest has no window for; planned with that window (Phase D)
+IAV_IOC_CLEAR_POLL_EVENT_CFG	Clear the descriptor events configured for poll.	
+IAV_IOC_CREATE_DECODER	Create a decoder instance (type, size and its part of the decode buffer).	
+IAV_IOC_CUSTOM_CMDS	Send customized commands to the driver.	raw driver command channel; refused for any guest
+IAV_IOC_DECODE_JPEG	Decode one JPEG picture from the decode buffer into a frame.	
+IAV_IOC_DECODE_SPEED	Change the playback speed and direction.	
+IAV_IOC_DECODE_START	Start the decode process.	
+IAV_IOC_DECODE_STOP	Stop the decode process.	
+IAV_IOC_DECODE_TRICK_PLAY	Pause, step or otherwise control playback.	
+IAV_IOC_DECODE_VIDEO	Submit video bitstream data to a decoder.	
+IAV_IOC_DESTROY_DECODER	Destroy a decoder instance.	
+IAV_IOC_DRV_DSP_INFO	Read driver and DSP information.	
+IAV_IOC_EFM_GET_POOL_INFO	Read the external frame manager (EFM) pool information.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_EFM_HANDSHAKE_FRAME	Hand a processed external frame back to the DSP for encoding.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_EFM_RELEASE_ALL_FRAMES	Release every EFM frame buffer the application holds.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_EFM_REQUEST_FRAME	Take one EFM frame buffer to fill or process.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_EFM_SET_EXT_POOL	Provide an application-owned EFM buffer pool.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_ENABLE_DRAM_TEST	Run a DRAM stress test: the DSP reads and writes DRAM continuously.	saturates DRAM for the DSP; test only
+IAV_IOC_ENABLE_PREVIEW	Start the preview pipeline.	
+IAV_IOC_ENTER_DECODE_MODE	Put the video system into decode mode.	
+IAV_IOC_ENTER_IDLE	Stop preview and bring the driver to the idle state.	
+IAV_IOC_FEED_CANVAS_BUF	Feed a buffer to a canvas in manual-feed mode.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_FEED_PYRAMID_BUF	Feed a buffer to the pyramid scaler in manual-feed mode.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_FEED_RAW_BUF	Feed a raw buffer to a channel in manual-feed mode.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_FLUSH_FRAMEDESC	Flush a stream's queued frame descriptors, optionally forcing an IDR frame first.	drops queued frame descriptors for every consumer of a stream and can wait 5 s, as long as the guest call deadline; needs a longer per-call deadline (Phase B)
+IAV_IOC_FREE_MEM_PART	Free a named or anonymous memory partition.	allocates or frees memory the guest windows are built from; the server owns it
+IAV_IOC_GDMA_COPY	Copy a 2-D block between memory partitions with the GDMA engine.	carries physical addresses a guest must not supply; planned by offset only (Phase D)
+IAV_IOC_GET_AUDIT_CONFIG	Read the driver audit (call logging) configuration.	
+IAV_IOC_GET_BLUR_COLOR	Read the blur color tables.	
+IAV_IOC_GET_BLUR_INSERT	Read the blur (privacy) areas inserted into a stream.	carries offsets into a data partition the guest has no window for; planned with that window (Phase D)
+IAV_IOC_GET_CANVAS_CONFIG	Read the configuration of a canvas.	
+IAV_IOC_GET_CANVAS_FRAME_SYNC_PROC	Read the canvas frame-synchronized operation configuration.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_GET_CHAN_CONFIG	Read the configuration of a channel.	
+IAV_IOC_GET_CHIP_ID	Read the chip identification once the DSP has booted.	
+IAV_IOC_GET_DEBUG_CONFIG	Read the driver debug configuration.	debug and test only
+IAV_IOC_GET_DSP_HEALTH_CONFIG	Read the DSP health guard configuration.	
+IAV_IOC_GET_FPS_SUGGEST	Read the suggested frame rate of each stream.	
+IAV_IOC_GET_FRAME_SYNC_PROC	Read the frame-synchronized operation configuration.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_GET_H264_CONFIG	Read the H.264 encoding configuration of a stream.	
+IAV_IOC_GET_H265_CONFIG	Read the H.265 encoding configuration of a stream.	
+IAV_IOC_GET_IAV_STATE	Read the driver state (idle, preview, encoding, decoding and so on).	
+IAV_IOC_GET_ISP_NN_CFG	Read the neural-network parameters of the image pipeline.	carries physical addresses a guest must not supply; planned by offset only if an application needs it (Phase D)
+IAV_IOC_GET_MEM_LAYOUT_RESOURCE	Read the memory layout resource configuration.	
+IAV_IOC_GET_MJPEG_CONFIG	Read the MJPEG quality and chroma format of a stream.	
+IAV_IOC_GET_MULTI_REGION_DPTZ_CTRL	Read the multi-region digital pan/tilt/zoom parameters.	
+IAV_IOC_GET_OVERLAY_INSERT	Read the overlays inserted into a stream.	
+IAV_IOC_GET_POSTP_SCALE_CTRL	Read the post-processing scale control of a stream.	
+IAV_IOC_GET_PYRAMID_CFG	Read the pyramid scaler configuration of a channel.	
+IAV_IOC_GET_RAW_ENCODE	Read the raw-encode configuration.	
+IAV_IOC_GET_STREAM_CONFIG	Read the configuration of a stream.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_GET_STREAM_RESOURCE	Read the resources reserved for streams.	
+IAV_IOC_GET_SYSTEM_RESOURCE	Read the system resource limits (channels, streams, buffers).	
+IAV_IOC_GET_VCAP_CFG	Read the video capture (VCAP) configuration.	
+IAV_IOC_GET_VIDEO_PROC	Read the video processing configuration.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_GET_VIN_COMPAND_CFG	Read the VIN companding configuration.	
+IAV_IOC_GET_VIN_IDSP_CFG	Read the VIN image DSP configuration.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_GET_WARP_CTRL	Read the warp parameters.	carries offsets into a data partition the guest has no window for; planned with that window (Phase D)
+IAV_IOC_GET_YUV_REMAP_INSERT	Read the YUV remap areas inserted into a stream.	carries offsets into a data partition the guest has no window for; planned with that window (Phase D)
+IAV_IOC_IMG_GET_IDSP_CFG	Read the image DSP debug information.	debug and test only
+IAV_IOC_IMG_GET_IDSP_CFG_V2	Read the second version of the image DSP debug information.	debug and test only
+IAV_IOC_IMG_GET_LATEST_STATISTICS	Copy out the latest 3A statistics (CFA, RGB and YUV domains).	3A statistics belong to the Dom0 3A service; the calls carry user pointers that need inline marshaling (Phase D)
+IAV_IOC_IMG_GET_LATEST_STATISTICS_MAP	Map the latest 3A statistics.	3A statistics belong to the Dom0 3A service; the calls carry user pointers that need inline marshaling (Phase D)
+IAV_IOC_IMG_GET_MISC_INFO	Read miscellaneous image pipeline information (extra raw).	3A statistics belong to the Dom0 3A service; the calls carry user pointers that need inline marshaling (Phase D)
+IAV_IOC_IMG_GET_STATISTICS	Copy out the 3A statistics of a given frame.	3A statistics belong to the Dom0 3A service; the calls carry user pointers that need inline marshaling (Phase D)
+IAV_IOC_IMG_GET_STATISTICS_MAP	Map the 3A statistics of a given frame.	3A statistics belong to the Dom0 3A service; the calls carry user pointers that need inline marshaling (Phase D)
+IAV_IOC_IMG_GET_STATISTICS_REPORT_RATE	Read how often statistics are reported.	
+IAV_IOC_IMG_GET_VIN_PTS_INFO	Read VIN timestamp information.	
+IAV_IOC_IMG_SETUP_IDSP_DEBUG	Configure image DSP debugging.	debug and test only
+IAV_IOC_IMG_SET_STATISTICS_REPORT_RATE	Set how often statistics are reported.	
+IAV_IOC_LEAVE_DECODE_MODE	Leave decode mode.	
+IAV_IOC_QUERY_DECODE_BSB	Query the state of a decoder's bitstream buffer.	
+IAV_IOC_QUERY_DECODE_STATUS	Query the decoding status and the decoded picture information.	
+IAV_IOC_QUERY_DESC	Query frame descriptors: encoded frames, canvas, pyramid, raw and other frame-based data.	
+IAV_IOC_QUERY_ENC_BUF_CAP	Query the capabilities of a source buffer.	
+IAV_IOC_QUERY_ENC_MODE_CAP	Query which encode functions the system supports in a given mode.	
+IAV_IOC_QUERY_IAV_CAP	Query the unified system capabilities.	
+IAV_IOC_QUERY_INFO	Query driver information (boot mode, version, per-stream and per-channel details) selected by an info id.	
+IAV_IOC_QUERY_MEMBLOCK	Query the address and size of the memory partitions shared with applications.	
+IAV_IOC_QUERY_MEM_LAYOUT_INFO	Query the resulting memory layout (partition addresses and sizes).	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_REGISTER_ANON_MEM_PART	Register an existing memory range as an anonymous partition.	allocates or frees memory the guest windows are built from; the server owns it
+IAV_IOC_RELEASE_CANVAS_BUF	Release a canvas buffer locked by a descriptor query.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_RELEASE_PYRAMID_BUF	Release a pyramid buffer locked by a descriptor query.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_RELEASE_RAW_BUF	Release a raw buffer locked by a descriptor query.	hands buffers between the application and the DSP by offset or file descriptor; needs windows over those buffers (Phase D)
+IAV_IOC_RESET	Reset the driver and the DSP to the initial state.	resets the driver and the DSP for every client
+IAV_IOC_SET_AUDIT_CONFIG	Set the driver audit (call logging) configuration.	
+IAV_IOC_SET_BLUR_COLOR	Set the blur color tables.	
+IAV_IOC_SET_BLUR_INSERT	Insert blur (privacy) areas into a stream.	carries offsets into a data partition the guest has no window for; planned with that window (Phase D)
+IAV_IOC_SET_CANVAS_CONFIG	Set the configuration of a canvas; idle state only.	
+IAV_IOC_SET_CHAN_CONFIG	Set the configuration of a channel; idle state only.	
+IAV_IOC_SET_DEBUG_CONFIG	Set the driver debug configuration.	debug and test only
+IAV_IOC_SET_DSP_HEALTH_CONFIG	Set the DSP health guard configuration.	
+IAV_IOC_SET_DSP_LOG	Set the DSP firmware log level.	debug and test only
+IAV_IOC_SET_H264_CONFIG	Set the H.264 encoding configuration of an idle stream.	
+IAV_IOC_SET_H265_CONFIG	Set the H.265 encoding configuration of an idle stream.	
+IAV_IOC_SET_IMG_SCALE	Submit an arbitrary-size image scaling job to the DSP.	carries physical addresses a guest must not supply; planned by offset only (Phase D)
+IAV_IOC_SET_ISP_NN_CFG	Set the neural-network parameters of the image pipeline; idle state only.	carries physical addresses a guest must not supply; planned by offset only if an application needs it (Phase D)
+IAV_IOC_SET_MEM_LAYOUT_RESOURCE	Configure the memory layout; init state only.	allocates or frees memory the guest windows are built from; the server owns it
+IAV_IOC_SET_MJPEG_CONFIG	Set the MJPEG quality and chroma format of an idle stream.	
+IAV_IOC_SET_OVERLAY_INSERT	Insert picture overlays into a stream.	
+IAV_IOC_SET_POLL_EVENT_CFG	Select which descriptor events wake a poll on the device.	
+IAV_IOC_SET_POSTP_SCALE_CTRL	Set the post-processing scale control of a stream.	
+IAV_IOC_SET_PYRAMID_CFG	Set the pyramid scaler configuration of a channel; idle state only.	
+IAV_IOC_SET_RAW_ENCODE	Set the raw-encode configuration; idle state only.	raw encode with raw buffers; needs the raw windows (Phase D)
+IAV_IOC_SET_RAW_ENC_CFG	Initialize the raw-encode procedure; idle state only.	carries physical addresses a guest must not supply; planned by offset only if an application needs it (Phase D)
+IAV_IOC_SET_STREAM_CONFIG	Change the configuration of a stream while it runs.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_SET_STREAM_RESOURCE	Set the resources reserved for streams; idle state only.	
+IAV_IOC_SET_SYSTEM_RESOURCE	Set the system resource limits; idle state only.	
+IAV_IOC_SET_VCAP_CFG	Set the video capture (VCAP) configuration.	
+IAV_IOC_SET_VIN_COMPAND_CFG	Set the VIN companding configuration.	
+IAV_IOC_SET_VIN_IDSP_CFG	Set the VIN image DSP configuration.	the argument struct has offset or file-descriptor fields that have not been classified yet; planned once each field is read (Phase D)
+IAV_IOC_SET_VIN_IDSP_DELAY_INFO	Set the image DSP delay information used by warp.	
+IAV_IOC_SET_VOUT_MAX_RES_CFG	Set the maximum VOUT resources; init state only.	
+IAV_IOC_SET_YUV_REMAP_INSERT	Insert YUV remap areas into a stream.	carries offsets into a data partition the guest has no window for; planned with that window (Phase D)
+IAV_IOC_START_ENCODE	Start encoding one or more streams.	
+IAV_IOC_STOP_ENCODE	Stop encoding one or more streams.	
+IAV_IOC_SYNC_CACHE_MEM_PART	Clean or invalidate the CPU cache for a partition shared with the DSP.	cache maintenance by partition id; planned with the windows it addresses (Phase D)
+IAV_IOC_SYNC_VIN_FRAME	Wait for the next valid image DSP frame.	
+IAV_IOC_UNREGISTER_ANON_MEM_PART	Unregister an anonymous partition.	allocates or frees memory the guest windows are built from; the server owns it
+IAV_IOC_VIN_AAA_COMPENSATION	Set the 3A compensation of a sensor.	
+IAV_IOC_VIN_GET_AAAINFO	Read the sensor information the 3A algorithms need.	
+IAV_IOC_VIN_GET_AGC	Read the sensor gain.	
+IAV_IOC_VIN_GET_CHIP_STATUS	Read the sensor chip status.	
+IAV_IOC_VIN_GET_DEVINFO	Read a video source's identity: type, name and its VIN controller.	
+IAV_IOC_VIN_GET_DGAIN_RATIO	Read the sensor digital gain.	
+IAV_IOC_VIN_GET_EISINFO	Read the sensor electronic image stabilization information.	
+IAV_IOC_VIN_GET_FPS	Read the frame rate of a video source.	
+IAV_IOC_VIN_GET_GLOBAL_INFO	Read the global VIN information: number of video sources and their VIN controllers.	
+IAV_IOC_VIN_GET_MIRROR	Read the sensor mirror and flip mode.	
+IAV_IOC_VIN_GET_MODE	Read the current mode of a video source.	
+IAV_IOC_VIN_GET_MSYNC	Read the master sync settings.	
+IAV_IOC_VIN_GET_REG	Read a sensor register.	raw sensor register access; owned by the Dom0 sensor driver
+IAV_IOC_VIN_GET_SHUTTER	Read the sensor shutter time.	
+IAV_IOC_VIN_GET_VIDEOINFO	Read the video information of a video source.	
+IAV_IOC_VIN_GET_VIRT_MODE	Read the virtual format of a virtual video source.	
+IAV_IOC_VIN_GET_WDR_AGAIN_INDEX_GP	Read the analog gain index of a wide-dynamic-range sensor.	
+IAV_IOC_VIN_GET_WDR_DGAIN_INDEX_GP	Read the digital gain of a wide-dynamic-range sensor.	
+IAV_IOC_VIN_GET_WDR_SHUTTER_ROW_GP	Read the shutter rows of a wide-dynamic-range sensor.	
+IAV_IOC_VIN_LOCK_VSRC_CTX_FRAME_CNT	Bind the frame counter to each context of a two-context sensor.	
+IAV_IOC_VIN_SET_AE_CHECK	Set the sensor auto-exposure check flag.	
+IAV_IOC_VIN_SET_AGC	Set the sensor gain.	
+IAV_IOC_VIN_SET_AGC_SHUTTER	Set the sensor gain index and shutter together.	
+IAV_IOC_VIN_SET_DEVINFO	Set the sensor id and gain step of a virtual video source.	debug: overrides the sensor device description
+IAV_IOC_VIN_SET_DGAIN_RATIO	Set the sensor digital gain.	
+IAV_IOC_VIN_SET_FPS	Set the frame rate of a video source.	
+IAV_IOC_VIN_SET_GLOBAL_MODE	Set the mode of several VINs at once.	
+IAV_IOC_VIN_SET_LOW_LIGHT_MODE	Set the sensor low-light mode.	
+IAV_IOC_VIN_SET_MIRROR	Set the sensor mirror and flip mode.	
+IAV_IOC_VIN_SET_MODE	Set the mode of a video source.	
+IAV_IOC_VIN_SET_MSYNC	Set master sync.	
+IAV_IOC_VIN_SET_REG	Write a sensor register.	raw sensor register access; owned by the Dom0 sensor driver
+IAV_IOC_VIN_SET_ROI_INFO	Set the sensor region-of-interest offset.	
+IAV_IOC_VIN_SET_SHUTTER	Set the sensor shutter time.	
+IAV_IOC_VIN_SET_STREAM_MODE	Put the sensor into test-stream mode.	
+IAV_IOC_VIN_SET_TP_MODE	Put the sensor into test-pattern mode.	
+IAV_IOC_VIN_SET_VIRT_MODE	Set the virtual format of a virtual video source.	
+IAV_IOC_VIN_SET_WDR_GP	Set the parameters of a wide-dynamic-range sensor.	
+IAV_IOC_VIN_SHUTTER2ROW	Convert a shutter time to sensor rows.	
+IAV_IOC_VIN_SWITCH_VSRC_CTX	Switch contexts on sensors that support two.	
+IAV_IOC_VIN_UNLOCK_VSRC_CTX_FRAME_CNT	Unbind the frame counter from the contexts.	
+IAV_IOC_VIN_WDR_SHUTTER2OFFSET	Convert a shutter time to sensor row and offset values in HDR mode.	
+IAV_IOC_VIN_WDR_SHUTTER2ROW	Convert shutter time to rows for a wide-dynamic-range sensor.	
+IAV_IOC_VOUT_CVBS_GET_PARAMS	Read the analog (CVBS) output parameters.	
+IAV_IOC_VOUT_CVBS_SET_BLACKLEVEL	Set the analog output black level.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_CVBS_SET_BLANKLEVEL	Set the analog output blank level.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_CVBS_SET_CGAIN	Set the analog output chroma gain.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_CVBS_SET_COLORBAR	Show a color bar on the analog output.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_CVBS_SET_SYNCLEVEL	Set the analog output sync level.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_CVBS_SET_YGAIN	Set the analog output luma gain.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_GET_MODE	Read the VOUT device format.	
+IAV_IOC_VOUT_GET_PARAMS	Read the VOUT parameters.	
+IAV_IOC_VOUT_HALT	Halt a VOUT.	
+IAV_IOC_VOUT_MIPI_GET_PARAMS	Read the MIPI DSI output parameters.	
+IAV_IOC_VOUT_MIPI_SET_TXIBCTRL	Set the MIPI DSI transmitter bias current.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_MIPI_SET_TXPIB	Set the MIPI DSI transmitter pre-bias.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_MIPI_SET_TXTERM	Set the MIPI DSI transmitter termination.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_MIPI_SET_TXVCMSET	Set the MIPI DSI transmitter common-mode voltage.	analog and MIPI electrical tuning of the display output; owned by Dom0
+IAV_IOC_VOUT_SET_MODE	Set the VOUT device format.	
+IAV_IOC_VOUT_SET_PARAMS	Set the VOUT parameters.	
+IAV_IOC_VOUT_SWITCH_VIDEO	Turn a VOUT on or off.	
+IAV_IOC_VOUT_SYNC_IMG_OSD	Synchronize the image and the on-screen display of a VOUT.	carries a physical address a guest must not supply; display output is owned by Dom0
+IAV_IOC_VOUT_SYNC_VIDEO_OSD	Synchronize video and on-screen display on a VOUT.	carries a physical address a guest must not supply; display output is owned by Dom0
+IAV_IOC_WAIT_DECODE_BSB	Wait for room in the decode bitstream buffer.	
+IAV_IOC_WAIT_IMG_SCALE	Wait for an image scaling job to finish.	blocking wait bounded at 2 s by the driver; planned with its feature (Phase D)
+IAV_IOC_WAIT_NEXT_IDSP_FRAME	Wait for the next valid image DSP frame.	
+IAV_IOC_WAIT_PLAYBACK_EOS	Wait until the whole stream has been decoded.	
+IAV_IOC_WAIT_RAW_ENCODE	Wait until the raw-encode path can accept the next buffer.	blocking wait that is unbounded when back-pressure is on; the broker needs its own bound
+IAV_IOC_WAIT_SKIP_IDSP_CFG	Wait until a VIN switch of a channel has completed.	blocking wait bounded at 2 s by the driver; planned with its feature (Phase D)

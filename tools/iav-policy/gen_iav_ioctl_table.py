@@ -449,6 +449,11 @@ for r in rows:
         fl.append("IAV_F_LEADING_ID")
     magic_enum = {"V enc": "IAV_MAGIC_ENC", "D dec": "IAV_MAGIC_DEC", "VIN global": "IAV_MAGIC_VIN",
                   "VIN dev": "IAV_MAGIC_VIN", "VOUT": "IAV_MAGIC_VOUT", "IMAGE": "IAV_MAGIC_IMAGE"}[r["magic"]]
+    # A macro that says "read" (_IOR) is not enough: some handlers copy the argument in first (QUERY_DECODE_BSB and
+    # QUERY_DECODE_STATUS take the decoder id from it). Such a call must carry its argument to the driver, so it is
+    # read-write here. Only a pointer argument that the handler copies from the caller is promoted.
+    if direction == "R" and kind == "IAV_ARG_PTR" and sinfo["cfu"]:
+        direction = "RW"
     dirs = {"R": "IAV_DIR_R", "W": "IAV_DIR_W", "RW": "IAV_DIR_RW", "-": "IAV_DIR_NONE"}.get(direction, "IAV_DIR_NONE")
     entries.append((name, magic_enum, kind, dirs, size, "|".join(cflags), "|".join(fl) if fl else "0"))
     out.append((r["magic"], name, direction, argkind, sorted(sinfo["files"])[0] if sinfo["files"] else "?",

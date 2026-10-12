@@ -1,0 +1,7 @@
+# IAV settings, read by amba-virt-server when it starts.
+#
+# The guest bound to this ivshmem slice is the primary IAV client: the only one that may configure
+# and run the pipeline (state, resources, streams, VIN, decode control) through the virtual
+# /dev/iav. Every other guest may only query and read frames. Slice 0 is the guest given the
+# amba_shm adapter, slice 1 the one given amba_shm1. Without this line no guest is primary.
+primary-slice 0

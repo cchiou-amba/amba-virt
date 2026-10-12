@@ -2,7 +2,7 @@
  * amba_virt_iav_win.h
  *
  * Host-side IAV windows: physical ranges of the real IAV driver's memory
- * (the DSP partition and the bitstream buffer) exposed as mmap-able nodes
+ * (the DSP partition, the bitstream buffer, the decode partition and the overlay partition) exposed as mmap-able nodes
  * that the hypervisor maps into a guest as ivshmem BARs.
  *
  * Copyright (C) 2026, Ambarella International LLC
@@ -21,18 +21,27 @@
 
 #define AMBA_VIRT_IAV_WIN_DSP_NAME	"amba_virt_iav_dsp"
 #define AMBA_VIRT_IAV_WIN_BSB_NAME	"amba_virt_iav_bsb"
+#define AMBA_VIRT_IAV_WIN_DEC_NAME	"amba_virt_iav_dec"
+#define AMBA_VIRT_IAV_WIN_OVL_NAME	"amba_virt_iav_ovl"
 #define AMBA_VIRT_IAV_WIN_DSP_PATH	"/dev/amba_virt_iav_dsp"
 #define AMBA_VIRT_IAV_WIN_BSB_PATH	"/dev/amba_virt_iav_bsb"
+#define AMBA_VIRT_IAV_WIN_DEC_PATH	"/dev/amba_virt_iav_dec"
+#define AMBA_VIRT_IAV_WIN_OVL_PATH	"/dev/amba_virt_iav_ovl"
 
 /*
- * A second set of the same two windows, over the same memory, so that a second guest can be given
+ * A second set of the same windows, over the same memory, so that a second guest can be given
  * its own adapters (an adapter belongs to one instance at a time).
  */
 #define AMBA_VIRT_IAV_WIN_DSP1_NAME	"amba_virt_iav_dsp1"
 #define AMBA_VIRT_IAV_WIN_BSB1_NAME	"amba_virt_iav_bsb1"
 #define AMBA_VIRT_IAV_WIN_DSP1_PATH	"/dev/amba_virt_iav_dsp1"
 #define AMBA_VIRT_IAV_WIN_BSB1_PATH	"/dev/amba_virt_iav_bsb1"
+#define AMBA_VIRT_IAV_WIN_DEC1_NAME	"amba_virt_iav_dec1"
+#define AMBA_VIRT_IAV_WIN_DEC1_PATH	"/dev/amba_virt_iav_dec1"
+#define AMBA_VIRT_IAV_WIN_OVL1_NAME	"amba_virt_iav_ovl1"
+#define AMBA_VIRT_IAV_WIN_OVL1_PATH	"/dev/amba_virt_iav_ovl1"
 #define AMBA_VIRT_IAV_WIN_SETS		2
+#define AMBA_VIRT_IAV_WIN_KINDS		4	/* DSP, BSB, DEC and OVL windows in each set */
 
 /*
  * A window is `len` bytes of real memory at `phys`, followed by zeroed
@@ -61,7 +70,7 @@ struct amba_virt_iav_win_cfg {
 struct amba_virt_iav_win_hdr {
 	__u32 magic;		/* AMBA_VIRT_IAV_WIN_HDR_MAGIC */
 	__u32 version;	/* AMBA_VIRT_IAV_WIN_HDR_VERSION */
-	__u32 window_id;	/* 0: DSP, 1: BSB (the ids of amba_virt_iav.h) */
+	__u32 window_id;	/* 0: DSP, 1: BSB, 2: DEC, 3: OVL (the ids of amba_virt_iav.h) */
 	__u32 reserved;
 	__u64 part_len;	/* bytes of the window that are real memory */
 	__u64 size;		/* size of the window */

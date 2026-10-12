@@ -32,7 +32,7 @@ bool IavQualConfig::parse(int argc, char **argv, int first, std::string &error)
             strcmp(arg, "--board") == 0 || strcmp(arg, "--device") == 0 ||
             strcmp(arg, "--backend") == 0 || strcmp(arg, "--run-id") == 0 ||
             strcmp(arg, "--window-skew") == 0 || strcmp(arg, "--group") == 0 ||
-            strcmp(arg, "--seconds") == 0) {
+            strcmp(arg, "--seconds") == 0 || strcmp(arg, "--role") == 0) {
             if (i + 1 >= argc) {
                 error = std::string("missing value for ") + arg;
                 return false;
@@ -66,6 +66,12 @@ bool IavQualConfig::parse(int argc, char **argv, int first, std::string &error)
             _backend = value;
         } else if (strcmp(arg, "--group") == 0) {
             _group = value;
+        } else if (strcmp(arg, "--role") == 0) {
+            if (strcmp(value, "primary") != 0 && strcmp(value, "consumer") != 0) {
+                error = "--role must be primary or consumer";
+                return false;
+            }
+            _role = value;
         } else if (strcmp(arg, "--seconds") == 0) {
             _seconds = (unsigned int)strtoul(value, NULL, 10);
             if (_seconds == 0 || _seconds > 3600) {

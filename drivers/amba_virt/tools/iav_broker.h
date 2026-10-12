@@ -41,6 +41,12 @@ struct iav_broker_ops {
 	void (*sleep_ms)(void *ctx, unsigned int ms);
 	uint32_t (*random32)(void *ctx);
 	uint64_t (*now_ms)(void *ctx);
+	/*
+	 * Optional. Nonzero if the guest with this kernel-reported id is the primary client, the one
+	 * that gets IAV_PROFILE_PRIMARY. Asked on every call, so the answer follows the guest's current
+	 * binding and never a value the guest sent. NULL: no guest is primary.
+	 */
+	int (*is_primary)(void *ctx, uint32_t cid);
 };
 
 struct iav_broker_window {

@@ -37,10 +37,17 @@ enum amba_virt_iav_op {
 /* Window ids. The identity of a window is fixed; its size and base come from OP_INFO. */
 #define AMBA_VIRT_IAV_WIN_DSP	0u	/* the IAV_PART_DSP partition */
 #define AMBA_VIRT_IAV_WIN_BSB	1u	/* the IAV_PART_BSB partition, padded to a power of two */
+#define AMBA_VIRT_IAV_WIN_DEC	2u	/* the IAV_PART_DEC_BSB partition (the decoder's bitstream and output), padded to a power of two */
+#define AMBA_VIRT_IAV_WIN_OVL	3u	/* the IAV_PART_OVERLAY partition (overlay data and colour tables) */
 #define AMBA_VIRT_IAV_MAX_WINDOWS	4u
 
-/* The longest a single POLL or bounded wait occupies the guest's RPC channel. */
-#define AMBA_VIRT_IAV_POLL_SLICE_MS	100u
+/*
+ * The longest a single POLL occupies the guest's RPC channel, which every other call from the guest waits behind. It
+ * was 100 ms; a poller then delayed other calls by up to 200 ms (plan_iav_virtualization_phase2, finding F13), so it is
+ * short: the worker asks about 50 times a second while a descriptor is being polled, which costs well under one percent
+ * of a CPU at the measured 40 us per call.
+ */
+#define AMBA_VIRT_IAV_POLL_SLICE_MS	20u
 
 /* Request: follows struct amba_virt_msg. arg_len bytes of argument follow it. */
 struct amba_virt_iav_req {

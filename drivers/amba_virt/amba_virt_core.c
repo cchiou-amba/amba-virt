@@ -86,7 +86,13 @@ static int send_exact(struct socket *sock, const void *buf, size_t len)
 			.iov_base = (void *)((const u8 *)buf + done),
 			.iov_len = len - done,
 		};
-		struct msghdr msg = { 0 };
+		/*
+		 * MSG_NOSIGNAL: a send on a connection the peer has closed must fail with -EPIPE and nothing
+		 * more. Without it the vsock layer sends SIGPIPE to the current task, which here is the
+		 * application (guest) or the server (host) that made the call: a guest application was
+		 * killed by the first call after the host dropped its connection.
+		 */
+		struct msghdr msg = { .msg_flags = MSG_NOSIGNAL };
 		int n;
 
 		n = kernel_sendmsg(sock, &msg, &iov, 1, iov.iov_len);
@@ -255,12 +261,42 @@ int amba_virt_rpc_dev_seq(struct amba_virt_dev *dev, const void *request,
 
 	mutex_lock(&dev->sock_lock);
 	sock = dev->conn_sock;
+	/*
+	 * A connection the host closed (it drops a guest that breaks the protocol, and a restarted server
+	 * has none) is dead before this call: connect again now, so the application sees no error. Only a
+	 * connection that is established and open in both directions is used. A send that still fails
+	 * because the peer is gone has not reached the server, so it is repeated once on a new connection.
+	 */
+	if (sock && (sock->sk->sk_state != TCP_ESTABLISHED || (sock->sk->sk_shutdown & SHUTDOWN_MASK))) {
+		mutex_unlock(&dev->sock_lock);
+		amba_virt_vsock_disconnect(dev);
+		ret = amba_virt_vsock_connect(dev);
+		if (ret)
+			goto out_unlock;
+		mutex_lock(&dev->sock_lock);
+		sock = dev->conn_sock;
+	}
 	if (!sock) {
 		ret = -ENOTCONN;
 		mutex_unlock(&dev->sock_lock);
 		goto out_unlock;
 	}
 	ret = frame_send(sock, request, request_len);
+	if (ret == -EPIPE || ret == -ECONNRESET || ret == -ENOTCONN || ret == -ESHUTDOWN) {
+		mutex_unlock(&dev->sock_lock);
+		amba_virt_vsock_disconnect(dev);
+		ret = amba_virt_vsock_connect(dev);
+		if (ret)
+			goto out_unlock;
+		mutex_lock(&dev->sock_lock);
+		sock = dev->conn_sock;
+		if (!sock) {
+			ret = -ENOTCONN;
+			mutex_unlock(&dev->sock_lock);
+			goto out_unlock;
+		}
+		ret = frame_send(sock, request, request_len);
+	}
 	while (!ret) {
 		long left = (long)(deadline - jiffies);
 

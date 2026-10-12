@@ -1,8 +1,8 @@
 /*
  * amba_virt_iav_win.c
  *
- * Exposes the real IAV driver's DSP partition and bitstream buffer as
- * mmap-able nodes for the hypervisor to map into a guest (ivshmem BARs).
+ * Exposes the real IAV driver's DSP partition, bitstream buffer, decode
+ * partition and overlay partition as mmap-able nodes for the hypervisor to map into a guest (ivshmem BARs).
  * Dom0 amba-virt-server configures each node once from the partition
  * table the real driver reports; nothing here talks to the IAV driver.
  *
@@ -55,7 +55,7 @@ struct iav_win {
 	u64 pad_len;
 };
 
-#define IAV_WIN_NODES	(2 * AMBA_VIRT_IAV_WIN_SETS)
+#define IAV_WIN_NODES	(AMBA_VIRT_IAV_WIN_KINDS * AMBA_VIRT_IAV_WIN_SETS)
 
 static struct iav_win g_win[IAV_WIN_NODES];
 
@@ -131,7 +131,7 @@ static void iav_win_write_header(struct iav_win *w, const struct amba_virt_iav_w
 	memset(&hdr, 0, sizeof(hdr));
 	hdr.magic = AMBA_VIRT_IAV_WIN_HDR_MAGIC;
 	hdr.version = AMBA_VIRT_IAV_WIN_HDR_VERSION;
-	hdr.window_id = (u32)((w - g_win) & 1);	/* nodes alternate DSP, BSB in each set */
+	hdr.window_id = (u32)((w - g_win) % AMBA_VIRT_IAV_WIN_KINDS);	/* nodes run DSP, BSB, DEC, OVL in each set */
 	hdr.part_len = c->len;
 	hdr.size = c->size;
 	last = DIV_ROUND_UP(w->pad_len, IAV_WIN_CHUNK) - 1;
@@ -314,8 +314,12 @@ static const struct file_operations iav_win_fops = {
 static const char * const iav_win_names[IAV_WIN_NODES] = {
 	AMBA_VIRT_IAV_WIN_DSP_NAME,
 	AMBA_VIRT_IAV_WIN_BSB_NAME,
+	AMBA_VIRT_IAV_WIN_DEC_NAME,
+	AMBA_VIRT_IAV_WIN_OVL_NAME,
 	AMBA_VIRT_IAV_WIN_DSP1_NAME,
 	AMBA_VIRT_IAV_WIN_BSB1_NAME,
+	AMBA_VIRT_IAV_WIN_DEC1_NAME,
+	AMBA_VIRT_IAV_WIN_OVL1_NAME,
 };
 
 static int __init iav_win_init(void)
@@ -337,7 +341,7 @@ static int __init iav_win_init(void)
 			return ret;
 		}
 	}
-	pr_info("amba_virt_iav_win: %d window sets (DSP and BSB each) registered\n", AMBA_VIRT_IAV_WIN_SETS);
+	pr_info("amba_virt_iav_win: %d window sets (DSP, BSB, DEC and OVL each) registered\n", AMBA_VIRT_IAV_WIN_SETS);
 	return 0;
 }
 

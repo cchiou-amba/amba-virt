@@ -160,28 +160,54 @@ static int window_node_config(const struct iav_broker_window *w, const char *pat
 /* Both sets of nodes. The first set is required; the second is optional and its absence is only noted. */
 static int window_node_ready(const struct iav_broker_window *w)
 {
-	int dsp = w->id == AMBA_VIRT_IAV_WIN_DSP;
-	int rc = window_node_config(w, dsp ? AMBA_VIRT_IAV_WIN_DSP_PATH : AMBA_VIRT_IAV_WIN_BSB_PATH);
+	const char *first, *second;
+	int rc;
 
+	switch (w->id) {
+	case AMBA_VIRT_IAV_WIN_DSP:
+		first = AMBA_VIRT_IAV_WIN_DSP_PATH;
+		second = AMBA_VIRT_IAV_WIN_DSP1_PATH;
+		break;
+	case AMBA_VIRT_IAV_WIN_BSB:
+		first = AMBA_VIRT_IAV_WIN_BSB_PATH;
+		second = AMBA_VIRT_IAV_WIN_BSB1_PATH;
+		break;
+	case AMBA_VIRT_IAV_WIN_DEC:
+		first = AMBA_VIRT_IAV_WIN_DEC_PATH;
+		second = AMBA_VIRT_IAV_WIN_DEC1_PATH;
+		break;
+	case AMBA_VIRT_IAV_WIN_OVL:
+		first = AMBA_VIRT_IAV_WIN_OVL_PATH;
+		second = AMBA_VIRT_IAV_WIN_OVL1_PATH;
+		break;
+	default:
+		return -EINVAL;
+	}
+	rc = window_node_config(w, first);
 	if (rc == 0)
-		(void)window_node_config(w, dsp ? AMBA_VIRT_IAV_WIN_DSP1_PATH : AMBA_VIRT_IAV_WIN_BSB1_PATH);
+		(void)window_node_config(w, second);
 	return rc;
 }
 
-/* The windows the guests may map: the DSP partition and the bitstream buffer, as the driver has them. */
+/*
+ * The windows the guests may map: the DSP partition, the bitstream buffer, the decode partition and the overlay partition, as the driver
+ * has them. The decode partition exists only when the pipeline has a decoder channel (the driver allocates it
+ * when preview is enabled), and its window only when the module has the decode nodes; without either, decode is
+ * refused for every guest and the other two windows are unaffected.
+ */
 static int set_windows_from_driver(void)
 {
-	struct iav_broker_window w[2];
+	struct iav_broker_window w[4];
 	unsigned int n = 0;
-	unsigned int pids[2] = { IAV_PART_DSP, IAV_PART_BSB };
-	unsigned int ids[2] = { AMBA_VIRT_IAV_WIN_DSP, AMBA_VIRT_IAV_WIN_BSB };
+	unsigned int pids[4] = { IAV_PART_DSP, IAV_PART_BSB, IAV_PART_DEC_BSB, IAV_PART_OVERLAY };
+	unsigned int ids[4] = { AMBA_VIRT_IAV_WIN_DSP, AMBA_VIRT_IAV_WIN_BSB, AMBA_VIRT_IAV_WIN_DEC, AMBA_VIRT_IAV_WIN_OVL };
 	int fd, i;
 
 	fd = open(IAV_BROKER_DEVICE_PATH, O_RDWR | O_CLOEXEC);
 	if (fd < 0)
 		return -errno;
 	memset(w, 0, sizeof(w));
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < 4; i++) {
 		struct iav_querymem q;
 
 		memset(&q, 0, sizeof(q));
@@ -189,6 +215,11 @@ static int set_windows_from_driver(void)
 		q.arg.partition.pid = pids[i];
 		if (ioctl(fd, IAV_IOC_QUERY_MEMBLOCK, &q) != 0)
 			continue;
+		if (q.arg.partition.mem.length == 0) {
+			if (ids[i] == AMBA_VIRT_IAV_WIN_DEC)
+				fprintf(stderr, "iav_broker: no decode partition, so no decode window (the pipeline has no decoder channel)\n");
+			continue;
+		}
 		w[n].id = ids[i];
 		w[n].base = q.arg.partition.mem.addr;
 		w[n].part_len = q.arg.partition.mem.length;
@@ -298,6 +329,32 @@ static void *liveness_main(void *arg)
 
 /* ---- public ---- */
 
+static int g_primary_slice = -1;
+
+void iav_broker_server_set_primary_slice(int slice)
+{
+	g_primary_slice = slice;
+}
+
+/* The primary guest is the one the kernel has bound to the configured slice. */
+static int real_is_primary(void *ctx, uint32_t cid)
+{
+	struct amba_virt_binding_list bindings;
+	uint32_t i;
+
+	(void)ctx;
+	if (g_primary_slice < 0 || g_dev_fd < 0)
+		return 0;
+	memset(&bindings, 0, sizeof(bindings));
+	if (ioctl(g_dev_fd, AMBA_VIRT_IOC_GET_BINDINGS, &bindings) < 0)
+		return 0;
+	for (i = 0; i < bindings.count && i < 8; i++) {
+		if (bindings.entries[i].cid == cid)
+			return bindings.entries[i].slice.index == (uint32_t)g_primary_slice;
+	}
+	return 0;
+}
+
 int iav_broker_server_init(int dev_fd, enum iav_profile profile)
 {
 	struct iav_broker_ops ops;
@@ -317,6 +374,7 @@ int iav_broker_server_init(int dev_fd, enum iav_profile profile)
 	ops.sleep_ms = real_sleep_ms;
 	ops.random32 = real_random32;
 	ops.now_ms = real_now_ms;
+	ops.is_primary = real_is_primary;
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.profile = profile;
 	cfg.rate_per_sec = 20000;

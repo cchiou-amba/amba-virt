@@ -40,7 +40,10 @@ NNCTRL_CFLAGS := -I../../../guest-os/userspace/cavalry_mem/inc \
 
 TESTS := test_virt_host_ops test_virt_daemon test_virt_mem_pool test_admin_ipc test_virt_query test_virt_driver_matrix test_virt_module_loader test_virt_camera test_drain_protocol test_boundary_stress test_state_desync test_fuzz_corruption test_security_exploits test_hardware_safety test_virt_dma_acl test_virt_uart test_virt_dma_broker test_hmac_sha256 test_host_iav_proxy test_host_cavalry_eve_sync
 
-.PHONY: all clean test test_iav_qual_host_loopback_run test_iav_qual_host_loopback_bench_run test_host_iav_broker_tsan_run test_host_iav_broker_run fuzz_iav_broker_run test_iav_broker_negctl amba-virt-server-qual test_iav_qual_host_run test_iav_qual_host_bench_run test_iav_qual_host_negctl
+IAV_SUPPORT_OUT := ../../../build/iav-policy
+IAV_SUPPORT_DUMP := $(IAV_SUPPORT_OUT)/iav_ioctl_dump
+
+.PHONY: all clean test test_iav_qual_host_loopback_run test_iav_qual_host_loopback_bench_run test_host_iav_broker_tsan_run test_host_iav_broker_run fuzz_iav_broker_run test_iav_broker_negctl amba-virt-server-qual test_iav_qual_host_run test_iav_qual_host_bench_run test_iav_qual_host_negctl test_iav_support_table_run iav-support-table test_iav_support_table_negctl
 
 all: $(TARGETS)
 
@@ -202,7 +205,7 @@ IAV_BROKER_TEST_BIN := $(IAV_BROKER_OUT)/test_host_iav_broker
 # ThreadSanitizer build of the same tests. TSan on this host needs address randomization off.
 IAV_BROKER_TSAN_BIN := $(IAV_BROKER_OUT)/test_host_iav_broker_tsan
 
-$(IAV_BROKER_TSAN_BIN): test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_C) iav_broker.h iav_policy.h $(wildcard test/*.hxx)
+$(IAV_BROKER_TSAN_BIN): test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_C) iav_broker.h iav_policy.h iav_allow_primary.inc $(wildcard test/*.hxx)
 	mkdir -p $(IAV_BROKER_OUT)/tsanobj
 	gcc -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -fsanitize=thread -c -o $(IAV_BROKER_OUT)/tsanobj/iav_broker.o iav_broker.c
 	gcc -O1 -g -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -fsanitize=thread -c -o $(IAV_BROKER_OUT)/tsanobj/iav_policy.o iav_policy.c
@@ -249,6 +252,34 @@ MUT_state_change_allowed_FILE := iav_policy.c
 MUT_state_change_allowed_EXPR := s/\{ IAV_IOC_WAIT_NEXT_IDSP_FRAME, BOTH, 0, NULL \},/{ IAV_IOC_WAIT_NEXT_IDSP_FRAME, BOTH, 0, NULL },\n\t{ IAV_IOC_ENTER_IDLE, BOTH, 0, NULL },/
 MUT_frame_wait_unclamped_FILE := iav_policy.c
 MUT_frame_wait_unclamped_EXPR := s/q->arg.frame.time_ms = call->block_max_ms;/;/
+MUT_decode_range_unchecked_FILE := iav_policy.c
+MUT_decode_range_unchecked_EXPR := s/return off <= limit && len <= limit - off;/return 1;/
+MUT_decode_range_wraps_FILE := iav_policy.c
+MUT_decode_range_wraps_EXPR := s/return off <= limit && len <= limit - off;/return off + len <= limit;/
+MUT_decode_eos_unclamped_FILE := iav_policy.c
+MUT_decode_eos_unclamped_EXPR := s/w->timeout_ticks = 255;/;/
+MUT_decode_status_leaks_FILE := iav_policy.c
+MUT_decode_status_leaks_EXPR := s/st->yuv422_y_addr = 0;/;/
+MUT_decode_for_consumers_FILE := iav_policy.c
+MUT_decode_for_consumers_EXPR := s/\{ IAV_IOC_DECODE_JPEG, PRIMARY_SET, 0, check_decode_jpeg, NULL \},/{ IAV_IOC_DECODE_JPEG, BOTH, 0, check_decode_jpeg, NULL },/
+MUT_decode_post_not_run_FILE := iav_broker.c
+MUT_decode_post_not_run_EXPR := s/e->post\(&call\);/;/
+MUT_decode_window_for_consumers_FILE := iav_broker.c
+MUT_decode_window_for_consumers_EXPR := s/if \(\(w->id == AMBA_VIRT_IAV_WIN_DEC \|\| w->id == AMBA_VIRT_IAV_WIN_OVL\) &&\n\t    effective_profile\(b, cid\) == IAV_PROFILE_CONSUMER\) \{/if (0) {/
+MUT_decode_window_unknown_FILE := iav_broker.c
+MUT_decode_window_unknown_EXPR := s/call.dec_len = b->windows\[i\].part_len;/;/
+MUT_overlay_clut_unchecked_FILE := iav_policy.c
+MUT_overlay_clut_unchecked_EXPR := s/ \|\|\n\t\t    !range_ok\(a->clut_addr_offset, OVERLAY_CLUT_BYTES, call->ovl_len\)//
+MUT_overlay_pitch_ignored_FILE := iav_policy.c
+MUT_overlay_pitch_ignored_EXPR := s/need = \(uint64_t\)a->pitch \* a->height;/need = a->total_size;/
+MUT_overlay_canvas_allowed_FILE := iav_policy.c
+MUT_overlay_canvas_allowed_EXPR := s/if \(o->id_for_canvas\)\n\t\treturn -EPERM;\n\tif \(!o->enable\)/if (!o->enable)/
+MUT_overlay_later_areas_unchecked_FILE := iav_policy.c
+MUT_overlay_later_areas_unchecked_EXPR := s/i < MAX_NUM_OVERLAY_AREA/i < 1/
+MUT_overlay_window_unknown_FILE := iav_broker.c
+MUT_overlay_window_unknown_EXPR := s/call.ovl_len = b->windows\[i\].part_len;/;/
+MUT_overlay_for_consumers_FILE := iav_policy.c
+MUT_overlay_for_consumers_EXPR := s/\{ IAV_IOC_SET_OVERLAY_INSERT, PRIMARY_SET,/{ IAV_IOC_SET_OVERLAY_INSERT, BOTH,/
 
 IAV_MUT_DIR = $(IAV_BROKER_OUT)/mut-$(MUTANT)
 
@@ -286,11 +317,11 @@ fuzz_iav_broker_run: $(IAV_FUZZ_BIN)
 
 
 
-$(IAV_BROKER_OUT)/%.o: %.c iav_broker.h iav_policy.h iav_ioctl_table.inc ../include/uapi/amba_virt_iav.h
+$(IAV_BROKER_OUT)/%.o: %.c iav_broker.h iav_policy.h iav_ioctl_table.inc iav_allow_primary.inc ../include/uapi/amba_virt_iav.h
 	mkdir -p $(IAV_BROKER_OUT)
 	gcc $(IAV_BROKER_CFLAGS) -c -o $@ $<
 
-$(IAV_BROKER_TEST_BIN): test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_OBJS) $(wildcard test/*.hxx)
+$(IAV_BROKER_TEST_BIN): test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_OBJS) $(wildcard test/*.hxx) iav_allow_primary.inc
 	g++ $(IAV_BROKER_CXXFLAGS) -o $@ test/test_main.cxx test/MockIavDriver.cxx $(IAV_BROKER_TESTS) $(IAV_BROKER_OBJS) -lCppUTest -lCppUTestExt -lpthread -fsanitize=address,undefined
 
 test_host_iav_broker_run: $(IAV_BROKER_TEST_BIN)
@@ -360,4 +391,21 @@ test_iav_qual_host_negctl: $(IAV_QUAL_HOST_BIN)
 clean:
 	rm -f amba-virt-server.qual.o $(TARGETS) $(TESTS) test_host_iav_proxy test_host_multitenant_broadcast test_host_cavalry_eve_sync test_host_iav_physical_frame_arm64 *.o *.d
 
+# The ioctl support table of doc/IavVirtualization.md section 6.1. The dump program reads the real policy table
+# with the allow-list applied; the generator joins it with iav_ioctl_review.tsv. iav-support-table rewrites the
+# section of the document; the test fails when the document, the review record and the allow-list disagree.
+$(IAV_SUPPORT_DUMP): iav_ioctl_dump.c iav_policy.c iav_policy.h iav_ioctl_table.inc
+	@mkdir -p $(IAV_SUPPORT_OUT)
+	gcc -O1 -Wall -Wextra -Werror -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../include/uapi -I. $(IAV_CFLAGS) -o $@ iav_ioctl_dump.c iav_policy.c
 
+$(IAV_SUPPORT_OUT)/iav_ioctl_dump.tsv: $(IAV_SUPPORT_DUMP)
+	$(IAV_SUPPORT_DUMP) > $@
+
+iav-support-table: $(IAV_SUPPORT_OUT)/iav_ioctl_dump.tsv
+	python3 ../../../tools/iav-policy/gen_iav_support_table.py --dump $< --review iav_ioctl_review.tsv --doc ../../../doc/IavVirtualization.md --write
+
+test_iav_support_table_run: $(IAV_SUPPORT_OUT)/iav_ioctl_dump.tsv
+	python3 ../../../tools/iav-policy/gen_iav_support_table.py --dump $< --review iav_ioctl_review.tsv --doc ../../../doc/IavVirtualization.md --check
+
+test_iav_support_table_negctl: $(IAV_SUPPORT_OUT)/iav_ioctl_dump.tsv
+	python3 ../../../tools/iav-policy/check_support_table_negctl.py --dump $< --review iav_ioctl_review.tsv --doc ../../../doc/IavVirtualization.md

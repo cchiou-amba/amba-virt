@@ -179,7 +179,8 @@ TEST(IavBrokerProtocol, KnownButDeniedIoctlsAreRefusedAndNeverForwarded)
                             IAV_IOC_SET_RAW_ENC_CFG, IAV_IOC_SET_ISP_NN_CFG, IAV_IOC_SET_DSP_LOG,
                             IAV_IOC_SET_SYSTEM_RESOURCE, IAV_IOC_ALLOC_MEM_PART};
 
-    /* For a consumer, which is every guest in this release. */
+    /* For a consumer. The qualification and primary profiles allow the state-changing ones; the
+     * hazardous ones are refused for every profile (TestHostIavBrokerTable.cxx). */
     IavBrokerHarness consumer(IAV_PROFILE_CONSUMER);
     uint64_t ch = consumer.mustOpen(7);
 

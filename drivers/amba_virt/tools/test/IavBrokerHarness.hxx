@@ -34,7 +34,7 @@ public:
 
     explicit IavBrokerHarness(enum iav_profile profile = IAV_PROFILE_QUALIFICATION,
                               unsigned int perCid = 0, unsigned int rate = 0, unsigned int burst = 0,
-                              uint32_t seed = 0) :
+                              uint32_t seed = 0, uint32_t primaryCid = 0) :
         _inited(false)
     {
         struct iav_broker_cfg cfg;
@@ -46,6 +46,10 @@ public:
         }
         memset(&cfg, 0, sizeof(cfg));
         cfg.profile = profile;
+        drv.setPrimaryCid(primaryCid);
+        if (primaryCid != 0 || profile == IAV_PROFILE_QUALIFICATION) {
+            drv.allowPrimarySet(true);
+        }
         cfg.max_sessions_per_cid = perCid;
         cfg.block_max_ms = MockIavDriver::BlockMaxMs;
         cfg.rate_per_sec = rate;
@@ -65,6 +69,54 @@ public:
         if (_inited) {
             _windowsRc = iav_broker_set_windows(&b, w, 2);
         }
+    }
+
+    /* Tell the broker about the decode partition's window too (the three windows the server sets). */
+    void addDecodeWindow()
+    {
+        struct iav_broker_window w[3];
+
+        memset(w, 0, sizeof(w));
+        w[0].id = AMBA_VIRT_IAV_WIN_DSP;
+        w[0].base = MockIavDriver::DspBase;
+        w[0].part_len = MockIavDriver::DspLen;
+        w[0].size = MockIavDriver::DspLen;
+        w[1].id = AMBA_VIRT_IAV_WIN_BSB;
+        w[1].base = MockIavDriver::BsbBase;
+        w[1].part_len = MockIavDriver::BsbLen;
+        w[1].size = MockIavDriver::BsbWindow;
+        w[1].ring = 1;
+        w[2].id = AMBA_VIRT_IAV_WIN_DEC;
+        w[2].base = MockIavDriver::DecBase;
+        w[2].part_len = MockIavDriver::DecLen;
+        w[2].size = MockIavDriver::DecWindow;
+        _windowsRc = iav_broker_set_windows(&b, w, 3);
+    }
+
+    /* The four windows the server sets when the pipeline has a decoder and the overlay partition. */
+    void addOverlayWindow()
+    {
+        struct iav_broker_window w[4];
+
+        memset(w, 0, sizeof(w));
+        w[0].id = AMBA_VIRT_IAV_WIN_DSP;
+        w[0].base = MockIavDriver::DspBase;
+        w[0].part_len = MockIavDriver::DspLen;
+        w[0].size = MockIavDriver::DspLen;
+        w[1].id = AMBA_VIRT_IAV_WIN_BSB;
+        w[1].base = MockIavDriver::BsbBase;
+        w[1].part_len = MockIavDriver::BsbLen;
+        w[1].size = MockIavDriver::BsbWindow;
+        w[1].ring = 1;
+        w[2].id = AMBA_VIRT_IAV_WIN_DEC;
+        w[2].base = MockIavDriver::DecBase;
+        w[2].part_len = MockIavDriver::DecLen;
+        w[2].size = MockIavDriver::DecWindow;
+        w[3].id = AMBA_VIRT_IAV_WIN_OVL;
+        w[3].base = MockIavDriver::OvlBase;
+        w[3].part_len = MockIavDriver::OvlLen;
+        w[3].size = MockIavDriver::OvlLen;
+        _windowsRc = iav_broker_set_windows(&b, w, 4);
     }
 
     ~IavBrokerHarness()

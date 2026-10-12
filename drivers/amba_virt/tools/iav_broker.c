@@ -445,6 +445,15 @@ static int op_close(struct iav_broker *b, uint32_t cid, const struct amba_virt_i
 	return reply_build(r, 0, 0, 0, 0, 0, NULL, 0);
 }
 
+/* The profile this guest's calls are checked against: the primary guest gets the primary set, the
+ * others the server-wide profile. A server-wide profile is never the primary one. */
+static enum iav_profile effective_profile(const struct iav_broker *b, uint32_t cid)
+{
+	if (b->ops.is_primary != NULL && b->ops.is_primary(b->ops.ctx, cid))
+		return IAV_PROFILE_PRIMARY;
+	return b->cfg.profile;
+}
+
 /* Run one real ioctl. A blocking canvas or pyramid descriptor query is forwarded as the guest
  * sent it: the driver itself bounds that wait (two seconds, then -EAGAIN) and consumes the next
  * frame only on the blocking path, so converting it to polling would change what the app sees. */
@@ -470,12 +479,13 @@ static int op_ioctl(struct iav_broker *b, uint32_t cid, const struct amba_virt_i
 	struct iav_call call;
 	unsigned long value = 0;
 	int rc, err = 0, serr;
+	unsigned int i;
 	size_t out_len = 0;
 
 	e = iav_policy_lookup(q->cmd);
 	if (e == NULL)
 		return refuse(r, ENOTTY);
-	if (!(e->profiles & IAV_PROFILE_BIT(b->cfg.profile)))
+	if (!(e->profiles & IAV_PROFILE_BIT(effective_profile(b, cid))))
 		return refuse(r, EPERM);
 
 	memset(buf, 0, sizeof(buf));
@@ -507,6 +517,14 @@ static int op_ioctl(struct iav_broker *b, uint32_t cid, const struct amba_virt_i
 	call.arg = buf;
 	call.value = value;
 	call.block_max_ms = b->cfg.block_max_ms;
+	pthread_mutex_lock(&b->lock);
+	for (i = 0; i < b->nwindows; i++) {
+		if (b->windows[i].id == AMBA_VIRT_IAV_WIN_DEC)
+			call.dec_len = b->windows[i].part_len;
+		if (b->windows[i].id == AMBA_VIRT_IAV_WIN_OVL)
+			call.ovl_len = b->windows[i].part_len;
+	}
+	pthread_mutex_unlock(&b->lock);
 	if (e->check != NULL) {
 		int cerr = e->check(&call);
 
@@ -523,8 +541,13 @@ static int op_ioctl(struct iav_broker *b, uint32_t cid, const struct amba_virt_i
 	pthread_mutex_unlock(&s->lock);
 	session_release(b, s);
 
-	if (rc >= 0 && e->kind == IAV_ARG_PTR && (e->dir & IAV_DIR_R))
+	if (rc >= 0 && e->kind == IAV_ARG_PTR && (e->dir & IAV_DIR_R)) {
 		out_len = e->size;
+		if (e->post != NULL) {
+			call.arg = buf;
+			e->post(&call);
+		}
+	}
 	return reply_build(r, 0, rc < 0 ? -1 : rc, err, 0, 0, buf, out_len);
 }
 
@@ -612,6 +635,16 @@ static int op_map(struct iav_broker *b, uint32_t cid, const struct amba_virt_iav
 	if (w == NULL) {
 		pthread_mutex_unlock(&b->lock);
 		return refuse(r, EFAULT);
+	}
+	/*
+	 * The decode window holds the primary guest's JPEG input and decoded output, and the overlay window the
+	 * pictures it blends into streams; a consumer has no call that uses either. Only the primary guest (or a
+	 * qualification run, where every client acts as the primary) may map them.
+	 */
+	if ((w->id == AMBA_VIRT_IAV_WIN_DEC || w->id == AMBA_VIRT_IAV_WIN_OVL) &&
+	    effective_profile(b, cid) == IAV_PROFILE_CONSUMER) {
+		pthread_mutex_unlock(&b->lock);
+		return refuse(r, EPERM);
 	}
 	limit = w->ring ? 2 * w->part_len : w->part_len;
 	if (length > limit) {

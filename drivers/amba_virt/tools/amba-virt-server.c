@@ -1187,6 +1187,8 @@ static void usage(const char *prog)
 	fprintf(stderr, "  -N, --no-restart            Daemon mode: do not restart the worker when it dies\n");
 	fprintf(stderr, "  -i, --iav-broker <profile>  Virtual /dev/iav: off, consumer (default) or qualification. Guests also\n"
 			"                              need the IAV_DEV capability in the ACL\n");
+	fprintf(stderr, "  -P, --iav-primary-slice <n> Virtual /dev/iav: the guest bound to ivshmem slice <n> may configure and\n"
+			"                              run the pipeline (default none)\n");
 	fprintf(stderr, "  -h, --help                  Show this help message\n");
 }
 
@@ -1276,6 +1278,41 @@ static int xioctl(int fd, unsigned long req, void *arg, const char *what)
 static int g_enforce_path_b;
 /* The IAV broker profile: 0 consumer, 1 qualification, -1 off. */
 static int g_iav_broker_profile = IAV_PROFILE_CONSUMER;
+static int g_iav_primary_from_cli;
+
+#define IAV_CONF_PATH "/etc/amba-virt/iav.conf"
+
+/*
+ * The IAV settings file: "primary-slice <n>" names the ivshmem slice whose guest may configure and
+ * run the pipeline. Absent or empty, no guest may. The command line overrides it. Unknown lines are
+ * reported and ignored, so a typo cannot silently widen what a guest may do.
+ */
+static void load_iav_conf(const char *path)
+{
+	char line[128];
+	FILE *f = fopen(path, "r");
+
+	if (f == NULL)
+		return;
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *p = line, *end = NULL;
+		unsigned long v;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == '#' || *p == '\n' || *p == '\0')
+			continue;
+		if (strncmp(p, "primary-slice", 13) == 0 && (p[13] == ' ' || p[13] == '\t')) {
+			v = strtoul(p + 14, &end, 10);
+			if (end != p + 14 && v <= 7) {
+				iav_broker_server_set_primary_slice((int)v);
+				continue;
+			}
+		}
+		fprintf(stderr, "amba-virt-server: %s: ignoring line '%.40s'\n", path, p);
+	}
+	fclose(f);
+}
 static const char *g_modules_conf = MODULES_CONF_DEFAULT_PATH;
 static const char *g_camera_conf_path = CAMERA_CONF_DEFAULT_PATH;
 
@@ -1603,6 +1640,7 @@ int main(int argc, char **argv)
 		{"ready-timeout",  required_argument, 0, 'R'},
 		{"no-restart",     no_argument,       0, 'N'},
 		{"iav-broker",     required_argument, 0, 'i'},
+		{"iav-primary-slice", required_argument, 0, 'P'},
 		{"help",           no_argument,       0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -1641,7 +1679,33 @@ int main(int argc, char **argv)
 	 * Never part of the image.
 	 */
 	if (argc > 1 && strcmp(argv[1], "--iav-serve") == 0) {
-		int rc = iav_qual_server_hold();
+		int rc, ai;
+
+		/*
+		 * This branch runs before option parsing: honor -P <slice> (else the settings file) and
+		 * -C <camera.conf> (the pipeline configuration to bring up, for trying another resource script).
+		 */
+		for (ai = 2; ai + 1 < argc; ai += 2) {
+			if (strcmp(argv[ai], "-P") == 0) {
+				char *end = NULL;
+				unsigned long v = strtoul(argv[ai + 1], &end, 10);
+
+				if (end == argv[ai + 1] || *end != '\0' || v > 7) {
+					fprintf(stderr, "Invalid IAV primary slice '%s'\n", argv[ai + 1]);
+					return 1;
+				}
+				iav_broker_server_set_primary_slice((int)v);
+				g_iav_primary_from_cli = 1;
+			} else if (strcmp(argv[ai], "-C") == 0) {
+				g_camera_conf_path = argv[ai + 1];
+			} else {
+				fprintf(stderr, "--iav-serve: unknown option '%s' (-P <slice>, -C <camera.conf>)\n", argv[ai]);
+				return 1;
+			}
+		}
+		if (!g_iav_primary_from_cli)
+			load_iav_conf(IAV_CONF_PATH);
+		rc = iav_qual_server_hold();
 
 		if (rc != 0) {
 			iav_qual_server_resume();
@@ -1664,7 +1728,7 @@ int main(int argc, char **argv)
 	}
 #endif
 
-	while ((opt = getopt_long(argc, argv, "bt:l:c:m:C:FR:Nhi:", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "bt:l:c:m:C:FR:NhP:i:", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'b':
 			g_enforce_path_b = 1;
@@ -1716,6 +1780,18 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			break;
+		case 'P': {
+			char *end = NULL;
+			unsigned long v = strtoul(optarg, &end, 10);
+
+			if (end == optarg || *end != '\0' || v > 7) {
+				fprintf(stderr, "Invalid IAV primary slice '%s'\n", optarg);
+				return 1;
+			}
+			iav_broker_server_set_primary_slice((int)v);
+			g_iav_primary_from_cli = 1;
+			break;
+		}
 		case 'R':
 			ready_timeout_s = (unsigned int)atoi(optarg);
 			if (ready_timeout_s < 1) {
@@ -1731,6 +1807,9 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
+
+	if (!g_iav_primary_from_cli)
+		load_iav_conf(IAV_CONF_PATH);
 
 	{
 		struct virt_daemon_cfg cfg;

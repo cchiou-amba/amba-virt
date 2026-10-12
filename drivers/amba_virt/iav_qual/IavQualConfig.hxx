@@ -46,6 +46,12 @@ public:
     std::string _runId;
     /* run only this group (a debugging aid; the gates run every group) */
     std::string _group;
+    /*
+     * The role of the client being tested through the virtual /dev/iav: "primary" (the guest that
+     * may configure the pipeline), "consumer" (every other guest) or empty (not stated: the
+     * role-dependent tests record what they see and judge nothing).
+     */
+    std::string _role;
     /* survive mode: how long to keep calling, in seconds */
     unsigned int _seconds;
     /* negative control for the window tests: shift the DSP window by this many bytes */

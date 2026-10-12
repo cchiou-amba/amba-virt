@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include <iav_ioctl.h>
+#include <ambas_imgproc_ioctl_arch.h>
 
 namespace {
 
@@ -28,6 +29,40 @@ bool isAllowed(unsigned long cmd)
 {
     for (size_t i = 0; i < sizeof(Allowed) / sizeof(Allowed[0]); i++) {
         if (Allowed[i] == cmd) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const unsigned long PrimaryListed[] = {
+#define PRIMARY_ALLOW(name) name,
+#include "iav_allow_primary.inc"
+#undef PRIMARY_ALLOW
+};
+
+bool isPrimaryListed(unsigned long cmd)
+{
+    for (size_t i = 0; i < sizeof(PrimaryListed) / sizeof(PrimaryListed[0]); i++) {
+        if (PrimaryListed[i] == cmd) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The decode calls the primary guest may make with a checked argument (iav_policy.c, version 3). Written out here,
+ * apart from the policy, so the mock is an independent judge of what may reach the driver. */
+const unsigned long DecodeListed[] = {
+    IAV_IOC_CREATE_DECODER,   IAV_IOC_DECODE_JPEG,        IAV_IOC_DECODE_VIDEO,   IAV_IOC_QUERY_DECODE_BSB,
+    IAV_IOC_WAIT_DECODE_BSB,  IAV_IOC_QUERY_DECODE_STATUS, IAV_IOC_WAIT_PLAYBACK_EOS,
+    IAV_IOC_SET_OVERLAY_INSERT, IAV_IOC_GET_OVERLAY_INSERT,
+};
+
+bool isDecodeListed(unsigned long cmd)
+{
+    for (size_t i = 0; i < sizeof(DecodeListed) / sizeof(DecodeListed[0]); i++) {
+        if (DecodeListed[i] == cmd) {
             return true;
         }
     }
@@ -53,6 +88,10 @@ MockIavDriver::MockIavDriver() :
     _openErr(0),
     _eagain(0),
     _failCmd(0),
+    _capCmd(0),
+    _capLen(0),
+    _primarySet(false),
+    _primaryCid(0),
     _failErr(0),
     _pollReady(true),
     _now(1000),
@@ -72,6 +111,13 @@ MockIavDriver::MockIavDriver() :
     _pollConfigured.reserve(1024);
 }
 
+int MockIavDriver::cIsPrimary(void *ctx, uint32_t cid)
+{
+    MockIavDriver *d = static_cast<MockIavDriver *>(ctx);
+
+    return d->_primaryCid != 0 && cid == d->_primaryCid;
+}
+
 struct iav_broker_ops MockIavDriver::ops()
 {
     struct iav_broker_ops o;
@@ -85,6 +131,7 @@ struct iav_broker_ops MockIavDriver::ops()
     o.sleep_ms = cSleep;
     o.random32 = cRandom;
     o.now_ms = cNow;
+    o.is_primary = cIsPrimary;
     return o;
 }
 
@@ -173,7 +220,7 @@ int MockIavDriver::doIoctl(int fd, unsigned long cmd, unsigned long arg)
             errno = EBADF;
             return -1;
         }
-        if (!isAllowed(cmd)) {
+        if (!isAllowed(cmd) && !(_primarySet && (isPrimaryListed(cmd) || isDecodeListed(cmd)))) {
             violation("an ioctl that is not on the allow-list reached the driver");
             errno = ENOTTY;
             return -1;
@@ -181,6 +228,10 @@ int MockIavDriver::doIoctl(int fd, unsigned long cmd, unsigned long arg)
         if (_failCmd == cmd && _failErr) {
             errno = _failErr;
             return -1;
+        }
+        if (_capCmd == cmd && _capLen != 0 && arg != 0) {
+            _capBuf.assign(reinterpret_cast<uint8_t *>(arg), reinterpret_cast<uint8_t *>(arg) + _capLen);
+            _capCmd = 0;
         }
     }
 
@@ -302,6 +353,20 @@ int MockIavDriver::doIoctl(int fd, unsigned long cmd, unsigned long arg)
         std::lock_guard<std::mutex> g(_lock);
         return (int)_waitCounter++;
     }
+    case IAV_IOC_QUERY_DECODE_STATUS: {
+        struct iav_decode_status *st = reinterpret_cast<struct iav_decode_status *>(arg);
+
+        if (st == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
+        /* The real driver reports the physical addresses of the display frame; the broker must clear them. */
+        st->yuv422_y_addr = 0x91a00000ul;
+        st->yuv422_uv_addr = 0x91b00000ul;
+        st->decoded_still_pic_info.width = 64;
+        st->decoded_still_pic_info.height = 48;
+        return 0;
+    }
     default:
         return 0;
     }
@@ -342,6 +407,20 @@ void MockIavDriver::setEagainCount(int n)
 {
     std::lock_guard<std::mutex> g(_lock);
     _eagain = n;
+}
+
+void MockIavDriver::captureArgOf(unsigned long cmd, size_t len)
+{
+    std::lock_guard<std::mutex> g(_lock);
+    _capCmd = cmd;
+    _capLen = len;
+    _capBuf.clear();
+}
+
+std::vector<uint8_t> MockIavDriver::capturedArg()
+{
+    std::lock_guard<std::mutex> g(_lock);
+    return _capBuf;
 }
 
 void MockIavDriver::failIoctl(unsigned long cmd, int err)

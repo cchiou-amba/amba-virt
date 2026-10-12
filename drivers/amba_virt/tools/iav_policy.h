@@ -21,7 +21,8 @@
 
 enum iav_profile {
 	IAV_PROFILE_CONSUMER = 0,	/* frames and queries only */
-	IAV_PROFILE_QUALIFICATION = 1,	/* the primary client, for qualification runs */
+	IAV_PROFILE_QUALIFICATION = 1,	/* every client may do what the primary client may, for qualification runs */
+	IAV_PROFILE_PRIMARY = 2,	/* the one guest that configures and runs the pipeline; never set server-wide */
 };
 #define IAV_PROFILE_BIT(p)	(1u << (p))
 
@@ -39,6 +40,7 @@ struct iav_policy_entry {
 	/* Filled from the allow-list. */
 	unsigned int profiles;			/* bit per profile that may call it; 0 = denied */
 	int (*check)(struct iav_call *call);	/* may reject (negative errno) or clamp */
+	void (*post)(struct iav_call *call);	/* runs on the output after a successful call, may clear fields */
 };
 
 /* What a check function can see and change. */
@@ -48,6 +50,8 @@ struct iav_call {
 	void *arg;			/* the broker's copy of a pointer argument */
 	unsigned long value;		/* a value argument */
 	unsigned int block_max_ms;	/* the longest a blocking call may wait */
+	uint64_t dec_len;		/* length of the decode partition window the guests may map; 0 if there is none */
+	uint64_t ovl_len;		/* length of the overlay partition window; 0 if there is none */
 };
 
 /*
