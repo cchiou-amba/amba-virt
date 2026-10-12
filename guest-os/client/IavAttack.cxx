@@ -65,6 +65,31 @@ const char *const AllowedNames[] = {
     "IAV_IOC_SET_POLL_EVENT_CFG", "IAV_IOC_CLEAR_POLL_EVENT_CFG",
     "IAV_IOC_WAIT_NEXT_IDSP_FRAME", NULL};
 
+/*
+ * The ioctls the primary guest may also call (generated, checked in with the broker). Only the
+ * read-only ones are called here: the rest would really change the pipeline.
+ */
+const char *const PrimaryNames[] = {
+#define PRIMARY_ALLOW(name) #name,
+#include "iav_allow_primary.inc"
+#undef PRIMARY_ALLOW
+    /* The primary calls whose arguments carry offsets, checked against the windows (iav_policy.c, versions 3 and 4). */
+    "IAV_IOC_CREATE_DECODER", "IAV_IOC_DECODE_JPEG", "IAV_IOC_DECODE_VIDEO", "IAV_IOC_QUERY_DECODE_BSB",
+    "IAV_IOC_WAIT_DECODE_BSB", "IAV_IOC_QUERY_DECODE_STATUS", "IAV_IOC_WAIT_PLAYBACK_EOS",
+    "IAV_IOC_SET_OVERLAY_INSERT", "IAV_IOC_GET_OVERLAY_INSERT",
+    NULL};
+
+/* Set by --role primary: this guest is the primary one, so the primary set is served. */
+bool g_primary = false;
+
+bool readOnlyName(const char *name)
+{
+    return strncmp(name, "IAV_IOC_GET_", 12) == 0 || strncmp(name, "IAV_IOC_VIN_GET_", 16) == 0 ||
+           strncmp(name, "IAV_IOC_IMG_GET_", 16) == 0 || strncmp(name, "IAV_IOC_QUERY_", 14) == 0 ||
+           strncmp(name, "IAV_IOC_VOUT_GET_", 17) == 0 || strncmp(name, "IAV_IOC_VOUT_CVBS_GET_", 22) == 0 ||
+           strncmp(name, "IAV_IOC_VOUT_MIPI_GET_", 22) == 0;
+}
+
 /* Allowed ioctls that are harmless to call with an all-zero argument. */
 const char *const SafeCalls[] = {"IAV_IOC_GET_IAV_STATE", "IAV_IOC_GET_CHIP_ID", "IAV_IOC_QUERY_IAV_CAP",
                                  "IAV_IOC_GET_SYSTEM_RESOURCE", "IAV_IOC_DRV_DSP_INFO", NULL};
@@ -160,6 +185,7 @@ public:
     }
 
     uint32_t nextSeq() { return _seq++; }
+    uint32_t lastSeq() const { return _seq - 1; }
 
 private:
     Wire recvExact(void *p, size_t n, int timeoutMs)
@@ -205,6 +231,7 @@ struct Answer
     bool parsed;
     struct amba_virt_iav_resp resp;
     std::vector<uint8_t> out;
+    uint32_t seq;			/* the request this answers */
 };
 
 /* Build and send a request. arg may be NULL. */
@@ -242,6 +269,7 @@ Answer recvAnswer(Conn &c, int timeoutMs)
 
     memset(&a.resp, 0, sizeof(a.resp));
     a.parsed = false;
+    a.seq = 0;
     a.wire = c.recvFrame(f, timeoutMs);
     if (a.wire != WireOk) {
         return a;
@@ -250,6 +278,7 @@ Answer recvAnswer(Conn &c, int timeoutMs)
         a.wire = WireBad;
         return a;
     }
+    a.seq = ((const struct amba_virt_msg *)&f[0])->seq;
     memcpy(&a.resp, &f[sizeof(struct amba_virt_msg)], sizeof(a.resp));
     if (a.resp.out_len <= f.size() - sizeof(struct amba_virt_msg) - sizeof(a.resp)) {
         a.out.assign(f.begin() + (long)(sizeof(struct amba_virt_msg) + sizeof(a.resp)),
@@ -271,7 +300,23 @@ Answer call(Conn &c, uint32_t op, uint64_t handle, uint32_t cmd, uint32_t argLen
         memset(&a.resp, 0, sizeof(a.resp));
         return a;
     }
-    return recvAnswer(c, timeoutMs);
+    /*
+     * The answer to this request. An answer to an earlier request that timed out is still on its way and is skipped,
+     * as the guest driver does: without it, one slow call would shift every answer after it by one.
+     */
+    {
+        const uint32_t want = c.lastSeq();
+        const long long deadline = nowMs() + timeoutMs;
+
+        for (;;) {
+            long long left = deadline - nowMs();
+
+            a = recvAnswer(c, left > 0 ? (int)left : 0);
+            if (a.wire != WireOk || !a.parsed || a.seq == want) {
+                return a;
+            }
+        }
+    }
 }
 
 /* ---- reporting ---- */
@@ -567,6 +612,13 @@ void probeIoctls()
                 g_table[i].allowed = true;
             }
         }
+        if (g_primary) {
+            for (const char *const *n = PrimaryNames; *n; n++) {
+                if (strcmp(*n, g_table[i].name) == 0) {
+                    g_table[i].allowed = true;
+                }
+            }
+        }
     }
     if (!c.connect()) {
         report(g, "connect", false, "no_connection", "");
@@ -603,6 +655,9 @@ void probeIoctls()
                     safe = true;
                 }
             }
+            if (g_primary && readOnlyName(e.name)) {
+                safe = true;
+            }
             if (!safe) {
                 continue;
             }
@@ -614,7 +669,14 @@ void probeIoctls()
             arg.assign(e.size, 0);
             argLen = (uint32_t)e.size;
         }
+        long long t0 = nowMs();
+
         a = call(c, AMBA_VIRT_IAV_OP_IOCTL, h, e.cmd, argLen, 0, 0, arg.empty() ? NULL : &arg[0], arg.size());
+        if (nowMs() - t0 > 500) {
+            /* a call that took long (or timed out) leaves its answer in flight: name it, it explains what follows */
+            leaked += std::string("[slow ") + e.name + " " + std::to_string(nowMs() - t0) + " ms wire=" +
+                      std::to_string((int)a.wire) + "]";
+        }
         if (a.wire != WireOk || !a.parsed) {
             /* a closed connection is not a served call; reconnect with a fresh session */
             c.connect();
@@ -630,13 +692,13 @@ void probeIoctls()
             allowedCount++;
             if (a.resp.status != 0) {
                 wrongRefused++;
-                leaked += std::string("[refused-but-allowed ") + e.name + "]";
+                leaked += std::string("[refused-but-allowed ") + e.name + " status=" + std::to_string(a.resp.status) + "]";
             }
         } else if (a.resp.status < 0) {
             refusedCount++;
         } else {
             wrongAllowed++;
-            leaked += std::string("[ACCEPTED ") + e.name + "]";
+            leaked += std::string("[ACCEPTED ") + e.name + " status=" + std::to_string(a.resp.status) + "]";
         }
     }
     {
@@ -895,8 +957,17 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--only") == 0 && i + 1 < argc) {
             only = argv[++i];
+        } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
+            const char *role = argv[++i];
+
+            if (strcmp(role, "primary") == 0) {
+                g_primary = true;
+            } else if (strcmp(role, "consumer") != 0) {
+                fprintf(stderr, "iav-attack: --role is primary or consumer\n");
+                return 2;
+            }
         } else {
-            fprintf(stderr, "usage: %s [--only framing|messages|handles|ioctls|map|blocking|exhaustion|flood]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--role primary|consumer] [--only framing|messages|handles|ioctls|map|blocking|exhaustion|flood]\n", argv[0]);
             return 2;
         }
     }

@@ -20,7 +20,9 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/module.h>
 #include <linux/fs.h>
+#include <linux/device.h>
 #include <linux/miscdevice.h>
+#include <linux/sysfs.h>
 #include <linux/uaccess.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
@@ -51,6 +53,11 @@
 static unsigned int iav_rpc_timeout_ms = 5000;
 module_param_named(rpc_timeout_ms, iav_rpc_timeout_ms, uint, 0644);
 MODULE_PARM_DESC(rpc_timeout_ms, "Longest a call waits for the broker (default 5000)");
+
+static inline unsigned int iav_rpc_timeout_ms_get(void)
+{
+	return iav_rpc_timeout_ms;
+}
 
 /* ---- the ioctl table ---- */
 
@@ -210,9 +217,9 @@ static bool iav_has_claim(void __iomem *io, size_t len)
 
 /*
  * Find the ivshmem devices that are IAV windows. A device amba_virt has bound is a data slice. A
- * window with padding says what it is in its last bytes; the one without (the DSP partition
- * when it is already a power of two) is the unbound device whose size matches the broker's DSP
- * window and that carries no slice claim.
+ * window with padding says what it is in its last bytes; one without (a partition that is already a
+ * power of two: the DSP partition, the overlay partition) is the unbound device whose size matches
+ * exactly one of the broker's unpadded windows and that carries no slice claim.
  */
 static void iav_scan_windows(const struct amba_virt_iav_window *info, unsigned int ninfo)
 {
@@ -254,10 +261,21 @@ static void iav_scan_windows(const struct amba_virt_iav_window *info, unsigned i
 			    hdr.window_id < IAV_MAX_WINDOWS && hdr.size == len) {
 				id = (int)hdr.window_id;
 			} else if (!iav_has_claim(io, PAGE_SIZE)) {
-				/* no header and no slice claim: the DSP window, if the sizes agree */
-				for (i = 0; i < ninfo; i++)
-					if (info[i].id == AMBA_VIRT_IAV_WIN_DSP && info[i].size == len)
-						id = (int)AMBA_VIRT_IAV_WIN_DSP;
+				/*
+				 * no header and no slice claim: a window with no padding (the DSP partition, the
+				 * overlay partition), if exactly one such window has this size
+				 */
+				unsigned int matches = 0;
+
+				for (i = 0; i < ninfo; i++) {
+					if (info[i].id < IAV_MAX_WINDOWS && info[i].size == len &&
+					    info[i].part_len == len) {
+						id = (int)info[i].id;
+						matches++;
+					}
+				}
+				if (matches != 1)
+					id = -1;
 			}
 			pci_iounmap(pdev, io);
 		}
@@ -496,8 +514,14 @@ static long iav_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	WRITE_ONCE(f->ready, false);
 	for (attempt = 0; ; attempt++) {
 		struct iav_reply rep;
+		/*
+		 * A call the real driver may block (the decode waits take up to five seconds) must not give up
+		 * before the driver does, or the guest drops the connection while the answer is still coming:
+		 * such a call waits three seconds longer than the ordinary deadline.
+		 */
 		int ret = iav_call(AMBA_VIRT_IAV_OP_IOCTL, READ_ONCE(f->handle), cmd, arg_value, 0,
-				   arg_len ? argbuf : NULL, arg_len, &rep, 0);
+				   arg_len ? argbuf : NULL, arg_len, &rep,
+				   (e->flags & IAV_F_BLOCKING) ? iav_rpc_timeout_ms_get() + 3000 : 0);
 
 		if (ret) {
 			result = ret;
@@ -531,6 +555,9 @@ static long iav_virt_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 				f->poll_cfg_valid = true;
 			} else if (e->cmd == IAV_IOC_CLEAR_POLL_EVENT_CFG && result >= 0) {
 				f->poll_cfg_valid = false;
+				/* nothing is polled any more: the worker stops after its current slice (F13) */
+				atomic_set(&f->armed, 0);
+				WRITE_ONCE(f->ready, false);
 			}
 		}
 		iav_reply_free(&rep);
@@ -653,10 +680,28 @@ static const struct file_operations iav_virt_fops = {
 	.llseek = no_llseek,
 };
 
+/*
+ * /sys/class/misc/iav/virtualized reads 1. The attribute exists only on this virtual device: on bare metal
+ * the real IAV driver has none, so an application that needs to tell the two apart (to report it, not to
+ * change behaviour) reads this file. The real /dev/iav ioctl structures carry no such flag.
+ */
+static ssize_t virtualized_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "1\n");
+}
+static DEVICE_ATTR_RO(virtualized);
+
+static struct attribute *iav_virt_attrs[] = {
+	&dev_attr_virtualized.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(iav_virt);
+
 static struct miscdevice iav_virt_misc = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "iav",
 	.fops = &iav_virt_fops,
+	.groups = iav_virt_groups,
 	.mode = 0660,
 };
 
