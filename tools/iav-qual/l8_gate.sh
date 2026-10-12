@@ -4,11 +4,21 @@
 #
 #   l8_gate.sh <board> <attacker-guest-host> <victim-guest-host>
 #
+# The attacker guest is the primary one (it holds slice 0, see /etc/amba-virt/iav.conf), so it
+# attacks with the primary set served; the victim is a consumer and runs its suite in that role.
 # The victim guest runs the qualification suite twice against the real server: once alone (the
 # baseline) and once while the attacker guest runs the raw-vsock client (iav-attack). Observed from
 # Dom0: the server worker's pid, thread count, open descriptors and memory before and after, the
 # daemon's "is ready" count (a restart adds one), and the kernel log for oopses. Every line printed
 # starts with a tag so the raw log can be read without the script.
+#
+# With L8_SERVER=dev the server under test is the candidate server started by tools/iav-ref/dev_server.sh
+# (no Dom0 frame tap, so no demo streams): its pid is read from /run/amba-virt/serve.pid, the "is ready" count is
+# not checked, and the closing liveness check is that both guests still read distinct camera frames with
+# IavRefCapture and that the pipeline is still encoding with the DSP normal.
+#
+# L8_ATT_OPTS gives extra ssh options for the attacker guest (for example "-J <board>" with the guest named
+# user@address, when the port forward of a replaced guest instance is stale).
 #
 # The checks are printed as "CHECK <name> PASS|FAIL <detail>" and the script exits 1 if any fails.
 #
@@ -21,6 +31,19 @@ ATT=$2
 VIC=$3
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 FAIL=0
+ATT_OPTS=()
+[ -n "${L8_ATT_OPTS:-}" ] && read -r -a ATT_OPTS <<< "$L8_ATT_OPTS"
+
+# ssh and scp that add the attacker's options when the target is the attacker guest.
+rssh() {
+	local h=$1
+	shift
+	if [ "$h" = "$ATT" ] && [ "${#ATT_OPTS[@]}" -gt 0 ]; then ssh "${ATT_OPTS[@]}" "$h" "$@"; else ssh "$h" "$@"; fi
+}
+rscp() {
+	local h=${2%%:*}
+	if [ "$h" = "$ATT" ] && [ "${#ATT_OPTS[@]}" -gt 0 ]; then scp -q "${ATT_OPTS[@]}" "$1" "$2"; else scp -q "$1" "$2"; fi
+}
 
 check() {
 	# check <name> <0|1 ok> <detail>
@@ -35,7 +58,8 @@ check() {
 snap() {
 	# snap <label>: print the server worker facts as "SNAP <label> k=v ..."
 	ssh "$B" '
-	p=$(grep "is ready" /run/amba-virt/server-daemon.log | tail -1 | sed "s/.*worker \([0-9]*\) is ready/\1/")
+	p=$(cat /run/amba-virt/serve.pid 2>/dev/null)
+	[ -n "$p" ] && [ "'"${L8_SERVER:-}"'" = dev ] || p=$(grep "is ready" /run/amba-virt/server-daemon.log | tail -1 | sed "s/.*worker \([0-9]*\) is ready/\1/")
 	t=$(grep "^Threads" /proc/$p/status | tr -dc 0-9)
 	r=$(grep "^VmRSS" /proc/$p/status | tr -dc 0-9)
 	f=$(ls /proc/$p/fd | wc -l)
@@ -65,9 +89,9 @@ ip_of() {
 
 # 1. Stage the binaries: the suite built into the demo, and the attack client.
 scp -q "$ROOT/guest-os/apps/amba-virt-demo/amba_virt_demo-musl" "$VIC:/tmp/iavq" || exit 9
-scp -q "$ROOT/guest-os/client/iav-attack" "$ATT:/tmp/iav-attack" || exit 9
+rscp "$ROOT/guest-os/client/iav-attack" "$ATT:/tmp/iav-attack" || exit 9
 ssh "$VIC" 'chmod +x /tmp/iavq; rm -f /tmp/l8_base.jsonl /tmp/l8_att.jsonl'
-ssh "$ATT" 'chmod +x /tmp/iav-attack; rm -f /tmp/l8_attack.out'
+rssh "$ATT" 'chmod +x /tmp/iav-attack; rm -f /tmp/l8_attack.out'
 
 S0=$(snap before)
 echo "$S0"
@@ -81,7 +105,7 @@ UP0=$(val "$S0" uptime)
 
 # 2. Victim baseline, alone.
 echo "RUN victim baseline"
-ssh "$VIC" "cd /tmp; sudo /tmp/iavq --iav-qual --backend real --mode tests --results /tmp/l8_base.jsonl --board $B" \
+ssh "$VIC" "cd /tmp; sudo /tmp/iavq --iav-qual --backend real --mode tests --role consumer --results /tmp/l8_base.jsonl --board $B" \
 	> /tmp/l8_base.out 2>&1
 echo "victim baseline exit=$?"
 tail -n 3 /tmp/l8_base.out
@@ -89,17 +113,17 @@ ssh "$VIC" 'sudo cat /tmp/l8_base.jsonl' > /tmp/l8_base.jsonl
 
 # 3. Attack, with the victim running the same suite at the same time.
 echo "RUN attacker and victim"
-ssh "$ATT" 'cd /tmp; sudo timeout 900 /tmp/iav-attack > /tmp/l8_attack.out 2>&1; echo $? > /tmp/l8_attack.rc' &
+rssh "$ATT" 'cd /tmp; sudo timeout 900 /tmp/iav-attack --role primary > /tmp/l8_attack.out 2>&1; echo $? > /tmp/l8_attack.rc' &
 ATTPID=$!
 sleep 3
-ssh "$VIC" "cd /tmp; sudo /tmp/iavq --iav-qual --backend real --mode tests --results /tmp/l8_att.jsonl --board $B" \
+ssh "$VIC" "cd /tmp; sudo /tmp/iavq --iav-qual --backend real --mode tests --role consumer --results /tmp/l8_att.jsonl --board $B" \
 	> /tmp/l8_att.out 2>&1
 echo "victim under attack exit=$?"
 tail -n 3 /tmp/l8_att.out
 wait $ATTPID
 echo "ATTACKER OUTPUT (tail)"
-ssh "$ATT" 'tail -n 25 /tmp/l8_attack.out; echo "attacker exit=$(cat /tmp/l8_attack.rc)"'
-ARC=$(ssh "$ATT" 'cat /tmp/l8_attack.rc')
+rssh "$ATT" 'tail -n 25 /tmp/l8_attack.out; echo "attacker exit=$(cat /tmp/l8_attack.rc)"'
+ARC=$(rssh "$ATT" 'cat /tmp/l8_attack.rc')
 ssh "$VIC" 'sudo cat /tmp/l8_att.jsonl' > /tmp/l8_att.jsonl
 
 # Negative control: with L8_CONTROL=restart the worker is restarted here, as a crash would, so
@@ -120,7 +144,9 @@ echo "$S1"
 
 check attacker_exit_0 "$([ "$ARC" = 0 ] && echo 1 || echo 0)" "exit=$ARC"
 check server_same_worker "$([ "$(val "$S1" pid)" = "$PID0" ] && echo 1 || echo 0)" "before=$PID0 after=$(val "$S1" pid)"
-check server_not_restarted "$([ "$(val "$S1" ready_lines)" = "$RDY0" ] && echo 1 || echo 0)" "ready_lines before=$RDY0 after=$(val "$S1" ready_lines)"
+if [ "${L8_SERVER:-}" != dev ]; then
+	check server_not_restarted "$([ "$(val "$S1" ready_lines)" = "$RDY0" ] && echo 1 || echo 0)" "ready_lines before=$RDY0 after=$(val "$S1" ready_lines)"
+fi
 check node_not_rebooted "$([ "$(val "$S1" uptime)" -gt "$UP0" ] && echo 1 || echo 0)" "uptime before=$UP0 after=$(val "$S1" uptime)"
 # The count includes lines present since boot (the hw_timer warnings), so the check is that the
 # attack added none.
@@ -150,6 +176,22 @@ for k in diff:
 sys.exit(1 if (diff or not a) else 0)
 EOF
 check victim_results_identical "$([ $? = 0 ] && echo 1 || echo 0)" "see VICTIM lines"
+
+if [ "${L8_SERVER:-}" = dev ]; then
+	# 6. (candidate server) Both guests still read distinct camera frames, and the pipeline is healthy.
+	OKS=1
+	for g in "$ATT" "$VIC"; do
+		rscp "$ROOT/build/iav-ref/IavRefCapture" "$g:/tmp/IavRefCapture" && rssh "$g" 'chmod +x /tmp/IavRefCapture'
+		out=$(rssh "$g" 'if [ $(id -u) -eq 0 ]; then /tmp/IavRefCapture --frames 12; else sudo -n /tmp/IavRefCapture --frames 12; fi; echo "exit=$?"' 2>&1 | tail -n 2 | tr '\n' ' ')
+		echo "CAPTURE $g $out"
+		echo "$out" | grep -q '"frames":12' && echo "$out" | grep -q '"distinct_content":2' && echo "$out" | grep -q 'exit=0' || OKS=0
+	done
+	check both_guests_read_frames "$OKS" "see CAPTURE lines"
+	HS=$(ssh "$B" 'echo state=$(head -2 /proc/ambarella/iav_state | tail -1 | tr -dc 0-9) dsp=$(sed -n 2p /proc/ambarella/dsp_state | grep -c "not assert")')
+	echo "PIPELINE $HS"
+	check pipeline_encoding_dsp_normal "$([ "$HS" = "state=2 dsp=1" ] && echo 1 || echo 0)" "$HS"
+	exit $FAIL
+fi
 
 # 6. Both demos on the board still stream frames.
 # The guests' streams are forwarded on the board's address: Ubuntu on 8080, Alpine on 8081.

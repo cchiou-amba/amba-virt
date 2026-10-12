@@ -9,7 +9,7 @@ CFLAGS        ?= -Wall -O2
 LDFLAGS       ?= -static
 
 BUILD_DIR     ?= build
-PROGS         := check_locks iav_status mmio_read scan_i2c1 read_max_regs test_oneshot_ser set_uart_pinmux uart_bench_agent test_interactive_consoles
+PROGS         := check_locks iav_status iav_memblock iav_vsrc_list mmio_read scan_i2c1 read_max_regs test_oneshot_ser set_uart_pinmux uart_bench_agent test_interactive_consoles
 TARGETS       := $(addprefix $(BUILD_DIR)/, $(PROGS))
 
 all: $(BUILD_DIR) $(TARGETS)
@@ -31,6 +31,13 @@ $(BUILD_DIR)/check_locks: check_locks.c | $(BUILD_DIR)
 
 $(BUILD_DIR)/iav_status: iav_status.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+IAV_INC ?= ../../build/pristine-dsp_v6/include
+$(BUILD_DIR)/iav_memblock: iav_memblock.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I$(IAV_INC) -I$(IAV_INC)/uapi -I$(IAV_INC)/uapi/specific -include stdint.h -o $@ $<
+
+$(BUILD_DIR)/iav_vsrc_list: iav_vsrc_list.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I$(IAV_INC) -I$(IAV_INC)/uapi -I$(IAV_INC)/uapi/specific -include stdint.h -o $@ $<
 
 $(BUILD_DIR)/mmio_read: mmio_read.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
