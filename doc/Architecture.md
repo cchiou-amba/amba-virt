@@ -229,6 +229,13 @@ and `_bsb1`, and attached to a guest as extra `ivshmem-plain` BARs through the
 staging memory: a guest that maps one reads and writes the DSP's own DRAM. See
 [IavVirtualization.md](IavVirtualization.md).
 
+**Who may configure the pipeline.** Every guest may query the virtual `/dev/iav` and read
+frames (the consumer set). Exactly one guest, the one the kernel has bound to the slice named
+by `primary-slice` in `/etc/amba-virt/iav.conf` (shipped as slice 0, the `amba_shm` guest),
+may also configure and run the pipeline (the primary set). The designation follows the slice
+binding because guest ids change at every VM start; a guest cannot claim it. See
+[AmbaVirtServer.md](AmbaVirtServer.md) section 13.4.
+
 Do not copy bulk data over vsock.
 
 ### UART and Peripheral DMA

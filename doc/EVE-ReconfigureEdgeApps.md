@@ -137,9 +137,44 @@ Alpine guests were replaced:
    Ubuntu `--adapter=amba_shm:amba_shm --adapter=amba_iav_dsp:amba_iav_dsp --adapter=amba_iav_bsb:amba_iav_bsb`;
    Alpine `--adapter=amba_shm:amba_shm1 --adapter=amba_iav_dsp:amba_iav_dsp1 --adapter=amba_iav_bsb:amba_iav_bsb1`;
    both with `--no-custom-configuration`.
+   The adapter given decides the role: the guest with `amba_shm` holds slice 0 and is the
+   **primary IAV client** (the image's `/etc/amba-virt/iav.conf` says `primary-slice 0`), so it
+   may configure the pipeline; the guest with `amba_shm1` holds slice 1 and is a consumer.
 4. A fresh guest has the base image only. Provision it (modules, demo, model, service
    enabled at boot) with `./guest-os/deploy_guest.sh <alias> --provision --reload`. After
    that a cold boot of the node starts the demo with no manual step.
+
+### 4.2 Worked examples: the decode window and the overlay window (2026-10-12)
+
+The decode partition's window added `amba_iav_dec` and `amba_iav_dec1` to the model, so the guests were replaced again,
+the same way, on the devkit only (the pro board's model and instances were left alone):
+
+1. Stop **every** instance on the node (Windows and QNX included), `./scripts/push_models.sh N1-655-Cooper-Devkit`,
+   confirm the controller's model lists the new adapters, start the instances you stopped that you are not replacing.
+2. `./scripts/clone_app.sh ubuntu_24_04_iav ubuntu_24_04_iav_dec`, `./scripts/add_app_direct.sh ubuntu_24_04_iav_dec
+   --if=amba_iav_dec`, `./scripts/create_app.sh ubuntu_24_04_iav_dec --version=1.0` (the same for Alpine).
+3. Delete the old instances, then create the new ones with the three old adapters and `--adapter=amba_iav_dec:amba_iav_dec`
+   (Alpine: `amba_shm:amba_shm1`, `amba_iav_dsp:amba_iav_dsp1`, `amba_iav_bsb:amba_iav_bsb1`, `amba_iav_dec:amba_iav_dec1`).
+4. **The host window module must already have the decode nodes when the instances start**, or the instance cannot map
+   `/dev/amba_virt_iav_dec`. A node running an older image needs the new `amba_virt_iav_win.ko` loaded first, and the
+   server restarted so that it configures the three windows.
+5. **Ubuntu needs cloud-init user-data at create.** An instance created with `--no-custom-configuration` has an empty
+   CIDATA, the password is never set and the guest cannot be reached. Pass `--custom-configuration=<file under apps/>`
+   with the `#cloud-config` of [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) section 2 (keep any SSH key out of
+   the repository); the password is `ubuntu`/`ubuntu`, and the key can be installed through it.
+6. **The port forwards of the new instances are stale until the node reboots** (they still point at the deleted
+   instances' addresses), so `ssh <node> -p 2222` fails. Find the guests in `/run/zedrouter/dnsmasq.leases/bn1` in the
+   Dom0 debug shell and reach them through Dom0 (`ssh -J <node> ubuntu@<ip>`); `SSH_OPTS="-J <node> ..."
+   ./guest-os/deploy_guest.sh <user>@<ip> --distro=<ubuntu|alpine> --provision --reload` provisions them.
+
+The overlay window (`amba_iav_ovl`, `amba_iav_ovl1`) was added the same way: stop every instance, push the model, then
+`./scripts/clone_app.sh ubuntu_24_04_iav_dec ubuntu_24_04_iav_ovl`, `./scripts/add_app_direct.sh ubuntu_24_04_iav_ovl
+--if=amba_iav_ovl`, `./scripts/create_app.sh ubuntu_24_04_iav_ovl --version=1.0`, delete the old Ubuntu instance and create
+`ubuntu_24_04_iav_ovl.<node>` with `--adapter=amba_shm:amba_shm --adapter=amba_iav_dsp:amba_iav_dsp
+--adapter=amba_iav_bsb:amba_iav_bsb --adapter=amba_iav_dec:amba_iav_dec --adapter=amba_iav_ovl:amba_iav_ovl` and the same cloud-init
+file. Only the primary guest (the one holding `amba_shm`) needs the decode and overlay adapters: a consumer is refused both windows
+([IavVirtualization.md](IavVirtualization.md) section 4), so the Alpine guest got no overlay adapter (it still has `amba_iav_dec1` from the decode step, which gives it nothing to map and could be removed). After the node's next
+boot the guests came up on their own, with `iav_virt` loaded by the demo service, and the port forwards pointed at them.
 
 A guest that takes a dynamic address because the old instance's DHCP lease is still
 held (`/run/zedrouter/dnsmasq.leases/bn1`) has no working port forward until the node

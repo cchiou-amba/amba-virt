@@ -95,15 +95,25 @@ Both models have the same adapters (`zcli model show … --detail`):
 | amba_iav_bsb | amba_iav_bsb | `IO_TYPE_OTHER` | amba_iav_bsb | `shmpath=/dev/amba_virt_iav_bsb`, `shmsize=16M` | unspecified |
 | amba_iav_dsp1 | amba_iav_dsp1 | `IO_TYPE_OTHER` | amba_iav_dsp1 | `shmpath=/dev/amba_virt_iav_dsp1`, `shmsize=1G` | unspecified |
 | amba_iav_bsb1 | amba_iav_bsb1 | `IO_TYPE_OTHER` | amba_iav_bsb1 | `shmpath=/dev/amba_virt_iav_bsb1`, `shmsize=16M` | unspecified |
+| amba_iav_dec | amba_iav_dec | `IO_TYPE_OTHER` | amba_iav_dec | `shmpath=/dev/amba_virt_iav_dec`, `shmsize=8M` | unspecified |
+| amba_iav_dec1 | amba_iav_dec1 | `IO_TYPE_OTHER` | amba_iav_dec1 | `shmpath=/dev/amba_virt_iav_dec1`, `shmsize=8M` | unspecified |
+| amba_iav_ovl | amba_iav_ovl | `IO_TYPE_OTHER` | amba_iav_ovl | `shmpath=/dev/amba_virt_iav_ovl`, `shmsize=8M` | unspecified |
+| amba_iav_ovl1 | amba_iav_ovl1 | `IO_TYPE_OTHER` | amba_iav_ovl1 | `shmpath=/dev/amba_virt_iav_ovl1`, `shmsize=8M` | unspecified |
 
-The four `amba_iav_*` adapters are the IAV windows of the virtual `/dev/iav`
-([IavVirtualization.md](IavVirtualization.md)): the DSP partition and the
-bitstream buffer, in two sets so that two guests on one board can each have one.
+The eight `amba_iav_*` adapters are the IAV windows of the virtual `/dev/iav`
+([IavVirtualization.md](IavVirtualization.md)): the DSP partition, the
+bitstream buffer, the decode partition and the overlay partition, in two sets so that two guests on one board can each have one.
 `shmsize` must equal the size the server configures on the window node
-(`1G` for the DSP partition, `16M` for the 10 MiB bitstream buffer on N1-655). They
-need the `amba_virt_iav_win.ko` nodes, which exist once the server is ready. Give a
-guest the pair of one set (`amba_iav_dsp` and `amba_iav_bsb`, or the `1` pair) next
-to its data slice, at instance create.
+(`1G` for the DSP partition, `16M` for the 10 MiB bitstream buffer, `8M` for the decode and overlay partitions on
+N1-655). They need the `amba_virt_iav_win.ko` nodes, which exist once the server is ready. Give a
+guest the adapters of one set (`amba_iav_dsp` and `amba_iav_bsb`, or the `1` pair) next
+to its data slice, at instance create; add `amba_iav_dec` and `amba_iav_ovl` (the same set) for the guest that
+decodes and draws overlays, which is the primary guest: a consumer is refused those two windows.
+
+Which guest may configure the pipeline through the virtual `/dev/iav` is set by its data
+slice, not by these adapters: the guest holding `amba_shm` (slice 0) is the primary IAV client
+under the image's `/etc/amba-virt/iav.conf`, and the guest holding `amba_shm1` is a consumer
+(see [AmbaVirtServer.md](AmbaVirtServer.md) section 13.4).
 
 `amba_shm` and `amba_shm1` have empty `phyaddrs`. Assigning one to an HVM is
 a window marker: `kvm.go` emits `ivshmem-plain`. Each window is shared by

@@ -47,14 +47,16 @@ and builds the layer:
 /etc/init.d/021-amba-virt-server -> /usr/bin/amba-virt-server
 /etc/amba-virt/modules.conf          ambcma.ko (with parameters), cavalry.ko, amba_virt.ko
 /etc/amba-virt/early-modules.conf    camera modules loaded before camera power
-/etc/amba-virt/late-modules.conf     camera modules loaded after camera power
+/etc/amba-virt/late-modules.conf     camera modules loaded after camera power (the last is ambds.ko, the virtual video source)
 /etc/amba-virt/camera.conf           camera pipeline configuration (pipeline on)
+/etc/amba-virt/iav.conf              virtual /dev/iav: primary-slice <n> names the guest that may configure the pipeline
 /lib/modules/<release>/extra/*.ko    the signed modules those lists name
 /lib/firmware/cavalry.bin            Cavalry VisORC microcode
 /usr/bin/amba-virt-server, amba-virt-ctl, amba-virt-aaa, dsp_monitor_service
 /usr/lib/amba-virt/lib/              private glibc and camera libraries
 /usr/lib/amba-virt/firmware/         DSP microcode for the camera pipeline
 /usr/share/ambarella/                Lua scripts and IDSP assets
+/usr/share/amba-virt/lua_scripts/    amba-virt's resource script: the camera pipeline plus a JPEG decoder channel (camera.conf selects it)
 /usr/share/amba-virt/PREBUILTS       origin and checksum of each prebuilt file
 ```
 
@@ -75,7 +77,12 @@ The layer is tagged from a digest of the staged rootfs and reaches the EVE
    points the kernel firmware search path
    (`/sys/module/firmware_class/parameters/path`) at
    `/usr/lib/amba-virt/firmware`. `cavalry.ko` finds `cavalry.bin` in
-   `/lib/firmware`.
+   `/lib/firmware`. The last late module is `ambds.ko` (`vin_virtual_flag=1 custom_format_enable=1`), a video
+   source with no hardware behind it: the IAV driver puts every decoder channel on one, and the resource script
+   `camera.conf` names (`/usr/share/amba-virt/lua_scripts/n1_655_vin0_1080p_linear_plus_jpeg_decoder.lua`, built
+   from Cooper's script with a `pre_dec_enable` channel added) has one, which gives guests hardware JPEG decode beside the
+   camera ([IavVirtualization.md](IavVirtualization.md)). Without a decoder channel the decode partition does not exist and
+   the guests have no decode window; point `resource_script` at Cooper's `n1_655_vin0_1080p_linear.lua` to run that way.
 4. The server reports ready only after `/dev/amba_virt_shm*` exists, so
    every Ambarella node is present before EVE starts any guest. No device is
    assigned to an app.

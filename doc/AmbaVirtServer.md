@@ -201,7 +201,7 @@ Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
 | **HVM Guest** | `amba_gdma.ko` | Guest kernel GDMA export driver | Distro kernel headers |
 | **HVM Guest** | `amba-virt-client` | CppUTest functional test suite & IPC benchmark | `g++` (`-std=c++17`, `-lpthread`) |
 | **EVE Dom0** | `amba_virt.ko` | Shared memory backing file mmap + vsock server | Ambarella `eve-kernel` |
-| **EVE Dom0** | `amba_virt_iav_win.ko` | Exposes the IAV driver's DSP partition and bitstream buffer as mappable nodes for the hypervisor | Ambarella `eve-kernel` |
+| **EVE Dom0** | `amba_virt_iav_win.ko` | Exposes the IAV driver's DSP, bitstream, decode and overlay partitions as mappable nodes for the hypervisor (eight nodes, two sets) | Ambarella `eve-kernel` |
 | **EVE Dom0** | `amba-virt-server` | Arbitrator daemon, memory pool, ACL, proxy | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`), glibc from `/usr/lib/amba-virt/lib` |
 | **EVE Dom0** | `amba-virt-ctl` | Dom0 host administration CLI utility | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`) |
 
@@ -1036,11 +1036,19 @@ Implemented: the IAV broker in the server (`iav_broker.c`, `iav_policy.c`,
 `amba_virt_iav_win.ko`. Message types `AMBA_VIRT_MSG_IAV_REQ` and `_RESP` carry
 fixed-layout frames; zero-copy frame access is the ivshmem windows. Design, limits,
 trust model and runbook: [IavVirtualization.md](IavVirtualization.md). The server
-configures the window nodes at start.
+configures the window nodes at start: the DSP, bitstream, decode and overlay windows, each from the partition table the
+real driver reports. The decode partition exists only when the pipeline's resource script has a decoder channel
+(the `ambds` virtual VIN and a channel with `pre_dec_enable`); without one the server logs it and no guest has a decode
+window. The overlay window covers only the content of the overlay partition, not the driver's own DSP command buffers
+behind it.
 
-The broker checks every call against a profile: `consumer` (the default; 15 query and
-descriptor ioctls, everything else refused with `EPERM`) or, for qualification runs only,
-`qualification`. A guest needs the `IAV_DEV` capability in the ACL either way.
+The broker checks every call against a profile. Every guest gets the **consumer** profile
+(15 query and descriptor ioctls). The one guest the kernel has bound to the ivshmem slice named
+by `primary-slice` in `/etc/amba-virt/iav.conf` (or by `-P`) gets the **primary** profile: 128
+ioctls, including pipeline configuration and run control, JPEG decode and stream overlays. The guest is identified on every
+call from the kernel's binding, never from the request. A guest needs the `IAV_DEV`
+capability in the ACL in either case. The `qualification` profile, for qualification runs
+only, gives every guest the primary set.
 
 ### 13.5 Staged Implementation Roadmap
 
@@ -1133,8 +1141,20 @@ no arguments the server runs in daemon mode with `/etc/amba-virt/modules.conf` a
 Options for manual runs: `-F` (foreground), `-N` (do not restart the worker), `-R <sec>`
 (readiness timeout, default 120), `-m <modules.conf>`, `-C <camera.conf>`, `-b` (reject Path A),
 `-l <cid>:<lease>` (DMA32 lease binding), `-c <n>` (tap cohort).
+Virtual `/dev/iav` options: `-i <profile>` (`off`, `consumer`, the default, or `qualification`)
+and `-P <slice>` (the ivshmem slice, 0 to 7, whose guest is the primary IAV client).
 
-Virtual `/dev/iav` option: `-i <profile>` (`off`, `consumer`, the default, or `qualification`).
+#### IAV Settings (`/etc/amba-virt/iav.conf`)
+- Read when the server starts, unless `-P` is given. Blank lines and lines starting with `#`
+  are ignored.
+- `primary-slice <n>`: the guest bound to ivshmem slice `n` (0 to 7) may configure and run the
+  pipeline through the virtual `/dev/iav`. Without the line no guest is primary.
+- A line that is not understood is reported on stderr and ignored, so a typo cannot widen what
+  a guest may do.
+- The image ships `primary-slice 0`. Slice 0 is the guest given the `amba_shm` adapter, slice 1
+  the guest given `amba_shm1` (see [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md)
+  section 4.1). Guest ids change at every VM start, so the designation is by slice. The file is
+  part of the image; changing it means a new image.
 
 #### Module Configuration Grammar (`modules.conf`, `early-modules.conf`, `late-modules.conf`)
 - Blank lines and lines starting with `#` are ignored.
@@ -1191,6 +1211,7 @@ rebuilding the image and updating EVE, not by leaving files under `/persist`.
 | `amba_cavalry: host ACL denied registration` (`-EPERM`) | Guest CID lacks `AMBA_VIRT_CAP_DEV_CONFIG` capability | Run `amba-virt-ctl set-acl <cid> standard` in Dom0 or define static profile in `/persist/etc/amba-virt/policies.json`. |
 | `amba_cavalry: Cavalry device already registered` (`-EBUSY`) | Previous driver instance crashed without clean `rmmod` | Pass `force_replace=1` on `insmod` to trigger server-side session cleanup and re-registration. |
 | `amba-virt-ctl: connect failed (/run/amba-virt/admin.sock)` | Server not running or caller is not root | Check the server as above. Run `amba-virt-ctl` as root in Dom0. |
+| Guest `/dev/iav` call fails with `EPERM` for a pipeline-configuration ioctl | The guest is not the primary IAV client, or the ioctl is not supported yet | The primary guest is the one bound to `primary-slice` in `/etc/amba-virt/iav.conf`. Check which slice the guest holds (its `amba_shm` adapter). An ioctl outside the primary set is refused for every guest ([IavVirtualization.md](IavVirtualization.md) section 3) |
 | Dom0 kernel log: `task 021-amba-virt-s ... blocked for more than N seconds` in `amba_virt_ioctl` | A host module without the bounded send path: a guest that stopped reading held the connection lock | Run an image with the refcounted connection sockets (section 3.1). `amba-virt-ctl evict <cid>` frees a stuck tenant |
 | `mmap: Invalid argument (EINVAL)` | Buffer size exceeds 1 GiB window or is unaligned | Query driver via `AMBA_VIRT_IOC_GET_INFO`. Ensure buffer offsets and mapping sizes are page-aligned and $\le$ `shm_size`. |
 | Latency regression ($p99 > 2000\text{ }\mu\text{s}$) | CPU throttling or core frequency scaling | Inspect CPU governor on host (`cpupower frequency-info`). Check Dom0 and guest CPU load. |

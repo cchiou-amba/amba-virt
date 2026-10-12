@@ -107,6 +107,7 @@ guest-os/
 │   │   └── Makefile            # QNX qcc Makefile
 │   └── qnx-build/              # QNX HVM disk image builder
 │       └── build.sh            # Automated QCOW2 cloud image creator
+├── apps/iav-ref/                # IAV reference applications (make iav-ref): capture, events, stream, pipeline, decode, overlay
 ├── userspace/                   # Imported Ambarella userspace runtimes
 │   ├── cavalry_mem/            # Memory allocator abstraction
 │   └── nnctrl/                 # VisORC neural network control library
@@ -124,16 +125,22 @@ mmap ABI through the host broker. It needs `amba_virt.ko` (its vsock channel and
 The ABI is the real driver's, so a legacy application is not ported; what is supported is
 limited by a host policy, not by a second API:
 
-Every guest is served 15 query, descriptor and poll ioctls; every other ioctl of the real
-driver fails with `EPERM`, so a guest can query and read frames but not configure or run
-the pipeline.
+| Guest | ioctls served | Everything else |
+|---|---|---|
+| Every guest | 15 query, descriptor and poll ioctls | `EPERM` |
+| The primary guest (bound to `primary-slice` in the host's `/etc/amba-virt/iav.conf`) | 128, including pipeline configuration and run control, JPEG decode and stream overlays | `EPERM` |
 
 An ioctl the real driver does not have fails with `ENOTTY`. The guest needs the `IAV_DEV`
 capability (`open` fails with `EPERM` without it); while the host server is away calls fail
 with the transport error (`ETIMEDOUT`, `ENOTCONN`) and the next call reconnects. Frames are
-read zero-copy through the two IAV windows, which a guest has only if its app instance was
-given the `amba_iav_*` adapters. The suite that qualifies all this is built into
-`amba_virt_demo` (`--iav-qual`). Details, limits and the runbook: [../doc/IavVirtualization.md](../doc/IavVirtualization.md).
+read zero-copy through the IAV windows (DSP, bitstream; the primary guest also has the decode and overlay
+windows), which a guest has only if its app instance was given the `amba_iav_*` adapters. A fresh guest needs
+`sudo modprobe iav_virt` (the demo service does it at start); a mapped window must be read and written with aligned
+accesses of at most eight bytes (a plain `memcpy` at an unaligned offset destroys the guest VM). The suite that qualifies all this is built into
+`amba_virt_demo` (`--iav-qual`; add `--role primary` or `--role consumer` to say which role
+the run expects). The reference applications (`apps/iav-ref/`, built by `make iav-ref`, static aarch64, the same binary
+on the bare board and in a guest) show the stream, capture, event, pipeline, decode and overlay paths. Details, limits and
+the runbook: [../doc/IavVirtualization.md](../doc/IavVirtualization.md).
 
 ## 4. Staged Artifacts & Verification
 
