@@ -170,7 +170,9 @@ TEST(SliceLease, reload_after_restart_keeps_the_grant)
 
     snprintf(req, sizeof(req), "QUERY_SLICE %s", kUuidA);
     exchange(req, resp, sizeof(resp));
-    STRCMP_EQUAL(saved, resp);
+    /* The reserve reply is the query reply plus the camera verdict. */
+    CHECK_TRUE(strncmp(saved, resp, strlen(resp) - 1) == 0);
+    CHECK_TRUE(strstr(saved, " camera=0\n") != nullptr);
 }
 
 TEST(SliceLease, geometry_loss_blocks_new_grants_and_keeps_old_ones)
@@ -230,17 +232,17 @@ TEST(SliceLease, primary_keeps_index_zero)
     char resp[160];
     char req[160];
 
-    snprintf(req, sizeof(req), "RESERVE_SLICE_MIN %s %llu 1", kUuidB,
+    snprintf(req, sizeof(req), "RESERVE_SLICE_MIN %s %llu 1 amba_shm1 absent", kUuidB,
              (unsigned long long)kSliceBytes);
     exchange(req, resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=1"));
 
-    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0", kUuidA,
+    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0 amba_shm absent", kUuidA,
              (unsigned long long)kSliceBytes);
     exchange(req, resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=0"));
 
-    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0",
+    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0 amba_shm absent",
              "33333333-3333-4333-8333-333333333333",
              (unsigned long long)kSliceBytes);
     exchange(req, resp, sizeof(resp));

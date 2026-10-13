@@ -19,6 +19,7 @@
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
+#include "virt_camera_policy.h"
 #include "virt_host_ops.h"
 #include "virt_driver_matrix.h"
 #include "virt_mem_pool.h"
@@ -378,6 +379,10 @@ static void handle_client(int client_fd)
 		   strcmp(cmd, "RELEASE_LOW") == 0 ||
 		   strcmp(cmd, "QUERY_LOW") == 0) {
 		virt_low_lease_admin(req_buf, resp_buf, sizeof(resp_buf));
+	} else if (strcmp(cmd, "SET_CAMERA") == 0 ||
+		   strcmp(cmd, "GET_CAMERA") == 0 ||
+		   strcmp(cmd, "CAMERA_STATUS") == 0) {
+		virt_camera_policy_admin(req_buf, resp_buf, sizeof(resp_buf));
 	} else if (strcmp(cmd, "POOLS") == 0) {
 		virt_admin_format_pools(resp_buf, sizeof(resp_buf));
 	} else {

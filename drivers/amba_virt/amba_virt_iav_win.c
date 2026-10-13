@@ -316,10 +316,6 @@ static const char * const iav_win_names[IAV_WIN_NODES] = {
 	AMBA_VIRT_IAV_WIN_BSB_NAME,
 	AMBA_VIRT_IAV_WIN_DEC_NAME,
 	AMBA_VIRT_IAV_WIN_OVL_NAME,
-	AMBA_VIRT_IAV_WIN_DSP1_NAME,
-	AMBA_VIRT_IAV_WIN_BSB1_NAME,
-	AMBA_VIRT_IAV_WIN_DEC1_NAME,
-	AMBA_VIRT_IAV_WIN_OVL1_NAME,
 };
 
 static int __init iav_win_init(void)
@@ -341,7 +337,7 @@ static int __init iav_win_init(void)
 			return ret;
 		}
 	}
-	pr_info("amba_virt_iav_win: %d window sets (DSP, BSB, DEC and OVL each) registered\n", AMBA_VIRT_IAV_WIN_SETS);
+	pr_info("amba_virt_iav_win: one window set (DSP, BSB, DEC and OVL) registered\n");
 	return 0;
 }
 

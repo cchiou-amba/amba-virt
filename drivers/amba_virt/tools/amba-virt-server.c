@@ -35,6 +35,7 @@
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
 #include "virt_camera_conf.h"
+#include "virt_camera_policy.h"
 #include "virt_camera_pipeline.h"
 #include "virt_daemon.h"
 #include "virt_slice_lease.h"
@@ -1663,6 +1664,7 @@ static int server_run(int ready_fd)
 	server_apply_geometry(fd, map, &info);
 
 	virt_acl_init();
+	virt_camera_policy_load();
 	virt_dma_broker_init();
 	virt_admin_ipc_start(NULL);
 

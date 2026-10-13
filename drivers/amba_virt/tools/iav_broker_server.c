@@ -21,6 +21,7 @@
 #include "amba_virt_iav_win.h"
 #include "iav_broker_server.h"
 #include "iav_slice_rpc.h"
+#include "virt_camera_policy.h"
 #include "virt_low_lease.h"
 
 #define WORKERS			4
@@ -159,36 +160,28 @@ static int window_node_config(const struct iav_broker_window *w, const char *pat
 	return rc;
 }
 
-/* Both sets of nodes. The first set is required; the second is optional and its absence is only noted. */
+/* The one set of nodes every attached guest's QEMU maps. */
 static int window_node_ready(const struct iav_broker_window *w)
 {
-	const char *first, *second;
-	int rc;
+	const char *path;
 
 	switch (w->id) {
 	case AMBA_VIRT_IAV_WIN_DSP:
-		first = AMBA_VIRT_IAV_WIN_DSP_PATH;
-		second = AMBA_VIRT_IAV_WIN_DSP1_PATH;
+		path = AMBA_VIRT_IAV_WIN_DSP_PATH;
 		break;
 	case AMBA_VIRT_IAV_WIN_BSB:
-		first = AMBA_VIRT_IAV_WIN_BSB_PATH;
-		second = AMBA_VIRT_IAV_WIN_BSB1_PATH;
+		path = AMBA_VIRT_IAV_WIN_BSB_PATH;
 		break;
 	case AMBA_VIRT_IAV_WIN_DEC:
-		first = AMBA_VIRT_IAV_WIN_DEC_PATH;
-		second = AMBA_VIRT_IAV_WIN_DEC1_PATH;
+		path = AMBA_VIRT_IAV_WIN_DEC_PATH;
 		break;
 	case AMBA_VIRT_IAV_WIN_OVL:
-		first = AMBA_VIRT_IAV_WIN_OVL_PATH;
-		second = AMBA_VIRT_IAV_WIN_OVL1_PATH;
+		path = AMBA_VIRT_IAV_WIN_OVL_PATH;
 		break;
 	default:
 		return -EINVAL;
 	}
-	rc = window_node_config(w, first);
-	if (rc == 0)
-		(void)window_node_config(w, second);
-	return rc;
+	return window_node_config(w, path);
 }
 
 /*
@@ -203,7 +196,7 @@ static int set_windows_from_driver(void)
 	unsigned int n = 0;
 	unsigned int pids[4] = { IAV_PART_DSP, IAV_PART_BSB, IAV_PART_DEC_BSB, IAV_PART_OVERLAY };
 	unsigned int ids[4] = { AMBA_VIRT_IAV_WIN_DSP, AMBA_VIRT_IAV_WIN_BSB, AMBA_VIRT_IAV_WIN_DEC, AMBA_VIRT_IAV_WIN_OVL };
-	int fd, i;
+	int fd, i, rc;
 
 	fd = open(IAV_BROKER_DEVICE_PATH, O_RDWR | O_CLOEXEC);
 	if (fd < 0)
@@ -231,7 +224,23 @@ static int set_windows_from_driver(void)
 			n++;
 	}
 	close(fd);
-	return iav_broker_set_windows(&g_broker, w, n);
+	rc = iav_broker_set_windows(&g_broker, w, n);
+	if (rc >= 0) {
+		/*
+		 * The nodes are configured and the broker knows the windows: tell the camera policy which
+		 * windows exist and when, so a guest's reserve can attach them. This runs once per server
+		 * run, before the server reports ready.
+		 */
+		struct virt_camera_window cw[4];
+		unsigned int k;
+
+		for (k = 0; k < n && k < 4; k++) {
+			cw[k].id = w[k].id;
+			cw[k].size = w[k].size;
+		}
+		virt_camera_policy_set_windows(cw, k, virt_camera_policy_now_ms());
+	}
+	return rc;
 }
 
 /* ---- sending responses ---- */

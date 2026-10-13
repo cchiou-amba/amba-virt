@@ -295,7 +295,7 @@ Path A vs. Path B is strictly an architectural property of **Cavalry (VisORC NPU
 
 ## 7. Multi-Tenant Architecture & Memory Sizing Guidelines
 
-The running pool is eight 1 GiB Cavalry slices from `0x100000000`. `amba-virt-ctl pools` prints that geometry and the paired 512 MiB low pool. A guest receives one slice: the `amba_shm` ticket is index 0, and `amba_shm1` takes the lowest free index at or above 1. The server keeps the lease until EVE deletes or cleans up the domain.
+The running pool is eight 1 GiB Cavalry slices from `0x100000000`. `amba-virt-ctl pools` prints that geometry and the paired 512 MiB low pool. A guest receives one slice: the `amba_shm` ticket is index 0, and every other ticket (`amba_shm1` to `amba_shm7`) takes the lowest free index at or above 1. The digit in a ticket's name is an exclusivity label for the controller's one-instance-per-group rule: it does not select Cavalry slice N. The server keeps the lease until EVE deletes or cleans up the domain.
 
 ### 7.1 Multi-Tenant Defense-in-Depth Architecture
 

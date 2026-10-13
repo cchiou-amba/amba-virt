@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "virt_camera_policy.h"
 #include "virt_slice_lease.h"
 
 #define LEASE_MAX 8
@@ -403,12 +404,54 @@ int virt_slice_lease_load(void)
 	return 0;
 }
 
+/*
+ * Append the camera verdict to a successful reserve reply. ticket is NULL for the legacy
+ * RESERVE_SLICE, which never attaches the camera windows. The lock is held.
+ */
+static void append_camera_locked(const char *uuid, const char *ticket, enum virt_camera_intent intent,
+				 char *resp, size_t resp_len)
+{
+	struct lease_slot *slot;
+	struct virt_camera_verdict v;
+	char suffix[160];
+	size_t n, add;
+
+	if (strncmp(resp, "OK index=", 9) != 0)
+		return;
+	slot = find_uuid(uuid);
+	if (!slot)
+		return;
+	memset(&v, 0, sizeof(v));
+	if (ticket && virt_camera_policy_decide(ticket, intent, slot->index, &v) != 0)
+		memset(&v, 0, sizeof(v));
+	if (virt_camera_verdict_format(&v, suffix, sizeof(suffix)) < 0)
+		return;
+	n = strlen(resp);
+	if (n && resp[n - 1] == '\n')
+		n--;
+	add = strlen(suffix);
+	if (n + add + 2 > resp_len)
+		return;
+	memcpy(resp + n, suffix, add);
+	resp[n + add] = '\n';
+	resp[n + add + 1] = '\0';
+}
+
+/*
+ * RESERVE_SLICE_AT and RESERVE_SLICE_MIN carry the ticket and the fleet camera intent:
+ *   RESERVE_SLICE_AT|MIN <uuid> <bytes> <index> <ticket> <intent>
+ * Exactly six tokens; a bad ticket or intent is refused before any slice is taken.
+ */
 int virt_slice_lease_admin(const char *req, char *resp, size_t resp_len)
 {
 	char cmd[64];
 	char uuid[64];
 	char num[64];
 	char extra[64];
+	char ticket[64];
+	char intent_s[64];
+	char trailing[64];
+	enum virt_camera_intent intent = VIRT_CAMERA_INTENT_ABSENT;
 	uint64_t value = 0;
 	uint64_t index_value = 0;
 	int fields;
@@ -420,8 +463,9 @@ int virt_slice_lease_admin(const char *req, char *resp, size_t resp_len)
 		snprintf(resp, resp_len, "ERR INVAL\n");
 		return 0;
 	}
-	cmd[0] = uuid[0] = num[0] = extra[0] = '\0';
-	fields = sscanf(req, "%63s %63s %63s %63s", cmd, uuid, num, extra);
+	cmd[0] = uuid[0] = num[0] = extra[0] = ticket[0] = intent_s[0] = trailing[0] = '\0';
+	fields = sscanf(req, "%63s %63s %63s %63s %63s %63s %63s", cmd, uuid, num, extra, ticket,
+			intent_s, trailing);
 	if (fields < 1) {
 		snprintf(resp, resp_len, "ERR INVAL\n");
 		return 0;
@@ -429,20 +473,25 @@ int virt_slice_lease_admin(const char *req, char *resp, size_t resp_len)
 
 	pthread_mutex_lock(&g_lock);
 	if (strcmp(cmd, "RESERVE_SLICE") == 0) {
-		if (parse_u64(num, &value) != 0)
+		if (parse_u64(num, &value) != 0) {
 			snprintf(resp, resp_len, "ERR INVAL\n");
-		else
+		} else {
 			reserve_locked(uuid, value, resp, resp_len);
+			append_camera_locked(uuid, NULL, VIRT_CAMERA_INTENT_ABSENT, resp, resp_len);
+		}
 	} else if (strcmp(cmd, "RESERVE_SLICE_AT") == 0 ||
 		   strcmp(cmd, "RESERVE_SLICE_MIN") == 0) {
-		if (fields < 4 || parse_u64(num, &value) != 0 ||
+		if (fields != 6 || parse_u64(num, &value) != 0 ||
 		    parse_u64(extra, &index_value) != 0 ||
-		    index_value > UINT32_MAX)
+		    index_value > UINT32_MAX || !virt_camera_ticket_ok(ticket) ||
+		    virt_camera_intent_parse(intent_s, &intent) != 0) {
 			snprintf(resp, resp_len, "ERR INVAL\n");
-		else
+		} else {
 			reserve_range_locked(uuid, value, (uint32_t)index_value,
 					     strcmp(cmd, "RESERVE_SLICE_AT") == 0,
 					     resp, resp_len);
+			append_camera_locked(uuid, ticket, intent, resp, resp_len);
+		}
 	} else if (strcmp(cmd, "RELEASE_SLICE") == 0) {
 		if (parse_u64(num, &value) != 0)
 			snprintf(resp, resp_len, "ERR INVAL\n");

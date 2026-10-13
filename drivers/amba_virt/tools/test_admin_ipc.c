@@ -18,6 +18,7 @@
 #include "cavalry_proxy.h"
 #include "virt_acl.h"
 #include "virt_admin_ipc.h"
+#include "virt_camera_policy.h"
 #include "virt_mem_pool.h"
 
 #define TEST_SOCK "/tmp/test_admin.sock"
@@ -95,6 +96,25 @@ int main(void)
 	send_cmd("EVICT 15\n", resp, sizeof(resp));
 	assert(strstr(resp, "OK EVICTED 15") != NULL);
 	printf("EVICT command: PASS\n");
+
+	/* 8. Camera window policy commands */
+	virt_camera_policy_reset();
+	virt_camera_policy_set_store("/tmp/test_admin_ipc_camera_tickets");
+	unlink("/tmp/test_admin_ipc_camera_tickets");
+	send_cmd("CAMERA_STATUS\n", resp, sizeof(resp));
+	assert(strncmp(resp, "OK windows=none ", 16) == 0);
+	send_cmd("SET_CAMERA amba_shm4 on\n", resp, sizeof(resp));
+	assert(strcmp(resp, "OK\n") == 0);
+	send_cmd("GET_CAMERA amba_shm4\n", resp, sizeof(resp));
+	assert(strstr(resp, "TICKET amba_shm4 override=on") != NULL);
+	send_cmd("SET_CAMERA bad/ticket on\n", resp, sizeof(resp));
+	assert(strcmp(resp, "ERR INVAL\n") == 0);
+	send_cmd("SET_CAMERA amba_shm4 inherit\n", resp, sizeof(resp));
+	assert(strcmp(resp, "OK\n") == 0);
+	send_cmd("GET_CAMERA\n", resp, sizeof(resp));
+	assert(strcmp(resp, "OK COUNT 0\n") == 0);
+	unlink("/tmp/test_admin_ipc_camera_tickets");
+	printf("SET_CAMERA / GET_CAMERA / CAMERA_STATUS commands: PASS\n");
 
 	virt_admin_ipc_stop();
 	virt_acl_cleanup();

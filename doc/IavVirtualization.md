@@ -108,7 +108,7 @@ windows unbound for it).
   the request says, and guest ids change at every VM start, so the designation
   is by slice. Without the setting no guest is primary.
 
-Consumer DSP and bitstream windows (`amba_iav_dsp1`, `amba_iav_bsb1`) are writable BARs, the same as the primary's unsuffixed DSP, bitstream, overlay, and decode windows. The N1-655 has no SMMU. QEMU `memory-backend-file` `readonly=on` opens the node read-only, the kernel clears `VM_SHARED` on that mapping, and `iav_win_mmap` rejects it, so QEMU never starts. A store from the guest through those BARs reaches the live frame and bitstream. Ioctl checks do not stop that store. Private JPEG memory is a 512 MiB `ambcma` partition inside `iav@0`, leased as eight 64 MiB slices, one device node `/dev/amba_virt_iav_sliceN` per guest. A private submission is admitted against the caller's slice before any IAV ioctl.
+The DSP and bitstream windows of every attached guest (and the decode and overlay windows of the primary) are writable BARs. The N1-655 has no SMMU. QEMU `memory-backend-file` `readonly=on` opens the node read-only, the kernel clears `VM_SHARED` on that mapping, and `iav_win_mmap` rejects it, so QEMU never starts. A store from the guest through those BARs reaches the live frame and bitstream. Ioctl checks do not stop that store. Private JPEG memory is a 512 MiB `ambcma` partition inside `iav@0`, leased as eight 64 MiB slices, one device node `/dev/amba_virt_iav_sliceN` per guest. A private submission is admitted against the caller's slice before any IAV ioctl.
 
 Both sets are checked in as generated lists with a review record
 (`tools/iav-policy/`, `iav_allow_primary.inc`; the record lists, for every held
@@ -169,14 +169,15 @@ blocking call delays other calls from the same guest for the length of its wait.
 
 ## 4. The windows
 
-`amba_virt_iav_win.ko` registers eight nodes, two sets of the same four windows:
+`amba_virt_iav_win.ko` registers four nodes, one set of the four windows. Every guest the camera policy attaches the
+windows to maps the same four nodes:
 
 | Node | Covers | Size |
 |---|---|---|
-| `/dev/amba_virt_iav_dsp`, `/dev/amba_virt_iav_dsp1` | the DSP partition | a power of two (live: 1 GiB) |
-| `/dev/amba_virt_iav_bsb`, `/dev/amba_virt_iav_bsb1` | the bitstream buffer, padded | a power of two (live: 16 MiB for a 10 MiB buffer) |
-| `/dev/amba_virt_iav_dec`, `/dev/amba_virt_iav_dec1` | the decode partition (`IAV_PART_DEC_BSB`): the JPEG or bitstream in, the decoded picture out | a power of two (live: 8 MiB for the 6 MiB of one decoder) |
-| `/dev/amba_virt_iav_ovl`, `/dev/amba_virt_iav_ovl1` | the overlay partition (`IAV_PART_OVERLAY`): colour tables and pixels of stream overlays | a power of two (live: exactly 8 MiB, no padding) |
+| `/dev/amba_virt_iav_dsp` | the DSP partition | a power of two (live: 1 GiB) |
+| `/dev/amba_virt_iav_bsb` | the bitstream buffer, padded | a power of two (live: 16 MiB for a 10 MiB buffer) |
+| `/dev/amba_virt_iav_dec` | the decode partition (`IAV_PART_DEC_BSB`): the JPEG or bitstream in, the decoded picture out | a power of two (live: 8 MiB for the 6 MiB of one decoder) |
+| `/dev/amba_virt_iav_ovl` | the overlay partition (`IAV_PART_OVERLAY`): colour tables and pixels of stream overlays | a power of two (live: exactly 8 MiB, no padding) |
 
 - **The decode window exists only with a decoder.** The real driver allocates `IAV_PART_DEC_BSB` (6 MiB per decoder)
   when preview is enabled and the pipeline's resource configuration has a decoder channel (a channel with `pre_dec_enable`
@@ -207,12 +208,15 @@ blocking call delays other calls from the same guest for the length of its wait.
   offsets only and are bounds-checked). The DMA32 pool that code was written for has had no
   device-tree backing since 2026-10-01, so none of its memory is used here; restoring or
   retiring the pool is a separate project (section 11).
-- **Adapters.** Each node is one model adapter (`IO_TYPE_OTHER`, empty
-  `phyaddrs`, `cbattr` `shmpath` and `shmsize`), exactly like `amba_shm`:
-  `amba_iav_dsp`, `amba_iav_bsb`, `amba_iav_dec`, `amba_iav_ovl`, `amba_iav_dsp1`, `amba_iav_bsb1`, `amba_iav_dec1`, `amba_iav_ovl1`
-  ([EVE-Ambarella-Models.md](EVE-Ambarella-Models.md)). `shmsize` must equal the
-  size the server configures. An adapter belongs to one app instance at a time, so
-  the second set lets a second guest on the same board have its own.
+- **Attached from the lease, not assigned.** The windows are not model adapters. When a guest's admission ticket is
+  leased, `amba-virt-server` decides from the ticket's `camera` intent, a per-ticket Dom0 override and whether the nodes
+  were configured whether the guest gets the windows, and answers with the sizes; `kvm.go` emits one `ivshmem-plain`
+  device per window over the one set of nodes ([EVE-Ambarella-Models.md](EVE-Ambarella-Models.md), "Camera windows and the
+  camera policy"). Every attached guest maps the same nodes, so the number of guests is not limited by the number of
+  window sets. The decode and overlay windows go only to the guest on Cavalry slice 0.
+- **Shared padding, and reconfiguring.** The padding behind a window's real range is one allocation per node, mapped by
+  every attached guest, so it is memory the attached guests share and can write. The module refuses to reconfigure a node
+  while any guest maps it: reconfiguring the windows (a camera resource change) needs every attached guest stopped.
 
 ## 5. Wire protocol
 
@@ -637,10 +641,10 @@ With the production server on the final image the same applications run for what
 demo listens on 8081) shows the box while it is held and not after). Each envelope of the plan was checked by a gate sealed with the hub's `scripts/plan_gate.py`; the raw logs of every run are
 the evidence (`plan/plan_iav_virtualization_phase2.artifacts/gates/`).
 
-**Steps a new guest needs.** A guest created from an app instance with the window adapters starts with no `/dev/iav`:
+**Steps a new guest needs.** A guest created with a ticket that gets the camera windows starts with no `/dev/iav`:
 `sudo modprobe iav_virt` (the demo service does it at start). Ubuntu needs cloud-init user data at create
-([EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md) section 4.2). The decoder and the overlay windows need the host
-`amba_virt_iav_win.ko` with their nodes before the guest starts.
+([EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md), the ticket recipe). The decoder and the overlay windows need the host
+`amba_virt_iav_win.ko` with their nodes before the guest starts; the server attaches them only when its nodes were configured.
 
 ## 9. Measured native versus guest
 

@@ -1152,12 +1152,23 @@ and `-P <slice>` (the ivshmem slice, 0 to 7, whose guest is the primary IAV clie
 - A line that is not understood is reported on stderr and ignored, so a typo cannot widen what
   a guest may do.
 - The image ships `primary-slice 0`. The `amba_shm` ticket is reserved at
-  Cavalry index 0 (`/dev/amba_virt_shm0`). `amba_shm1` takes the lowest free
-  index at or above 1. Both tickets are `shmassign=server` with `shmsize=1G`.
-  They are admission tickets, not separate memory pools. Guest ids change
+  Cavalry index 0 (`/dev/amba_virt_shm0`). Every other ticket (`amba_shm1` to `amba_shm7`) takes the lowest
+  free index at or above 1. All tickets are `shmassign=server` with `shmsize=1G`.
+  They are admission tickets and an exclusivity label for the controller's one-instance-per-group
+  rule, not separate memory pools; the digit does not select the slice. Guest ids change
   at every VM start, so the designation is by slice. The file is part of the image; changing
-  it means a new image. Further guests are slices of the same Cavalry parent, granted by the
-  server, not additional `amba_shmN` model resources.
+  it means a new image. Further guests are slices of the same Cavalry parent, granted by the server.
+
+#### Camera Window Policy (`/persist/etc/amba-virt/camera-tickets`)
+- With each slice reserve the hypervisor sends the ticket's name and its fleet camera intent
+  (`RESERVE_SLICE_AT|MIN <uuid> <bytes> <index> <ticket> <on|off|absent>`). The server answers with
+  `camera=<0|1>` and, with 1, the sizes of the DSP and bitstream windows (and the decode and overlay windows
+  for index 0). `effective = windows ready AND (override if not inherit, else intent is on)`.
+- The windows are ready when the broker configured the DSP and bitstream nodes at start, before the server reports
+  ready (`CAMERA_STATUS` shows `ready_ms` on the daemon log's clock). Nothing re-configures them in a run.
+- The override file has one `<ticket> <on|off>` line per ticket, at most 64 lines and 4096 bytes, written
+  atomically with mode 0600; a missing or invalid file means every ticket is `inherit`. `amba-virt-ctl set-camera`,
+  `get-camera` and `camera-status` change and show it. See [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md).
 
 #### Module Configuration Grammar (`modules.conf`, `early-modules.conf`, `late-modules.conf`)
 - Blank lines and lines starting with `#` are ignored.

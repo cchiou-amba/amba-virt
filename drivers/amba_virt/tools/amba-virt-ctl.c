@@ -34,6 +34,9 @@ static void usage(const char *prog)
 	fprintf(stderr, "  set-quota <cid> <size[M]>            Set quota ceiling for tenant CID\n");
 	fprintf(stderr, "  set-acl <cid> <standard|untrusted|hex> Set ACL capability bitmask\n");
 	fprintf(stderr, "  set-priority <cid> <low|normal|high> Set scheduling priority\n");
+	fprintf(stderr, "  set-camera <ticket> <on|off|inherit> Per-ticket camera window override (persisted)\n");
+	fprintf(stderr, "  get-camera [<ticket>]                Show camera overrides, last seen intent, effective\n");
+	fprintf(stderr, "  camera-status                        Show the configured camera windows and when\n");
 	fprintf(stderr, "  set-bounds <cid> <dev> <off> <sizeM> Forcefully set device partition\n");
 	fprintf(stderr, "  evict <cid>                          Immediately quarantine and evict tenant\n");
 	fprintf(stderr, "  policy reload                        Reload policies from JSON file\n");
@@ -227,6 +230,41 @@ int main(int argc, char **argv)
 			return 1;
 		printf("%s", resp_buf);
 		return 0;
+	}
+
+	if (strcmp(action, "set-camera") == 0) {
+		if (argc != 4) {
+			fprintf(stderr, "Usage: %s set-camera <ticket> <on|off|inherit>\n", argv[0]);
+			return 1;
+		}
+		snprintf(cmd_buf, sizeof(cmd_buf), "SET_CAMERA %s %s\n", argv[2], argv[3]);
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return strncmp(resp_buf, "OK", 2) == 0 ? 0 : 1;
+	}
+
+	if (strcmp(action, "get-camera") == 0) {
+		if (argc > 3) {
+			fprintf(stderr, "Usage: %s get-camera [<ticket>]\n", argv[0]);
+			return 1;
+		}
+		if (argc == 3)
+			snprintf(cmd_buf, sizeof(cmd_buf), "GET_CAMERA %s\n", argv[2]);
+		else
+			snprintf(cmd_buf, sizeof(cmd_buf), "GET_CAMERA\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return strncmp(resp_buf, "OK", 2) == 0 ? 0 : 1;
+	}
+
+	if (strcmp(action, "camera-status") == 0) {
+		snprintf(cmd_buf, sizeof(cmd_buf), "CAMERA_STATUS\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return strncmp(resp_buf, "OK", 2) == 0 ? 0 : 1;
 	}
 
 	if (strcmp(action, "set-bounds") == 0) {

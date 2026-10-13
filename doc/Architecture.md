@@ -222,11 +222,12 @@ backing file. The server withholds readiness until `/dev/amba_virt_shm*`
 exists, so the backing nodes are present before EVE starts any guest.
 
 **IAV windows.** The virtual `/dev/iav` has its own windows, separate from the
-data slices: the real IAV driver's DSP partition and bitstream buffer, exposed by
-the host module `amba_virt_iav_win.ko` as `/dev/amba_virt_iav_dsp`, `_bsb`, `_dsp1`
-and `_bsb1`, and attached to a guest as extra `ivshmem-plain` BARs through the
-`amba_iav_*` adapters. They are not part of the slice and are not the guest's
-staging memory: a guest that maps one reads and writes the DSP's own DRAM. See
+data slices: the real IAV driver's DSP partition, bitstream buffer and, with a decoder, the decode and overlay
+partitions, exposed by the host module `amba_virt_iav_win.ko` as one set of nodes (`/dev/amba_virt_iav_dsp`,
+`_bsb`, `_dec`, `_ovl`). `amba-virt-server` attaches them to a guest, as extra `ivshmem-plain` BARs, when the
+guest's admission ticket is leased and the camera policy allows it
+([EVE-Ambarella-Models.md](EVE-Ambarella-Models.md)); they are not model adapters. They are not part of the slice and
+are not the guest's staging memory: a guest that maps one reads and writes the DSP's own DRAM. See
 [IavVirtualization.md](IavVirtualization.md).
 
 **Who may configure the pipeline.** Every guest may query the virtual `/dev/iav` and read

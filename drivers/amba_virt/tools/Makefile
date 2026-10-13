@@ -20,7 +20,7 @@ SERVER_LDFLAGS ?= -Wl,--dynamic-linker=/usr/lib/amba-virt/lib/ld-linux-aarch64.s
 	-Wl,--disable-new-dtags -Wl,-rpath,/usr/lib/amba-virt/lib
 
 TARGETS := amba-virt-server amba-virt-ctl iav_frame_tap iav_proxy_test
-SERVER_SRCS := amba-virt-server.c cavalry_proxy.c amba_virt_slice.c iav_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_slice_lease.c virt_query.c virt_host_ops.c virt_daemon.c virt_ready.c virt_dma_broker.c hmac_sha256.c virt_module_loader.c virt_camera_conf.c virt_gpio.c virt_camera_pipeline.c iav_broker.c iav_policy.c iav_broker_server.c iav_slice_rpc.c iav_low_pool.c virt_low_lease.c virt_iav_guest_slice.c virt_pool_inventory.c
+SERVER_SRCS := amba-virt-server.c cavalry_proxy.c amba_virt_slice.c iav_proxy.c virt_mem_pool.c virt_acl.c virt_admin_ipc.c virt_slice_lease.c virt_query.c virt_host_ops.c virt_daemon.c virt_ready.c virt_dma_broker.c hmac_sha256.c virt_module_loader.c virt_camera_conf.c virt_camera_policy.c virt_gpio.c virt_camera_pipeline.c iav_broker.c iav_policy.c iav_broker_server.c iav_slice_rpc.c iav_low_pool.c virt_low_lease.c virt_iav_guest_slice.c virt_pool_inventory.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 NANOPB_OBJS := pb_common.o pb_encode.o pb_decode.o amba_virt.pb.o
 
@@ -43,7 +43,7 @@ TESTS := test_virt_host_ops test_virt_daemon test_virt_mem_pool test_admin_ipc t
 IAV_SUPPORT_OUT := ../../../build/iav-policy
 IAV_SUPPORT_DUMP := $(IAV_SUPPORT_OUT)/iav_ioctl_dump
 
-.PHONY: all clean test test_iav_qual_host_loopback_run test_iav_qual_host_loopback_bench_run test_host_iav_broker_tsan_run test_host_iav_broker_run fuzz_iav_broker_run test_iav_broker_negctl amba-virt-server-qual test_iav_qual_host_run test_iav_qual_host_bench_run test_iav_qual_host_negctl test_iav_support_table_run iav-support-table test_iav_support_table_negctl
+.PHONY: all clean test test_admin_ipc_run test_host_cavalry_eve_sync_run test_host_camera_policy_run test_host_camera_policy_tsan_run test_camera_negctl test_iav_qual_host_loopback_run test_iav_qual_host_loopback_bench_run test_host_iav_broker_tsan_run test_host_iav_broker_run fuzz_iav_broker_run test_iav_broker_negctl amba-virt-server-qual test_iav_qual_host_run test_iav_qual_host_bench_run test_iav_qual_host_negctl test_iav_support_table_run iav-support-table test_iav_support_table_negctl
 
 all: $(TARGETS)
 
@@ -103,8 +103,12 @@ TEST_CFLAGS := -O2 -Wall -Wextra -DAMBA_AMYOC_BUILD -DAMBA_SOC_N1_655 -I../inclu
 test_virt_mem_pool: test_virt_mem_pool.c virt_mem_pool.c
 	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
 
-test_admin_ipc: test_admin_ipc.c virt_admin_ipc.c virt_slice_lease.c virt_acl.c virt_mem_pool.c virt_host_ops.c hmac_sha256.c cavalry_proxy.c ../amba_virt_slice.c virt_query.c
-	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
+test_admin_ipc: test_admin_ipc.c virt_admin_ipc.c virt_slice_lease.c virt_camera_policy.c virt_low_lease.c virt_pool_inventory.c iav_slice_rpc.c virt_acl.c virt_mem_pool.c virt_host_ops.c hmac_sha256.c cavalry_proxy.c ../amba_virt_slice.c virt_query.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
+	gcc $(TEST_CFLAGS) $(NANOPB_CFLAGS) -o $@ $^ -lpthread
+
+test_admin_ipc_run:
+	$(MAKE) -B test_admin_ipc
+	./test_admin_ipc
 
 test_virt_query: test_virt_query.c virt_query.c virt_mem_pool.c virt_acl.c cavalry_proxy.c ../amba_virt_slice.c
 	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
@@ -187,10 +191,18 @@ virt_mem_pool.host.o: virt_mem_pool.c
 amba_virt_slice.host.o: ../amba_virt_slice.c
 	gcc $(TEST_CFLAGS) -I. -I.. -fsanitize=address,undefined -c -o $@ $<
 
-virt_slice_lease.host.o: virt_slice_lease.c
+virt_slice_lease.host.o: virt_slice_lease.c virt_camera_policy.h
 	gcc $(TEST_CFLAGS) -I. -I.. -fsanitize=address,undefined -c -o $@ $<
 
-test_host_cavalry_eve_sync: test/test_main.cxx test/TestHostCavalryEveSync.cxx test/TestHostSliceLease.cxx cavalry_proxy.host.o virt_mem_pool.host.o amba_virt_slice.host.o virt_slice_lease.host.o
+virt_camera_policy.host.o: virt_camera_policy.c virt_camera_policy.h
+	gcc $(TEST_CFLAGS) -I. -I.. -fsanitize=address,undefined -c -o $@ $<
+
+test_host_cavalry_eve_sync: test/test_main.cxx test/TestHostCavalryEveSync.cxx test/TestHostSliceLease.cxx cavalry_proxy.host.o virt_mem_pool.host.o amba_virt_slice.host.o virt_slice_lease.host.o virt_camera_policy.host.o
+	g++ $(CPPUTEST_CFLAGS) -o $@ $^ $(CPPUTEST_LDFLAGS)
+
+test_host_cavalry_eve_sync_run:
+	$(MAKE) -B test_host_cavalry_eve_sync
+	./test_host_cavalry_eve_sync
 
 test_iav_slice_rpc: test_iav_slice_rpc.c iav_slice_rpc.c iav_slice_client.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
 	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -o $@ $^
@@ -203,16 +215,17 @@ test_host_iav_low_slice: test/test_main.cxx test/TestHostIavLowSlice.cxx ../iav_
 	gcc -O1 -g -Wall -Wextra -Werror -I.. -c -o iav_low_slice.host.o ../iav_low_slice.c
 	g++ -O1 -g -Wall -Wextra -Werror -std=c++17 -I.. -Itest $(CPPUTEST_CFLAGS) -o $@ test/test_main.cxx test/TestHostIavLowSlice.cxx iav_low_slice.host.o $(CPPUTEST_LDFLAGS)
 
-test_host_low_lease: test/test_main.cxx test/TestHostLowLease.cxx virt_low_lease.c virt_slice_lease.c iav_slice_rpc.c virt_host_ops.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
+test_host_low_lease: test/test_main.cxx test/TestHostLowLease.cxx virt_low_lease.c virt_slice_lease.c virt_camera_policy.c iav_slice_rpc.c virt_host_ops.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
 	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -c -o virt_low_lease.low.o virt_low_lease.c
 	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -c -o virt_slice_lease.low.o virt_slice_lease.c
+	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. -c -o virt_camera_policy.low.o virt_camera_policy.c
 	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -c -o iav_slice_rpc.low.o iav_slice_rpc.c
 	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. -c -o virt_host_ops.low.o virt_host_ops.c
 	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o pb_common.low.o $(NANOPB_DIR)/pb_common.c
 	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o pb_encode.low.o $(NANOPB_DIR)/pb_encode.c
 	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o pb_decode.low.o $(NANOPB_DIR)/pb_decode.c
 	gcc -O1 -g -Wall -Wextra -Werror $(NANOPB_CFLAGS) -c -o amba_virt.pb.low.o $(PROTO_DIR)/amba_virt.pb.c
-	g++ -O1 -g -Wall -Wextra -Werror -std=c++17 -I. -I../include/uapi $(CPPUTEST_CFLAGS) -o $@ test/test_main.cxx test/TestHostLowLease.cxx virt_low_lease.low.o virt_slice_lease.low.o iav_slice_rpc.low.o virt_host_ops.low.o pb_common.low.o pb_encode.low.o pb_decode.low.o amba_virt.pb.low.o $(CPPUTEST_LDFLAGS)
+	g++ -O1 -g -Wall -Wextra -Werror -std=c++17 -I. -I../include/uapi $(CPPUTEST_CFLAGS) -o $@ test/test_main.cxx test/TestHostLowLease.cxx virt_low_lease.low.o virt_slice_lease.low.o virt_camera_policy.low.o iav_slice_rpc.low.o virt_host_ops.low.o pb_common.low.o pb_encode.low.o pb_decode.low.o amba_virt.pb.low.o $(CPPUTEST_LDFLAGS)
 
 iav_low_pool_pin: iav_low_pool_main.c iav_low_pool.c
 	$(CC) $(CFLAGS) -static -include stdint.h -o $@ iav_low_pool_main.c iav_low_pool.c
@@ -443,3 +456,51 @@ test_iav_support_table_run: $(IAV_SUPPORT_OUT)/iav_ioctl_dump.tsv
 
 test_iav_support_table_negctl: $(IAV_SUPPORT_OUT)/iav_ioctl_dump.tsv
 	python3 ../../../tools/iav-policy/check_support_table_negctl.py --dump $< --review iav_ioctl_review.tsv --doc ../../../doc/IavVirtualization.md
+
+# ---- Camera policy: verdict matrix, grammar, persistence, concurrency ----
+CAM_OUT := ../../../build/camera-policy
+CAM_CFLAGS := -O1 -g -Wall -Wextra -Werror -I../include/uapi -I.
+CAM_CXXFLAGS := -O1 -g -Wall -Wextra -Werror -std=c++17 -I. -I../include/uapi -Itest
+
+test_host_camera_policy: test/test_main.cxx test/TestHostCameraPolicy.cxx virt_camera_policy.c virt_slice_lease.c virt_camera_policy.h virt_slice_lease.h
+	mkdir -p $(CAM_OUT)
+	gcc $(CAM_CFLAGS) -fsanitize=address,undefined -c -o $(CAM_OUT)/virt_camera_policy.o virt_camera_policy.c
+	gcc $(CAM_CFLAGS) -fsanitize=address,undefined -c -o $(CAM_OUT)/virt_slice_lease.o virt_slice_lease.c
+	g++ $(CAM_CXXFLAGS) -fsanitize=address,undefined -o $@ test/test_main.cxx test/TestHostCameraPolicy.cxx $(CAM_OUT)/virt_camera_policy.o $(CAM_OUT)/virt_slice_lease.o -lCppUTest -lCppUTestExt -lpthread
+
+test_host_camera_policy_run:
+	$(MAKE) -B test_host_camera_policy
+	./test_host_camera_policy
+
+test_host_camera_policy_tsan: test/test_main.cxx test/TestHostCameraPolicy.cxx virt_camera_policy.c virt_slice_lease.c virt_camera_policy.h virt_slice_lease.h
+	mkdir -p $(CAM_OUT)/tsan
+	gcc $(CAM_CFLAGS) -fsanitize=thread -c -o $(CAM_OUT)/tsan/virt_camera_policy.o virt_camera_policy.c
+	gcc $(CAM_CFLAGS) -fsanitize=thread -c -o $(CAM_OUT)/tsan/virt_slice_lease.o virt_slice_lease.c
+	g++ $(CAM_CXXFLAGS) -fsanitize=thread -o $@ test/test_main.cxx test/TestHostCameraPolicy.cxx $(CAM_OUT)/tsan/virt_camera_policy.o $(CAM_OUT)/tsan/virt_slice_lease.o -lCppUTest -lCppUTestExt -lpthread
+
+test_host_camera_policy_tsan_run:
+	$(MAKE) -B test_host_camera_policy_tsan
+	setarch $(shell uname -m) -R ./test_host_camera_policy_tsan
+
+# Negative controls: the policy with one deliberate bug must fail the tests. Each mutation is a perl
+# substitution on a copy of virt_camera_policy.c. The target fails with code 99 if the mutation did not
+# change the file, and otherwise runs the tests, which must fail: a surviving mutant makes this succeed.
+MUT_ignore_gate_EXPR := s/\(g_windows_ready && on\)/(on)/
+MUT_ignore_override_EXPR := s/\(ov == OV_INHERIT\) \?/(1) ?/
+MUT_dec_for_consumer_EXPR := s/if \(index == 0\) \{/if (1) {/
+MUT_nonatomic_persist_EXPR := s/"%s\.tmp", g_store/"%s", g_store/
+
+CAM_MUT_DIR = $(CAM_OUT)/mut-$(MUTANT)
+
+test_camera_negctl:
+	test -n "$(MUTANT)"
+	test -n "$(MUT_$(MUTANT)_EXPR)"
+	rm -rf $(CAM_MUT_DIR)
+	mkdir -p $(CAM_MUT_DIR)
+	cp virt_camera_policy.c $(CAM_MUT_DIR)/
+	perl -0pi -e '$(MUT_$(MUTANT)_EXPR)' $(CAM_MUT_DIR)/virt_camera_policy.c
+	@if cmp -s virt_camera_policy.c $(CAM_MUT_DIR)/virt_camera_policy.c; then echo "MUTATION DID NOT APPLY: $(MUTANT)"; exit 99; fi
+	gcc $(CAM_CFLAGS) -Wno-error -fsanitize=address,undefined -c -o $(CAM_MUT_DIR)/virt_camera_policy.o $(CAM_MUT_DIR)/virt_camera_policy.c
+	gcc $(CAM_CFLAGS) -fsanitize=address,undefined -c -o $(CAM_MUT_DIR)/virt_slice_lease.o virt_slice_lease.c
+	g++ $(CAM_CXXFLAGS) -fsanitize=address,undefined -o $(CAM_MUT_DIR)/test test/test_main.cxx test/TestHostCameraPolicy.cxx $(CAM_MUT_DIR)/virt_camera_policy.o $(CAM_MUT_DIR)/virt_slice_lease.o -lCppUTest -lCppUTestExt -lpthread
+	timeout 120 $(CAM_MUT_DIR)/test

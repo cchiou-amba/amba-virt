@@ -71,15 +71,14 @@ reference design assigns none of the Ambarella chardevs this way.
   to an app even if `assigngrp` is set.
 - `cavalry`, `gpio0`, `iav`, and `amba_virt` are not model adapters.
   HVMs reach Cavalry and the camera through `amba-virt-server`.
-- Assign `amba_shm` or `amba_shm1` only to HVMs. Both are admission
-  tickets for the one Cavalry parent: `cbattr shmassign=server`, with no
-  `shmpath`. ZEDEDA allows one instance to hold a given `assigngrp`, so
-  the second guest keeps the existing `amba_shm1` group. That group no
-  longer names a device. `amba-virt-server` chooses the slice. A bundle
-  that only sets `shmpath` keeps that path and is not a dynamic grant.
-  `amba_iav_slice` is the private-IAV marker (`shmassign=server`,
-  `pool=low`). The low window is emitted from the lease after the
-  guest CID exists, not from a fixed path.
+- Assign an admission ticket (`amba_shm`, `amba_shm1` to `amba_shm7`) only to HVMs. A ticket is
+  `cbattr shmassign=server` with no `shmpath`: it names no device. ZEDEDA lets one instance hold a given
+  `assigngrp`, so every guest on a board needs a ticket of its own; the tickets are an exclusivity label
+  for that rule and not eight memory pools. `amba-virt-server` leases the guest its Cavalry slice, its
+  private IAV slice and, by the camera policy below, the shared camera windows. Only the ticket named
+  `amba_shm` is pinned to Cavalry slice 0; every other ticket takes the lowest free slice from 1. The
+  digit in `amba_shm1` to `amba_shm7` does not select Cavalry slice N. A bundle that only sets `shmpath`
+  keeps that path and is not a dynamic grant.
 
 ## Shared `ioMemberList`
 
@@ -96,39 +95,90 @@ Both models have the same adapters (`zcli model show … --detail`):
 | UART4 | UART4 | `IO_TYPE_OTHER` | uart4 | `cbattr uart=4` | unspecified |
 | hwrng | hwrng | `IO_TYPE_OTHER` | hwrng | `Ifname=/dev/hwrng` | unspecified |
 | rng-mmio | rng-mmio | `IO_TYPE_OTHER` | rng-mmio | `cbattr rng=mmio` | unspecified |
-| amba_shm | amba_shm | `IO_TYPE_OTHER` | amba_shm | `shmassign=server`, `shmsize=1G` | unspecified |
-| amba_shm1 | amba_shm1 | `IO_TYPE_OTHER` | amba_shm1 | `shmassign=server`, `shmsize=1G` | unspecified |
-| amba_iav_slice | amba_iav_slice | `IO_TYPE_OTHER` | amba_iav_slice | `shmassign=server`, `pool=low` | unspecified |
-| amba_iav_dsp | amba_iav_dsp | `IO_TYPE_OTHER` | amba_iav_dsp | `shmpath=/dev/amba_virt_iav_dsp`, `shmsize=1G` | unspecified |
-| amba_iav_bsb | amba_iav_bsb | `IO_TYPE_OTHER` | amba_iav_bsb | `shmpath=/dev/amba_virt_iav_bsb`, `shmsize=16M` | unspecified |
-| amba_iav_dsp1 | amba_iav_dsp1 | `IO_TYPE_OTHER` | amba_iav_dsp1 | `shmpath=/dev/amba_virt_iav_dsp1`, `shmsize=1G` | unspecified |
-| amba_iav_bsb1 | amba_iav_bsb1 | `IO_TYPE_OTHER` | amba_iav_bsb1 | `shmpath=/dev/amba_virt_iav_bsb1`, `shmsize=16M` | unspecified |
-| amba_iav_dec | amba_iav_dec | `IO_TYPE_OTHER` | amba_iav_dec | `shmpath=/dev/amba_virt_iav_dec`, `shmsize=8M` | unspecified |
-| amba_iav_dec1 | amba_iav_dec1 | `IO_TYPE_OTHER` | amba_iav_dec1 | `shmpath=/dev/amba_virt_iav_dec1`, `shmsize=8M` | unspecified |
-| amba_iav_ovl | amba_iav_ovl | `IO_TYPE_OTHER` | amba_iav_ovl | `shmpath=/dev/amba_virt_iav_ovl`, `shmsize=8M` | unspecified |
-| amba_iav_ovl1 | amba_iav_ovl1 | `IO_TYPE_OTHER` | amba_iav_ovl1 | `shmpath=/dev/amba_virt_iav_ovl1`, `shmsize=8M` | unspecified |
 
-The eight `amba_iav_*` adapters are the IAV windows of the virtual `/dev/iav`
-([IavVirtualization.md](IavVirtualization.md)): the DSP partition, the
-bitstream buffer, the decode partition and the overlay partition, in two sets so that two guests on one board can each have one.
-`shmsize` must equal the size the server configures on the window node
-(`1G` for the DSP partition, `16M` for the 10 MiB bitstream buffer, `8M` for the decode and overlay partitions on
-N1-655). They need the `amba_virt_iav_win.ko` nodes, which exist once the server is ready. Give a
-guest the adapters of one set (`amba_iav_dsp` and `amba_iav_bsb`, or the `1` pair) next
-to its data slice, at instance create; add `amba_iav_dec` and `amba_iav_ovl` (the same set) for the guest that
-decodes and draws overlays, which is the primary guest: a consumer is refused those two windows.
+### Admission tickets
 
-Which guest may configure the pipeline through the virtual `/dev/iav` is set by its data
-slice, not by these adapters: the guest holding `amba_shm` (slice 0) is the primary IAV client
-under the image's `/etc/amba-virt/iav.conf`, and the guest holding `amba_shm1` is a consumer
-(see [AmbaVirtServer.md](AmbaVirtServer.md) section 13.4).
+The tickets below are the model's memory adapters. They have empty `phyaddrs`; assigning one to an HVM is
+what makes `kvm.go` ask `amba-virt-server` for the guest's slices (`kvm.go` emits `ivshmem-plain` devices
+backed by the leases). The digit is a label only.
 
-`amba_shm` and `amba_shm1` have empty `phyaddrs`. Assigning one to an HVM is
-a window marker: `kvm.go` emits `ivshmem-plain`. Each window is shared by
-every virtual driver in that HVM. Pulled from the controller on 2026-10-10
-after `cavalry`, `cavalry_profile`, `gpio0`, `iav`, and `amba_virt` were
-removed.
-[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+<!-- tickets:begin -->
+| ticket | ztype | assigngrp | cbattr | camera intent |
+|---|---|---|---|---|
+| `amba_shm` | `IO_TYPE_OTHER` | `amba_shm` | `shmassign=server`, `shmsize=1G`, `camera=on` | on; pinned to Cavalry slice 0 |
+| `amba_shm1` | `IO_TYPE_OTHER` | `amba_shm1` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
+| `amba_shm2` | `IO_TYPE_OTHER` | `amba_shm2` | `shmassign=server`, `shmsize=1G` | off (no `camera` key) |
+| `amba_shm3` | `IO_TYPE_OTHER` | `amba_shm3` | `shmassign=server`, `shmsize=1G` | off |
+| `amba_shm4` | `IO_TYPE_OTHER` | `amba_shm4` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
+| `amba_shm5` | `IO_TYPE_OTHER` | `amba_shm5` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
+| `amba_shm6` | `IO_TYPE_OTHER` | `amba_shm6` | `shmassign=server`, `shmsize=1G` | off |
+| `amba_shm7` | `IO_TYPE_OTHER` | `amba_shm7` | `shmassign=server`, `shmsize=1G` | off |
+<!-- tickets:end -->
+
+Each ticket is an exclusivity label for ZEDEDA's one-instance-per-group rule and does not select Cavalry slice N.
+`amba_shm` is the one exception that has a meaning of its own: it is pinned to slice 0, and the guest that
+holds slice 0 is the primary IAV client under the image's `/etc/amba-virt/iav.conf` (`primary-slice 0`).
+Every other ticket gets the lowest free slice from 1 and is a consumer
+(see [AmbaVirtServer.md](AmbaVirtServer.md) section 13.4). `shmsize` is the slice size the server grants.
+
+### Camera windows and the camera policy
+
+The shared camera windows of the virtual `/dev/iav` (the DSP partition, the bitstream buffer, the decode
+partition and the overlay partition, [IavVirtualization.md](IavVirtualization.md)) are not model adapters.
+`amba-virt-server` attaches them to a guest when it leases the guest's ticket, from the one set of host
+nodes `/dev/amba_virt_iav_{dsp,bsb,dec,ovl}`. Every attached guest maps the same nodes. The decode and
+overlay windows go only to the guest on Cavalry slice 0.
+
+Whether a guest gets the windows is decided by the server for each reserve, from three inputs:
+
+| Input | Where it comes from | Values |
+|---|---|---|
+| Fleet intent | the ticket's `camera` cbattr in the model | `on`, `off`; no key means off |
+| Override | a per-ticket exception on one node, persisted by `amba-virt-server` | `on`, `off`, `inherit` (the default: no override) |
+| Windows ready | the server configured the DSP and bitstream nodes when it started | yes or no |
+
+`effective = windows ready AND (the override if it is not inherit, else the intent is on)`. A guest whose
+effective answer is off gets its Cavalry slice and private slice and no camera windows. The decision is taken
+when the guest starts: a change applies at the guest's next start. There is no way for a guest to ask for
+the windows. The override is for a single node's exception (forcing the camera off during an incident, or on
+for a trial); the normal way to give a guest the windows is the ticket's `camera` key in the model. EVE keeps the `cbattr`
+of an adapter it already knows until the node's adapter state is rebuilt, so a change to the `camera` key of an
+existing ticket in the model reaches the guests only after the node reboots (a ticket the node has not seen yet
+takes its `camera` key at once). `get-camera` shows the intent the server last received for each ticket.
+
+Commands (Dom0, through `/hostfs/usr/bin/amba-virt-ctl`):
+
+| Command | What it does |
+|---|---|
+| `set-camera <ticket> <on\|off\|inherit>` | sets or clears the override; `ERR PERSIST` if it could not be stored (then nothing changed) |
+| `get-camera [<ticket>]` | `OK COUNT <n>` and one line per ticket: `override`, the last intent seen, and `effective` |
+| `camera-status` | `OK windows=<ready\|none> dsp=.. bsb=.. dec=.. ovl=.. ready_ms=..`: the configured windows and when (the daemon log's `CLOCK_MONOTONIC` milliseconds) |
+
+The overrides are stored in `/persist/etc/amba-virt/camera-tickets`: UTF-8, one line per ticket,
+`<ticket> <on|off>`, at most 64 lines and 4096 bytes, mode 0600, written atomically (a temporary file,
+`fsync`, `rename`). A missing file means every ticket is `inherit`. A file that is not valid (a bad line, a
+duplicate, over a limit) is logged and treated as empty. An entry for a ticket no model defines is kept until
+`set-camera <ticket> inherit` removes it.
+
+The windows are configured once, when the server starts and before it reports ready, and cannot change under
+a running guest. Reconfiguring them (a camera resource change) needs every attached guest stopped; the window
+driver refuses while any guest maps a node. A guest with the camera windows can write the shared real range and
+the padding behind it (the N1-655 has no SMMU); that is accepted for every guest the policy attaches them to.
+
+### Retired adapters
+
+<!-- retired-adapters:begin -->
+These adapters no longer exist in the models; remove any instance that still holds one before pushing a
+model, because the controller cannot keep an assignment to an adapter that is gone:
+
+- `amba_iav_dsp`, `amba_iav_bsb`, `amba_iav_dec`, `amba_iav_ovl` and the same four with a `1` suffix
+  (path-bearing window adapters, in two sets): replaced by the camera policy above.
+- `amba_iav_slice` (the private IAV slice marker): the private slice is leased with every ticket.
+- The host nodes `/dev/amba_virt_iav_{dsp,bsb,dec,ovl}1`: the window module has one set of nodes.
+<!-- retired-adapters:end -->
+
+Pulled from the controller on 2026-10-10 after `cavalry`, `cavalry_profile`, `gpio0`, `iav`, and `amba_virt`
+were removed. Deploy recipe: [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
 ### Planned UART Adapter Bundles
 

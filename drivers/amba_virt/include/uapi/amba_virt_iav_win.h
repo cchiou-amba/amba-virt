@@ -28,19 +28,7 @@
 #define AMBA_VIRT_IAV_WIN_DEC_PATH	"/dev/amba_virt_iav_dec"
 #define AMBA_VIRT_IAV_WIN_OVL_PATH	"/dev/amba_virt_iav_ovl"
 
-/*
- * A second set of the same windows, over the same memory, so that a second guest can be given
- * its own adapters (an adapter belongs to one instance at a time).
- */
-#define AMBA_VIRT_IAV_WIN_DSP1_NAME	"amba_virt_iav_dsp1"
-#define AMBA_VIRT_IAV_WIN_BSB1_NAME	"amba_virt_iav_bsb1"
-#define AMBA_VIRT_IAV_WIN_DSP1_PATH	"/dev/amba_virt_iav_dsp1"
-#define AMBA_VIRT_IAV_WIN_BSB1_PATH	"/dev/amba_virt_iav_bsb1"
-#define AMBA_VIRT_IAV_WIN_DEC1_NAME	"amba_virt_iav_dec1"
-#define AMBA_VIRT_IAV_WIN_DEC1_PATH	"/dev/amba_virt_iav_dec1"
-#define AMBA_VIRT_IAV_WIN_OVL1_NAME	"amba_virt_iav_ovl1"
-#define AMBA_VIRT_IAV_WIN_OVL1_PATH	"/dev/amba_virt_iav_ovl1"
-#define AMBA_VIRT_IAV_WIN_SETS		2
+#define AMBA_VIRT_IAV_WIN_SETS		1	/* every attached guest maps the same nodes */
 #define AMBA_VIRT_IAV_WIN_KINDS		4	/* DSP, BSB, DEC and OVL windows in each set */
 
 /*
