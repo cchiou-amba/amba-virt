@@ -10,5 +10,8 @@ tools/amba-virt-server
 tools/amba-virt-ctl
 tools/iav_frame_tap
 tools/iav_proxy_test
+tools/iav_low_pool_pin
+tools/iav_low_pool_show
+tools/iav_slice_isolation
 tools/test_virt_*
 !tools/test_virt_*.c
