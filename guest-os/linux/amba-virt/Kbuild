@@ -3,14 +3,13 @@
 # Ambarella Virtualization Linux Guest Driver Kbuild
 
 ccflags-y += -I$(src)/include/uapi -I$(src) -DAMBA_VIRT_GUEST
-ccflags-y += -I$(src)/../../../../third_party/nanopb
-ccflags-y += -I$(src)/../../../../protocol/amba_virt/generated
-ccflags-y += -I$(src)/../../../../drivers/amba_virt/tools
+# The shared Nanopb and iav_slice_client sources include libc headers; the kernel build has none (-nostdinc)
+ccflags-y += -I$(src)/include/libc-shim
+ccflags-y += -I$(src)/../../../third_party/nanopb
+ccflags-y += -I$(src)/../../../protocol/amba_virt/generated
+ccflags-y += -I$(src)/../../../drivers/amba_virt/tools
 
 obj-m := amba_virt.o
 amba_virt-y := amba_virt_hvm.o amba_virt_core.o amba_virt_iav_slice.o
-amba_virt-y += ../../../../third_party/nanopb/pb_common.o
-amba_virt-y += ../../../../third_party/nanopb/pb_encode.o
-amba_virt-y += ../../../../third_party/nanopb/pb_decode.o
-amba_virt-y += ../../../../protocol/amba_virt/generated/amba_virt.pb.o
-amba_virt-y += ../../../../drivers/amba_virt/tools/iav_slice_client.o
+amba_virt-y += amba_virt_pb_common.o amba_virt_pb_encode.o amba_virt_pb_decode.o
+amba_virt-y += amba_virt_pb_msgs.o amba_virt_iav_slice_client.o

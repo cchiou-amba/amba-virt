@@ -1083,8 +1083,12 @@ static int amba_uart_platform_probe(struct platform_device *pdev)
 	amb_port->port.mctrl = TIOCM_DTR | TIOCM_RTS | TIOCM_OUT2;
 	spin_lock_init(&amb_port->port.lock);
 	amb_port->poll_interval = ktime_set(0, 1000000); /* 1 ms */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+	hrtimer_setup(&amb_port->poll_timer, amba_uart_poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#else
 	hrtimer_init(&amb_port->poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	amb_port->poll_timer.function = amba_uart_poll_timer;
+#endif
 
 	amba_ports[id] = amb_port;
 	platform_set_drvdata(pdev, amb_port);

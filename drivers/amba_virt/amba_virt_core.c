@@ -30,6 +30,13 @@
 #include <linux/notifier.h>
 #include "amba_virt_core.h"
 
+/* Linux 6.19 changed kernel_connect() and kernel_bind() to take struct sockaddr_unsized * */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#define AMBA_VIRT_KSOCKADDR(a) ((struct sockaddr_unsized *)(a))
+#else
+#define AMBA_VIRT_KSOCKADDR(a) ((struct sockaddr *)(a))
+#endif
+
 static BLOCKING_NOTIFIER_HEAD(amba_virt_state_notifier_chain);
 
 int amba_virt_register_state_notifier(struct notifier_block *nb)
@@ -171,7 +178,7 @@ int amba_virt_vsock_connect(struct amba_virt_dev *dev)
 	addr.svm_family = AF_VSOCK;
 	addr.svm_cid = dev->vsock_cid;
 	addr.svm_port = dev->vsock_port;
-	ret = kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
+	ret = kernel_connect(sock, AMBA_VIRT_KSOCKADDR(&addr), sizeof(addr), 0);
 	if (ret) {
 		sock_release(sock);
 		goto out;
@@ -637,7 +644,7 @@ int amba_virt_vsock_listen(struct amba_virt_dev *dev)
 	addr.svm_family = AF_VSOCK;
 	addr.svm_cid = VMADDR_CID_ANY;
 	addr.svm_port = dev->vsock_port;
-	ret = kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+	ret = kernel_bind(sock, AMBA_VIRT_KSOCKADDR(&addr), sizeof(addr));
 	if (ret)
 		goto err;
 	ret = kernel_listen(sock, 4);
