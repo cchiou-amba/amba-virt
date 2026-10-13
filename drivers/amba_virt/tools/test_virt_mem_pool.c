@@ -332,6 +332,122 @@ static void test_dynamic_extents(void)
 	printf(" PASS\n");
 }
 
+/*
+ * A restarted guest keeps its slice index and gets a new cid. The previous cid's pool entry must not
+ * survive it: otherwise every guest restart leaks one of the eight entries and the ninth claim fails.
+ */
+static void test_restart_on_same_slice_reclaims_previous_tenant(void)
+{
+	struct amba_virt_dev_bounds_req req;
+	struct amba_virt_dev_bounds_resp resp;
+	uint32_t cid;
+	int ret;
+
+	printf("Running %s...", __func__);
+	virt_mem_pool_init(1024 * 1024 * 1024);
+
+	for (cid = 100; cid < 100 + 4 * VIRT_MEM_MAX_TENANTS; cid++) {
+		ret = virt_mem_pool_register_tenant(cid, 2, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+		assert(ret == 0);
+		assert(virt_mem_pool_get_tenant(cid) != NULL);
+		if (cid > 100)
+			assert(virt_mem_pool_get_tenant(cid - 1) == NULL);
+	}
+
+	/* The previous occupant's allocations do not carry over to the new one */
+	memset(&req, 0, sizeof(req));
+	req.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+	req.requested_size = 64 * 1024 * 1024;
+	req.preferred_offset = AMBA_VIRT_OFFSET_AUTO;
+	req.flags = AMBA_VIRT_DEV_F_EXACT;
+	ret = virt_mem_pool_set_device_bounds(cid - 1, &req, &resp, NULL);
+	assert(ret == 0 && resp.status == 0);
+	ret = virt_mem_pool_register_tenant(cid, 2, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+	assert(ret == 0);
+	assert(virt_mem_pool_get_tenant(cid)->allocated_bytes == 0);
+	ret = virt_mem_pool_set_device_bounds(cid, &req, &resp, NULL);
+	assert(ret == 0 && resp.status == 0 && resp.granted_offset == 0);
+	assert(virt_mem_pool_get_tenant(cid - 1) == NULL);
+
+	virt_mem_pool_cleanup();
+	printf(" PASS\n");
+}
+
+/* One entry per slice index: the pool still holds every slice at once and refuses a ninth tenant */
+static void test_one_entry_per_slice_index(void)
+{
+	uint32_t idx;
+	int ret;
+
+	printf("Running %s...", __func__);
+	virt_mem_pool_init(1024 * 1024 * 1024);
+
+	for (idx = 0; idx < VIRT_MEM_MAX_TENANTS; idx++) {
+		ret = virt_mem_pool_register_tenant(200 + idx, idx, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+		assert(ret == 0);
+	}
+	for (idx = 0; idx < VIRT_MEM_MAX_TENANTS; idx++)
+		assert(virt_mem_pool_get_tenant(200 + idx) != NULL);
+
+	/* A new cid on a slice index that is not held by anyone has no entry to take: the pool is full */
+	ret = virt_mem_pool_register_tenant(300, VIRT_MEM_MAX_TENANTS, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+	assert(ret == -ENOSPC);
+	for (idx = 0; idx < VIRT_MEM_MAX_TENANTS; idx++)
+		assert(virt_mem_pool_get_tenant(200 + idx) != NULL);
+
+	/* A restart on any held index still works while the pool is full, and touches only that entry */
+	ret = virt_mem_pool_register_tenant(301, 3, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+	assert(ret == 0);
+	assert(virt_mem_pool_get_tenant(203) == NULL);
+	assert(virt_mem_pool_get_tenant(301) != NULL);
+	for (idx = 0; idx < VIRT_MEM_MAX_TENANTS; idx++)
+		if (idx != 3)
+			assert(virt_mem_pool_get_tenant(200 + idx) != NULL);
+
+	virt_mem_pool_cleanup();
+	printf(" PASS\n");
+}
+
+/* The same cid registering again, also on another index, keeps one entry and takes over that index */
+static void test_same_cid_reregistration_and_index_move(void)
+{
+	int ret;
+
+	printf("Running %s...", __func__);
+	virt_mem_pool_init(1024 * 1024 * 1024);
+
+	ret = virt_mem_pool_register_tenant(400, 1, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+	assert(ret == 0);
+	ret = virt_mem_pool_register_tenant(401, 2, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+	assert(ret == 0);
+	ret = virt_mem_pool_register_tenant(400, 1, 0, 0);
+	assert(ret == 0);
+	assert(virt_mem_pool_get_tenant(400) != NULL && virt_mem_pool_get_tenant(401) != NULL);
+
+	/* 400 moves to index 2: the entry that held index 2 is reclaimed, nothing is duplicated */
+	ret = virt_mem_pool_register_tenant(400, 2, 0, 0);
+	assert(ret == 0);
+	assert(virt_mem_pool_get_tenant(400) != NULL);
+	assert(virt_mem_pool_get_tenant(401) == NULL);
+	assert(virt_mem_pool_get_tenant(400)->tenant_idx == 2);
+
+	virt_mem_pool_cleanup();
+	printf(" PASS\n");
+}
+
+/* Registration before init and a cid that never registered are refused, not crashed on */
+static void test_unregistered_and_uninitialised(void)
+{
+	printf("Running %s...", __func__);
+	virt_mem_pool_cleanup();
+	assert(virt_mem_pool_register_tenant(500, 0, 1, 1) == -EINVAL);
+	virt_mem_pool_init(1024 * 1024 * 1024);
+	assert(virt_mem_pool_get_tenant(500) == NULL);
+	assert(virt_mem_pool_unregister_tenant(500) == -ENOENT);
+	virt_mem_pool_cleanup();
+	printf(" PASS\n");
+}
+
 int main(void)
 {
 	printf("=== Starting virt_mem_pool unit test suite ===\n");
@@ -343,6 +459,10 @@ int main(void)
 	test_bar_overflow();
 	test_invalid_alignment_and_unknown_dev();
 	test_dynamic_extents();
+	test_restart_on_same_slice_reclaims_previous_tenant();
+	test_one_entry_per_slice_index();
+	test_same_cid_reregistration_and_index_move();
+	test_unregistered_and_uninitialised();
 	printf("=== All virt_mem_pool unit tests passed successfully! ===\n");
 	return 0;
 }

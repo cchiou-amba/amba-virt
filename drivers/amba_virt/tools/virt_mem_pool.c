@@ -57,6 +57,30 @@ void virt_mem_pool_cleanup(void)
 	pthread_mutex_unlock(&g_pool_mutex);
 }
 
+/*
+ * Clear one pool entry. The caller holds g_pool_mutex.
+ */
+static void pool_entry_release_locked(int i)
+{
+	int j;
+
+	pthread_mutex_lock(&g_tenant_pools[i].lock);
+	for (j = 0; j < VIRT_MEM_MAX_DEVICES; j++)
+		g_tenant_pools[i].devices[j].in_use = 0;
+	for (j = 0; j < VIRT_MEM_MAX_EXTENTS; j++)
+		g_tenant_pools[i].extents[j].in_use = 0;
+	g_tenant_pools[i].allocated_bytes = 0;
+	g_tenant_pools[i].in_use = 0;
+	pthread_mutex_unlock(&g_tenant_pools[i].lock);
+}
+
+/*
+ * A slice index has one tenant at a time: the kernel binds a slice to a single cid, and a guest that
+ * restarts keeps its slice and comes back with a new cid. The entry of the previous cid on that index is
+ * reclaimed here, so a restart takes over its entry instead of leaking it. Without this every restart
+ * would use one of the VIRT_MEM_MAX_TENANTS entries for good and the claim after the eighth would fail
+ * with -ENOSPC until the server restarted.
+ */
 int virt_mem_pool_register_tenant(uint32_t cid, uint32_t tenant_idx,
 				  uint32_t bar_size, uint32_t quota_max)
 {
@@ -66,6 +90,12 @@ int virt_mem_pool_register_tenant(uint32_t cid, uint32_t tenant_idx,
 		return -EINVAL;
 
 	pthread_mutex_lock(&g_pool_mutex);
+
+	for (i = 0; i < VIRT_MEM_MAX_TENANTS; i++) {
+		if (g_tenant_pools[i].in_use && g_tenant_pools[i].cid != cid &&
+		    g_tenant_pools[i].tenant_idx == tenant_idx)
+			pool_entry_release_locked(i);
+	}
 
 	/* Check if tenant already exists */
 	for (i = 0; i < VIRT_MEM_MAX_TENANTS; i++) {
