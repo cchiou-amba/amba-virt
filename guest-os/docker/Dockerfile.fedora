@@ -1,0 +1,12 @@
+# Dockerfile for Ambarella Fedora 44 ARM64 Guest Build Environment
+# Pre-bakes headers and compilers so guest builds run in seconds without re-downloading.
+# The kernel headers are the exact version of the kernel in the Fedora image (guest-os/fedora/fedora-build/base-image.lock).
+
+FROM fedora:44
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        gcc gcc-c++ make \
+        kernel-devel-6.19.10-300.fc44 && \
+    dnf clean all
+
+WORKDIR /workspace

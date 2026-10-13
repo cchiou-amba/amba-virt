@@ -108,6 +108,8 @@ guest-os/
 │   └── qnx-build/              # QNX HVM disk image builder
 │       └── build.sh            # Automated QCOW2 cloud image creator
 ├── apps/iav-ref/                # IAV reference applications (make iav-ref): capture, events, stream, pipeline, decode, overlay
+├── debian/                       # Lean Debian 13 (trixie) HVM image builder (debian-build/); see debian-build/README.md
+├── fedora/                       # Lean Fedora 44 HVM image builder (fedora-build/); see fedora-build/README.md
 ├── userspace/                   # Imported Ambarella userspace runtimes
 │   ├── cavalry_mem/            # Memory allocator abstraction
 │   └── nnctrl/                 # VisORC neural network control library

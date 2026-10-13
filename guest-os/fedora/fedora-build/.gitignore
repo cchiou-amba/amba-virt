@@ -1,0 +1,8 @@
+# Cache, temporary work directories, and build outputs
+cache/
+output/
+output-*/
+*.qcow2
+*.raw
+*.img
+*.iso

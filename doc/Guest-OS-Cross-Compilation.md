@@ -164,6 +164,10 @@ source ~/qnx/qnx800/qnxsdp-env.sh
 | `make guest` | Build all guest targets consecutively | `build/guest/{ubuntu,alpine,qnx}` |
 | `make guest-ubuntu` | Build Ubuntu 24.04 kernel modules, clients, and AI apps | `build/guest/ubuntu/` |
 | `make guest-alpine` | Build Alpine 3.20 kernel modules, clients, and AI apps | `build/guest/alpine/` |
+| `make guest-debian` | Build Debian 13 (trixie) kernel modules and client (not part of `make guest`) | `build/guest/debian/` |
+| `make guest-debian-image` | Build the lean Debian 13 (trixie) ARM64 HVM QCOW2 image | `guest-os/debian/debian-build/output/dist/debian-13-arm64-cloudimg.qcow2` |
+| `make guest-fedora` | Build Fedora 44 kernel modules and client (not part of `make guest`) | `build/guest/fedora/` |
+| `make guest-fedora-image` | Build the lean Fedora 44 ARM64 HVM QCOW2 image | `guest-os/fedora/fedora-build/output/dist/fedora-44-aarch64-cloudimg.qcow2` |
 | `make guest-qnx` | Build QNX 8.0 resource managers, C library, clients, and AI apps | `build/guest/qnx/` |
 | `make guest-qnx-image` | Generate bootable QNX 8.0 QCOW2 cloud image | `build/guest/qnx/qnx-8.0-arm64-cloudimg.qcow2` |
 | `make guest-windows` | Build Windows 11 ARM64 HVM QCOW2 cloud image | `guest-os/windows/windows-build/output/dist/windows-11-arm64-cloudimg.qcow2` |
