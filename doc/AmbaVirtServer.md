@@ -198,8 +198,10 @@ Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
 | **HVM Guest** | `amba_cavalry.ko` | Guest `/dev/cavalry` frontend driver | Distro kernel headers |
 | **HVM Guest** | `iav_virt.ko` | Guest `/dev/iav` frontend: ioctl marshaling, poll, mmap of the IAV windows ([IavVirtualization.md](IavVirtualization.md)) | Distro kernel headers, IAV driver headers |
 | **HVM Guest** | `amba_gdma.ko` | Guest kernel GDMA export driver | Distro kernel headers |
+| **HVM Guest** | `amba_virt_usb.ko` | ACPI `AMBA0002` xHCI driver for the passed-through USB host controller; rings and URB buffers in the 32 MiB carveout BAR ([USB-Passthrough.md](USB-Passthrough.md)) | Distro kernel headers |
 | **HVM Guest** | `amba-virt-client` | CppUTest functional test suite & IPC benchmark | `g++` (`-std=c++17`, `-lpthread`) |
 | **EVE Dom0** | `amba_virt.ko` | Shared memory backing file mmap + vsock server | Ambarella `eve-kernel` |
+| **EVE Dom0** | `amba_virt_usb_dma.ko` | Exposes `virt_usb_dma@15c00000` as `/dev/amba_virt_usb_dma` (Normal-NC guest mapping, scrub on last close); not used by `amba-virt-server` itself | Ambarella `eve-kernel` |
 | **EVE Dom0** | `amba_virt_iav_win.ko` | Exposes the IAV driver's DSP, bitstream, decode and overlay partitions as mappable nodes for the hypervisor (eight nodes, two sets) | Ambarella `eve-kernel` |
 | **EVE Dom0** | `amba-virt-server` | Arbitrator daemon, memory pool, ACL, proxy | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`), glibc from `/usr/lib/amba-virt/lib` |
 | **EVE Dom0** | `amba-virt-ctl` | Dom0 host administration CLI utility | `aarch64-linux-gnu-gcc` (`-std=c11`, `-lpthread`) |

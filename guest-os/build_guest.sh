@@ -446,6 +446,10 @@ build_ubuntu() {
             echo "[*] Compiling amba_dma.ko..."
             make -C /workspace/guest-os/linux/amba-dma KDIR_HVM="${KDIR}" clean modules
             cp -vf /workspace/guest-os/linux/amba-dma/amba_dma.ko /workspace/build/guest/ubuntu/
+
+            echo "[*] Compiling amba_virt_usb.ko..."
+            make -C /workspace/guest-os/linux/amba-virt-usb KDIR_HVM="${KDIR}" clean modules
+            cp -vf /workspace/guest-os/linux/amba-virt-usb/amba_virt_usb.ko /workspace/build/guest/ubuntu/
         '
 
     log_step "Compiling amba-virt-client natively (aarch64-linux-gnu-g++ glibc)..."

@@ -88,7 +88,7 @@ Both models have the same adapters (`zcli model show … --detail`):
 
 | phylabel | logicallabel | ztype | assigngrp | phyaddrs / cbattr | usage |
 |---|---|---|---|---|---|
-| USB | USB | `IO_TYPE_USB_CONTROLLER` | USB | — | unspecified |
+| USB | USB | `IO_TYPE_USB_CONTROLLER` | USB | `phyaddrs.path=xhci-hcd.0.auto` | unspecified |
 | eth0 | eth0 | `IO_TYPE_ETH` | eth0 | `Ifname=eth0` | **management** |
 | UART0 | UART0 | `IO_TYPE_OTHER` | *(empty)* | `cbattr uart=0` | **management** |
 | UART1 | UART1 | `IO_TYPE_OTHER` | uart1 | `cbattr uart=1` | unspecified |
@@ -201,6 +201,14 @@ GSI 144). On domain stop or failed start, Pillar restores `ambarella-uart`.
 The UART parser and `amba_shm0..7` bulk-window parser are mutually exclusive on their `cbattr` keys.
 There are no `COM1`/`COM2`/`COM3` entries in the hardware models.
 
+### USB host controller (`USB`)
+
+`USB` is `IO_TYPE_USB_CONTROLLER` (PhyIo type 13), not `IO_TYPE_USB` (PhyIo type 2). The published address is `phyaddrs.path` `xhci-hcd.0.auto`. `assigngrp` is `USB`. `ubuntu_24_04` names the matching interface `USB` (`IO_TYPE_USB_CONTROLLER`, `directattach: true`).
+
+When `ubuntu_24_04.<node>` holds that adapter, Pillar binds `xhci-hcd.0.auto` to `vfio-platform`, maps `/dev/amba_virt_usb_dma` (the 32 MiB `virt_usb_dma@15c00000` window) as `ivshmem-plain` id `amba-virt-usb-dma-shm`, and suppresses the emulated `qemu-xhci` controller on that domain. The Cadence glue and DRD/PHY stay in Dom0. Full register, ACPI (`AMBA0002`), and guest-driver detail is in [USB-Passthrough.md](USB-Passthrough.md).
+
+`USB` is an interface on `ubuntu_24_04`, assigned when `ubuntu_24_04.<node>` is created. The controller will not add that interface while the app still has instances. See [USB-Passthrough.md](USB-Passthrough.md) §5.
+
 ### Hardware RNG & VirtIO RNG Virtualization
 
 - **`hwrng` Dom0 Retention**: `/dev/hwrng` is created by `ambarella-rng.c` on Dom0. It is published in the model but must remain **unassigned** to any app instance. Dom0 retains exclusive ownership of physical TRNG registers (`0xe002f000`), constantly seeding the Dom0 kernel CSPRNG (`/dev/urandom`).
@@ -246,7 +254,7 @@ Confirm an HVM holds a window marker and not a host chardev:
 | Cloud adapter | N1-655 DT | Notes |
 |---|---|---|
 | eth0 | `mac0` (`ethernet0`) | Management; leave with EVE. |
-| USB | `usb_cdnsp` | Assignable as group `USB`. |
+| USB | `xhci-hcd.0.auto` (xHCI MMIO `0xff3c008000`, 64 KiB, GIC SPI 198) | `IO_TYPE_USB_CONTROLLER`, `phyaddrs.path=xhci-hcd.0.auto`. Glue `cdns3@ff3c000000` and the Torrent PHY stay in Dom0. See [USB-Passthrough.md](USB-Passthrough.md). |
 | UART0 `/dev/ttyS0` | `uart0` (`serial0`, stdout) | Dom0 console (`console0`). Do not assign away from EVE. |
 | UART2 | `ffe0018000.uart` (`uart2`) | Assigned to `ubuntu_24_04.<node>` (`console1`, `vfio-platform`). |
 | UART3 | `ffe0019000.uart` (`uart3`) | Assigned to `alpine_3_20.<node>` (`console2`, `vfio-platform`). |

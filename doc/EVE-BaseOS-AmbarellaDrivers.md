@@ -45,7 +45,7 @@ and builds the layer:
 
 ```text
 /etc/init.d/021-amba-virt-server -> /usr/bin/amba-virt-server
-/etc/amba-virt/modules.conf          ambcma.ko (with parameters), cavalry.ko, amba_virt.ko, amba_virt_dma.ko, amba_virt_iav_win.ko
+/etc/amba-virt/modules.conf          ambcma.ko (with parameters), cavalry.ko, amba_virt.ko, amba_virt_dma.ko, amba_virt_usb_dma.ko, amba_virt_iav_win.ko
 /etc/amba-virt/early-modules.conf    camera modules loaded before camera power
 /etc/amba-virt/late-modules.conf     camera modules loaded after camera power (the last is ambds.ko, the virtual video source)
 /etc/amba-virt/camera.conf           camera pipeline configuration (pipeline on)
@@ -68,7 +68,8 @@ The layer is tagged from a digest of the staged rootfs and reaches the EVE
 1. LinuxKit init runs `/etc/init.d/021-amba-virt-server` before the EVE
    system services (pillar, `domainmgr`) start.
 2. The server loads `modules.conf` (`ambcma.ko`, `cavalry.ko`, `amba_virt.ko`,
-   `amba_virt_dma.ko`, then `amba_virt_iav_win.ko`, which the IAV windows need) in order with `finit_module`, from
+   `amba_virt_dma.ko`, `amba_virt_usb_dma.ko` (the USB passthrough window, [USB-Passthrough.md](USB-Passthrough.md)),
+   then `amba_virt_iav_win.ko`, which the IAV windows need) in order with `finit_module`, from
    `/lib/modules/$(uname -r)/extra/`. A module already loaded with the same
    parameters is accepted; one loaded with different parameters fails the
    boot.
@@ -114,6 +115,7 @@ The ipcam-mini reserved-memory contract is:
 | `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | Detected DRAM (`reg = <0x0 0x0 0x8 0x0>`) |
 | `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Size `ambcma.ko` validates |
 | `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
+| `/reserved-memory/virt_usb_dma@15c00000` | `0x15c00000`–`0x17bfffff` | 32 MiB | `no-map;` | Physical USB host-controller DMA window (`amba_virt_usb_dma.ko`, `/dev/amba_virt_usb_dma`). See [USB-Passthrough.md](USB-Passthrough.md). |
 | `/reserved-memory/dma32@17c00000` | `0x17c00000`–`0x1bbfffff` | 64 MiB | `no-map;` | Low-4 GiB DMA32 pool for `amba_virt_dma.ko` (four 16 MiB guest DMA lease windows) |
 | `/reserved-memory/cavalry@2` | `0x1fc00000`–`0x1fffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer |
 | `/reserved-memory/cavalry@1` | none | 0 | `no-map;` | Node and phandle kept; this profile has no shared-pool `reg` |
@@ -123,7 +125,7 @@ The ipcam-mini reserved-memory contract is:
 | `/reserved-memory/linux,cma` | Linux low `0x1bc00000`–`0x1fbfffff` (64 MiB) or high | 64–512 MiB | `reusable;` | Kernel CMA |
 | `/reserved-memory/cavalry@0` | `0x100000000`–`0x3ffffffff` | 12 GiB | `no-map;` | Cavalry private pool. Linux RAM continues from `0x400000000` to the detected DRAM top |
 
-`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it, and `dma32@17c00000` (`0x17c00000`–`0x1bbfffff`, 64 MiB, DTS label `dma32_reserved`) sits immediately below `linux,cma` (`0x1bc00000`–`0x1fbfffff`). `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. After `/dev/iav` exists, and before the sensor path, the server pins one 512 MiB private-bank `ambcma` partition inside `iav@0` and leases it as eight 64 MiB slices. On the 2026-10-12 image that pin returned pid 193 at `0x94000000`. The address is whatever `ambcma` returns on that boot.
+`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it, and `dma32@17c00000` (`0x17c00000`–`0x1bbfffff`, 64 MiB, DTS label `dma32_reserved`) sits immediately below `linux,cma` (`0x1bc00000`–`0x1fbfffff`). `virt_usb_dma@15c00000` (`0x15c00000`–`0x17bfffff`, 32 MiB, DTS label `virt_usb_dma_reserved`) sits immediately below that DMA32 pool and above U-Boot `reloc-top` (`0x13000000`). It is the xHCI passthrough window, not a slice of `dma32@17c00000`. `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. After `/dev/iav` exists, and before the sensor path, the server pins one 512 MiB private-bank `ambcma` partition inside `iav@0` and leases it as eight 64 MiB slices. On the 2026-10-12 image that pin returned pid 193 at `0x94000000`. The address is whatever `ambcma` returns on that boot.
 
 In addition, the device tree declares the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specifies `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation. Because GRUB forwards the runtime-patched EFI FDT from U-Boot (`EXT_DTB` in `build/bin/u-boot.bin` on eMMC `boot0`), any change to `eve-kernel/arch/arm64/boot/dts/ambarella/n1_655.dts` also requires rebuilding that DTB, linking `build/bin/u-boot.bin` (`make u-boot`), and writing it to `boot0` at sector `0x100` ([EVE-Installation.md](EVE-Installation.md) §6).
 

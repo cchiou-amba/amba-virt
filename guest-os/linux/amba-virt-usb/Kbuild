@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Ambarella HVM USB Host Passthrough Driver Kbuild
+#
+# Copyright (C) 2026, Ambarella International LLC
+
+ccflags-y += -I$(src)
+ccflags-y += -I$(src)/../../../drivers/amba_virt
+
+obj-m := amba_virt_usb.o

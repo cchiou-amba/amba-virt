@@ -54,6 +54,7 @@ extern "C" {
 #include "StreamBroadcaster.hxx"
 #include "DashboardHtml.hxx"
 #include "IavQualMain.hxx"
+#include "UsbCameraCapture.hxx"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -104,6 +105,8 @@ static std::atomic<float> g_live_conf_thresh{0.35f};
 static std::atomic<float> g_live_nms_thresh{0.45f};
 
 static struct stream_broadcaster g_broadcaster;
+static struct stream_broadcaster g_usb_broadcaster;
+static std::atomic<int> g_usb_resolution{UsbCameraCapture::Resolution720p};
 static JpegSidecarHandle g_jpeg_handles[2];
 static uint32_t g_live_dag_id = 0;
 static uint32_t g_live_in_handle = 0;
@@ -116,6 +119,7 @@ static void SignalHandler(int signum)
     (void)signum;
     g_running.store(false);
     stream_broadcaster_shutdown(&g_broadcaster);
+    stream_broadcaster_shutdown(&g_usb_broadcaster);
 }
 
 /* Worker thread: Queries host IAV tap over Nanopb vsock and broadcasts MJPEG frames */
@@ -338,10 +342,10 @@ static void *LiveTapWorkerThread(void *arg)
     return nullptr;
 }
 
-static void HandleLiveStream(int client_fd)
+static void HandleBroadcasterStream(int client_fd, struct stream_broadcaster *broadcaster)
 {
     int sub_id = -1;
-    int reg_rc = stream_broadcaster_register(&g_broadcaster, &sub_id);
+    int reg_rc = stream_broadcaster_register(broadcaster, &sub_id);
     if (reg_rc < 0) {
         char err_buf[256];
         int elen = http_format_503_service_unavailable(err_buf, sizeof(err_buf));
@@ -358,7 +362,7 @@ static void HandleLiveStream(int client_fd)
         "Cache-Control: no-cache, no-store, must-revalidate\r\n"
         "Connection: close\r\n\r\n";
     if (http_send_all(client_fd, stream_header, strlen(stream_header)) < 0) {
-        stream_broadcaster_unregister(&g_broadcaster, sub_id);
+        stream_broadcaster_unregister(broadcaster, sub_id);
         close(client_fd);
         return;
     }
@@ -368,7 +372,7 @@ static void HandleLiveStream(int client_fd)
 
     while (g_running.load()) {
         size_t frame_len = 0;
-        int fetch_rc = stream_broadcaster_fetch(&g_broadcaster, &client_last_seq,
+        int fetch_rc = stream_broadcaster_fetch(broadcaster, &client_last_seq,
                                                frame_buf.data(), frame_buf.size(),
                                                &frame_len, 2000);
         if (fetch_rc == -ETIMEDOUT) {
@@ -395,8 +399,32 @@ static void HandleLiveStream(int client_fd)
         }
     }
 
-    stream_broadcaster_unregister(&g_broadcaster, sub_id);
+    stream_broadcaster_unregister(broadcaster, sub_id);
     close(client_fd);
+}
+
+static void HandleLiveStream(int client_fd)
+{
+    HandleBroadcasterStream(client_fd, &g_broadcaster);
+}
+
+static uint8_t *DecodeJpegRgb(const uint8_t *jpeg, size_t jpeg_len, int *width, int *height)
+{
+    if (!jpeg || jpeg_len == 0 || !width || !height)
+        return nullptr;
+
+    int channels = 0;
+    uint8_t *rgb = stbi_load_from_memory(reinterpret_cast<const stbi_uc *>(jpeg),
+                                         static_cast<int>(jpeg_len),
+                                         width, height, &channels, 3);
+    if (!rgb || *width <= 0 || *height <= 0) {
+        if (rgb)
+            stbi_image_free(rgb);
+        *width = 0;
+        *height = 0;
+        return nullptr;
+    }
+    return rgb;
 }
 
 static void HandleStaticInfer(int client_fd, const struct http_request *req, YoloRuntime *rt)
@@ -420,11 +448,10 @@ static void HandleStaticInfer(int client_fd, const struct http_request *req, Yol
     struct timespec ts_total_start, ts_total_end;
     clock_gettime(CLOCK_MONOTONIC, &ts_total_start);
 
-    int img_w = 0, img_h = 0, img_c = 0;
-    uint8_t *img_rgb = stbi_load_from_memory(reinterpret_cast<const stbi_uc *>(req->body),
-                                             static_cast<int>(req->body_len),
-                                             &img_w, &img_h, &img_c, 3);
-    if (!img_rgb || img_w <= 0 || img_h <= 0) {
+    int img_w = 0, img_h = 0;
+    uint8_t *img_rgb = DecodeJpegRgb(reinterpret_cast<const uint8_t *>(req->body),
+                                     req->body_len, &img_w, &img_h);
+    if (!img_rgb) {
         char err_buf[256];
         int elen = http_format_422_unprocessable(err_buf, sizeof(err_buf), "Failed to decode image");
         http_send_all(client_fd, err_buf, elen);
@@ -434,23 +461,13 @@ static void HandleStaticInfer(int client_fd, const struct http_request *req, Yol
 
     /* Preprocess: letterbox scale into 640x640 planar RGB */
     std::vector<uint8_t> planar_in(3 * 640 * 640, 114);
-    uint8_t *r_plane = planar_in.data();
-    uint8_t *g_plane = r_plane + (640 * 640);
-    uint8_t *b_plane = r_plane + (2 * 640 * 640);
-
-    float scale = std::min(640.0f / img_w, 640.0f / img_h);
-    int nw = static_cast<int>(img_w * scale);
-    int nh = static_cast<int>(img_h * scale);
-    for (int y = 0; y < nh; y++) {
-        for (int x = 0; x < nw; x++) {
-            int src_x = std::min(static_cast<int>(x / scale), img_w - 1);
-            int src_y = std::min(static_cast<int>(y / scale), img_h - 1);
-            const uint8_t *sp = img_rgb + (src_y * img_w + src_x) * 3;
-            int out_idx = y * 640 + x;
-            r_plane[out_idx] = sp[0];
-            g_plane[out_idx] = sp[1];
-            b_plane[out_idx] = sp[2];
-        }
+    if (ResizeLetterbox640(img_rgb, img_w, img_h, planar_in.data()) < 0) {
+        stbi_image_free(img_rgb);
+        char err_buf[256];
+        int elen = http_format_422_unprocessable(err_buf, sizeof(err_buf), "Failed to decode image");
+        http_send_all(client_fd, err_buf, elen);
+        close(client_fd);
+        return;
     }
     stbi_image_free(img_rgb);
 
@@ -524,6 +541,182 @@ static void HandleStaticInfer(int client_fd, const struct http_request *req, Yol
     close(client_fd);
 }
 
+static int ParseUsbResolution(const char *body, size_t len, int *out_res)
+{
+    if (!body || !out_res)
+        return -EINVAL;
+    std::string text(body, len);
+    if (text.find("1920") != std::string::npos || text.find("1080") != std::string::npos) {
+        *out_res = UsbCameraCapture::Resolution1080p;
+        return 0;
+    }
+    if (text.find("1280") != std::string::npos || text.find("720") != std::string::npos) {
+        *out_res = UsbCameraCapture::Resolution720p;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static void HandleUsbResolution(int client_fd, const struct http_request *req)
+{
+    int resolution = UsbCameraCapture::Resolution720p;
+    if (ParseUsbResolution(req->body, req->body_len, &resolution) < 0) {
+        char err_buf[256];
+        int elen = http_format_422_unprocessable(err_buf, sizeof(err_buf), "Unsupported USB resolution");
+        http_send_all(client_fd, err_buf, elen);
+        close(client_fd);
+        return;
+    }
+
+    g_usb_resolution.store(resolution);
+    UsbCameraCapture::Format fmt{};
+    UsbCameraCapture::formatForResolution(resolution, &fmt);
+    char ok_json[128];
+    snprintf(ok_json, sizeof(ok_json),
+             "{\"status\":\"ok\",\"width\":%u,\"height\":%u,\"fps\":%u}",
+             fmt.width, fmt.height, fmt.fps);
+    char resp_buf[256];
+    int rlen = http_format_200_json(resp_buf, sizeof(resp_buf), ok_json);
+    http_send_all(client_fd, resp_buf, rlen);
+    close(client_fd);
+}
+
+static void *UsbWebcamWorkerThread(void *arg)
+{
+    auto *rt = static_cast<YoloRuntime *>(arg);
+    UsbCameraCapture camera;
+    std::vector<uint8_t> jpeg(2 * 1024 * 1024);
+    std::vector<uint8_t> planar(3 * 640 * 640, 114);
+    int open_resolution = -1;
+    uint64_t seq = 0;
+    double last_frame_s = 0.0;
+
+    while (g_running.load()) {
+        if (stream_broadcaster_wait_active(&g_usb_broadcaster, 100) < 0)
+            continue;
+
+        int want = g_usb_resolution.load();
+        if (!camera.isOpen() || open_resolution != want) {
+            camera.closeCamera();
+            if (camera.openUvc(want) < 0) {
+                open_resolution = -1;
+                usleep(200000);
+                continue;
+            }
+            open_resolution = want;
+        }
+
+        size_t jpeg_len = 0;
+        int rd = camera.readJpeg(jpeg.data(), jpeg.size(), &jpeg_len);
+        if (rd == -EAGAIN || rd == -EINTR)
+            continue;
+        if (rd < 0) {
+            camera.closeCamera();
+            open_resolution = -1;
+            usleep(100000);
+            continue;
+        }
+
+        struct timespec t_start, t_inf_done, t_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
+
+        int img_w = 0;
+        int img_h = 0;
+        uint8_t *rgb = DecodeJpegRgb(jpeg.data(), jpeg_len, &img_w, &img_h);
+        if (!rgb)
+            continue;
+        if (ResizeLetterbox640(rgb, img_w, img_h, planar.data()) < 0) {
+            stbi_image_free(rgb);
+            continue;
+        }
+        stbi_image_free(rgb);
+
+        std::vector<uint8_t> out_tensor_copy(rt->net_out.out_desc[0].size);
+        pthread_mutex_lock(&rt->lock);
+        memcpy(rt->net_in.in_desc[0].virt, planar.data(), planar.size());
+        int run_rc = nnctrl_run_net(rt->net_id, nullptr, nullptr, nullptr, nullptr);
+        if (run_rc >= 0 && g_live_out_virt && g_live_out_virt != rt->net_out.out_desc[0].virt) {
+            memcpy(out_tensor_copy.data(), g_live_out_virt, out_tensor_copy.size());
+        } else if (run_rc >= 0) {
+            memcpy(out_tensor_copy.data(), rt->net_out.out_desc[0].virt, out_tensor_copy.size());
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t_inf_done);
+        pthread_mutex_unlock(&rt->lock);
+        if (run_rc < 0)
+            continue;
+
+        struct yolo_geometry_config geo_cfg{};
+        yolo_geometry_init(&geo_cfg, 640, 640, static_cast<uint32_t>(img_w),
+                           static_cast<uint32_t>(img_h), false);
+        struct yolo_postprocess_config post_cfg{};
+        yolo_postprocess_default_config(&post_cfg);
+        post_cfg.conf_thresh = g_live_conf_thresh.load();
+        post_cfg.nms_thresh = g_live_nms_thresh.load();
+
+        struct yolo_norm_box norm_dets[100];
+        int det_cnt = yolo_postprocess(out_tensor_copy.data(), &geo_cfg, &post_cfg, norm_dets, 100);
+        if (det_cnt < 0)
+            det_cnt = 0;
+
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        double total_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0 +
+                          (t_end.tv_nsec - t_start.tv_nsec) / 1000000.0;
+        double visorc_ms = (t_inf_done.tv_sec - t_start.tv_sec) * 1000.0 +
+                           (t_inf_done.tv_nsec - t_start.tv_nsec) / 1000000.0;
+        double now_s = t_end.tv_sec + t_end.tv_nsec / 1e9;
+        double fps = 0.0;
+        if (last_frame_s > 0.0) {
+            double dt = now_s - last_frame_s;
+            if (dt > 0.0001)
+                fps = 1.0 / dt;
+        }
+        last_frame_s = now_s;
+        seq++;
+
+        char json_buf[4096];
+        int jlen = snprintf(json_buf, sizeof(json_buf),
+                            "{\"seq\":%llu,\"drop_count\":0,"
+                            "\"visorc_ms\":%.2f,\"rpc_ms\":%.2f,\"post_ms\":%.2f,\"total_ms\":%.2f,\"fps\":%.2f,"
+                            "\"det_count\":%d,\"detections\":[",
+                            static_cast<unsigned long long>(seq),
+                            visorc_ms, visorc_ms, total_ms - visorc_ms, total_ms, fps, det_cnt);
+        for (int d = 0; d < det_cnt && jlen < static_cast<int>(sizeof(json_buf)) - 160; d++) {
+            const char *cname = (norm_dets[d].class_id >= 0 && norm_dets[d].class_id < 80)
+                                    ? COCO_CLASSES[norm_dets[d].class_id] : "unknown";
+            jlen += snprintf(json_buf + jlen, sizeof(json_buf) - jlen,
+                             "%s{\"class\":\"%s\",\"confidence\":%.4f,"
+                             "\"box\":[%.4f,%.4f,%.4f,%.4f]}",
+                             (d > 0 ? "," : ""), cname, norm_dets[d].score,
+                             norm_dets[d].x1, norm_dets[d].y1, norm_dets[d].x2, norm_dets[d].y2);
+        }
+        if (jlen < static_cast<int>(sizeof(json_buf)) - 2) {
+            json_buf[jlen++] = ']';
+            json_buf[jlen++] = '}';
+            json_buf[jlen] = '\0';
+        }
+
+        uint32_t json_len_u32 = static_cast<uint32_t>(jlen);
+        uint32_t net_json_len = htole32(json_len_u32);
+        uint32_t net_jpeg_len = htole32(static_cast<uint32_t>(jpeg_len));
+        size_t total_frame_bytes = sizeof(net_json_len) + sizeof(net_jpeg_len) + json_len_u32 + jpeg_len;
+        std::vector<uint8_t> packet(total_frame_bytes);
+        uint8_t *p = packet.data();
+        memcpy(p, &net_json_len, sizeof(net_json_len));
+        p += sizeof(net_json_len);
+        memcpy(p, &net_jpeg_len, sizeof(net_jpeg_len));
+        p += sizeof(net_jpeg_len);
+        memcpy(p, json_buf, json_len_u32);
+        p += json_len_u32;
+        memcpy(p, jpeg.data(), jpeg_len);
+
+        uint64_t out_seq = 0;
+        stream_broadcaster_publish(&g_usb_broadcaster, packet.data(), total_frame_bytes, &out_seq);
+    }
+
+    camera.closeCamera();
+    return nullptr;
+}
+
 static void HandleClientConnection(int client_fd, YoloRuntime *rt)
 {
     http_configure_socket_timeouts(client_fd, 2000);
@@ -582,6 +775,7 @@ static void HandleClientConnection(int client_fd, YoloRuntime *rt)
         http_send_all(client_fd, HTML_TEMPLATE, body_len);
         close(client_fd);
     } else if (req.route == HTTP_ROUTE_API_INFO) {
+        char usb_node[64];
         char json_buf[1024];
         snprintf(json_buf, sizeof(json_buf),
                  "{\n"
@@ -591,9 +785,12 @@ static void HandleClientConnection(int client_fd, YoloRuntime *rt)
                  "  \"machine\": \"%s\",\n"
                  "  \"live_streaming\": true,\n"
                  "  \"mjpeg_hardware\": true,\n"
-                 "  \"cavalry_path\": \"Path B\"\n"
+                 "  \"cavalry_path\": \"Path B\",\n"
+                 "  \"usb_webcam\": %s\n"
                  "}\n",
-                 rt->os_pretty_name, rt->os_kernel, rt->os_machine);
+                 rt->os_pretty_name, rt->os_kernel, rt->os_machine,
+                 UsbCameraCapture::findUvcCaptureNode(usb_node, sizeof(usb_node)) == 0
+                     ? "true" : "false");
         char resp_buf[2048];
         int rlen = http_format_200_json(resp_buf, sizeof(resp_buf), json_buf);
         http_send_all(client_fd, resp_buf, rlen);
@@ -618,6 +815,10 @@ static void HandleClientConnection(int client_fd, YoloRuntime *rt)
         close(client_fd);
     } else if (req.route == HTTP_ROUTE_LIVE_STREAM) {
         HandleLiveStream(client_fd);
+    } else if (req.method == HTTP_METHOD_GET && strcmp(req.uri, "/usb/stream") == 0) {
+        HandleBroadcasterStream(client_fd, &g_usb_broadcaster);
+    } else if (req.method == HTTP_METHOD_POST && strcmp(req.uri, "/usb/resolution") == 0) {
+        HandleUsbResolution(client_fd, &req);
     } else if (req.route == HTTP_ROUTE_INFER) {
         HandleStaticInfer(client_fd, &req, rt);
     } else if (req.route == HTTP_ROUTE_OPTIONS) {
@@ -818,10 +1019,13 @@ int main(int argc, char **argv)
 
     /* 6. Initialize Multi-Subscriber Stream Broadcaster */
     stream_broadcaster_init(&g_broadcaster, 2 * 1024 * 1024);
+    stream_broadcaster_init(&g_usb_broadcaster, 2 * 1024 * 1024);
 
-    /* 7. Start Live Tap Worker Thread */
+    /* 7. Start Live Tap and USB Webcam Worker Threads */
     pthread_t worker_tid;
     pthread_create(&worker_tid, nullptr, LiveTapWorkerThread, &yolo);
+    pthread_t usb_worker_tid;
+    pthread_create(&usb_worker_tid, nullptr, UsbWebcamWorkerThread, &yolo);
 
     /* 8. Setup HTTP Listener */
     char ip_str[64] = "0.0.0.0";
@@ -889,7 +1093,9 @@ int main(int argc, char **argv)
     /* Teardown */
     g_running.store(false);
     stream_broadcaster_shutdown(&g_broadcaster);
+    stream_broadcaster_shutdown(&g_usb_broadcaster);
     pthread_join(worker_tid, nullptr);
+    pthread_join(usb_worker_tid, nullptr);
 
     for (int i = 0; i < 2; i++) {
         if (g_jpeg_handles[i].virt) {
@@ -905,6 +1111,7 @@ int main(int argc, char **argv)
     }
 
     stream_broadcaster_destroy(&g_broadcaster);
+    stream_broadcaster_destroy(&g_usb_broadcaster);
     cavalry_mem_free(yolo.net_m.mem_size, yolo.net_m.phy_addr, yolo.net_m.virt_addr);
     nnctrl_exit_net(yolo.net_id);
     nnctrl_exit();

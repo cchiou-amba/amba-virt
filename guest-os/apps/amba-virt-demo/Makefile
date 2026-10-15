@@ -85,7 +85,7 @@ all: $(TARGETS)
 CXX := $(CROSS_COMPILE)g++
 CXXFLAGS := $(CFLAGS) -std=c++17
 
-DEMO_CXX_SRCS := AmbaVirtDemo.cxx HttpServer.cxx StreamBroadcaster.cxx YoloGeometry.cxx YoloPostprocess.cxx
+DEMO_CXX_SRCS := AmbaVirtDemo.cxx HttpServer.cxx StreamBroadcaster.cxx YoloGeometry.cxx YoloPostprocess.cxx UsbCameraCapture.cxx
 
 amba_virt_demo: $(DEMO_CXX_SRCS) $(COMMON_SRCS) $(IAV_QUAL_SRCS)
 	$(CC) $(CFLAGS) $(IAV_QUAL_FLAGS) -o $@ $^ $(CPPUTEST_LIBS) $(LDFLAGS) -lstdc++
@@ -122,7 +122,9 @@ TEST_CXX_SRCS := test/test_main.cxx \
 	test/TestStreamBroadcaster.cxx \
 	test/TestPhysicalSceneAlignment.cxx \
 	test/TestNanopbWireRobustness.cxx \
+	test/TestUsbCameraCapture.cxx \
 	YoloGeometry.cxx \
+	UsbCameraCapture.cxx \
 	YoloPostprocess.cxx \
 	HttpServer.cxx \
 	StreamBroadcaster.cxx

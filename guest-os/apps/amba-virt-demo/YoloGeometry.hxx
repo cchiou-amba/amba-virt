@@ -83,6 +83,14 @@ int yolo_geometry_normalize_box(const struct yolo_geometry_config *cfg,
                                 float tensor_x2, float tensor_y2,
                                 struct yolo_norm_box *out_box);
 
+/*
+ * Top-left letterbox of packed RGB8 into a 640x640 planar RGB tensor.
+ * Unfilled pixels stay 114. Matches the static photo preprocess.
+ * Returns 0 on success, -EINVAL on a null pointer or a non-positive size.
+ */
+int ResizeLetterbox640(const uint8_t *rgb, int src_w, int src_h,
+                       uint8_t *planar_out);
+
 #ifdef __cplusplus
 }
 #endif

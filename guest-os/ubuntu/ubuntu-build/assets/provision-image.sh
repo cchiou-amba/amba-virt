@@ -111,7 +111,8 @@ if [ "${#INSTALLED_RETAIN[@]}" -gt 0 ]; then
 fi
 
 # Mark installed kernel images and modules manual
-mapfile -t INSTALLED_KERNELS < <(dpkg-query -W -f='${Package} ${Status}\n' 'linux-image-*-generic' 'linux-modules-*-generic' 'linux-image-virtual' 'linux-virtual' 2>/dev/null | grep "ok installed" | awk '{print $1}')
+# linux-modules-extra provides uvcvideo and videobuf2. Keep it if the image already has it.
+mapfile -t INSTALLED_KERNELS < <(dpkg-query -W -f='${Package} ${Status}\n' 'linux-image-*-generic' 'linux-modules-*-generic' 'linux-modules-extra-*-generic' 'linux-image-virtual' 'linux-virtual' 2>/dev/null | grep "ok installed" | awk '{print $1}')
 if [ "${#INSTALLED_KERNELS[@]}" -gt 0 ]; then
     apt-mark manual "${INSTALLED_KERNELS[@]}" >/dev/null 2>&1 || true
 fi

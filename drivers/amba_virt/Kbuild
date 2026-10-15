@@ -4,7 +4,7 @@
 
 ccflags-y += -I$(src)/include/uapi -I$(src)
 
-obj-m := amba_virt.o amba_virt_uart.o amba_virt_dma.o amba_virt_iav_win.o amba_iav_pool.o
+obj-m := amba_virt.o amba_virt_uart.o amba_virt_dma.o amba_virt_usb_dma.o amba_virt_iav_win.o amba_iav_pool.o
 amba_virt-y := amba_virt_nohyper.o amba_virt_core.o amba_virt_slice.o
 amba_iav_pool-y := amba_virt_iav_pool.o iav_low_slice.o
 

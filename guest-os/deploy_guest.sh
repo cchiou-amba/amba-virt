@@ -217,6 +217,13 @@ case "${DISTRO}" in
             fi
         fi
 
+        # 3a. Ubuntu: uvcvideo and v4l2-ctl for the passed-through USB host controller. The lean
+        #     image ships linux-modules without -extra, so install the package for the running kernel.
+        if [ "${PROVISION}" -eq 1 ] && [ "${DISTRO}" = "ubuntu" ]; then
+            log_step "Installing the UVC kernel modules and v4l-utils on ${TARGET_NODE}..."
+            run_remote "modinfo uvcvideo >/dev/null 2>&1 && command -v v4l2-ctl >/dev/null 2>&1 || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends linux-modules-extra-\$(uname -r) v4l-utils; }"
+        fi
+
         # 3b. Provision the demo service, so a cold boot of the guest starts it by itself
         if [ "${PROVISION}" -eq 1 ]; then
             log_step "Provisioning the demo service on ${TARGET_NODE}..."
@@ -241,12 +248,13 @@ case "${DISTRO}" in
             copy_to_target "${DEMO_BIN}" "/tmp/amba_staging/amba_virt_demo"
             copy_to_target "${MODEL}" "/tmp/amba_staging/n1-655_yolox_s_amba_optimized.bin"
             copy_to_target "${DEMO_DIR}/service/amba-virt-demo.env" "/tmp/amba_staging/amba-virt-demo.env"
-            run_remote "sudo cp /tmp/amba_staging/amba_virt_demo /usr/local/bin/amba_virt_demo && sudo chmod 0755 /usr/local/bin/amba_virt_demo"
+            # install replaces the file, so a running demo does not fail the copy with ETXTBSY
+            run_remote "sudo install -m 0755 /tmp/amba_staging/amba_virt_demo /usr/local/bin/amba_virt_demo"
             run_remote "sudo mkdir -p /opt/cavalry && sudo cp /tmp/amba_staging/n1-655_yolox_s_amba_optimized.bin /opt/cavalry/n1-655_yolox_s_amba_optimized.bin && sudo chmod 0644 /opt/cavalry/n1-655_yolox_s_amba_optimized.bin"
             run_remote "sed 's/^AMBA_VIRT_DEMO_BIND=.*/AMBA_VIRT_DEMO_BIND=0.0.0.0:${DEMO_PORT}/' /tmp/amba_staging/amba-virt-demo.env > /tmp/amba_staging/demo.env.new && sudo cp /tmp/amba_staging/demo.env.new /etc/amba-virt-demo.env && sudo chmod 0644 /etc/amba-virt-demo.env"
             if [ "${DISTRO}" = "ubuntu" ] || [ -n "${EXT_LINUX_DISTRO}" ]; then
                 copy_to_target "${DEMO_DIR}/service/amba-virt-demo.service" "/tmp/amba_staging/amba-virt-demo.service"
-                run_remote "sudo cp /tmp/amba_staging/amba-virt-demo.service /etc/systemd/system/amba-virt-demo.service && sudo systemctl daemon-reload && sudo systemctl enable amba-virt-demo.service"
+                run_remote "sudo cp /tmp/amba_staging/amba-virt-demo.service /etc/systemd/system/amba-virt-demo.service && sudo systemctl daemon-reload && sudo systemctl enable amba-virt-demo.service && sudo systemctl restart amba-virt-demo.service"
             else
                 copy_to_target "${DEMO_DIR}/service/amba-virt-demo.openrc" "/tmp/amba_staging/amba-virt-demo"
                 run_remote "sudo cp /tmp/amba_staging/amba-virt-demo /etc/init.d/amba-virt-demo && sudo chmod 0755 /etc/init.d/amba-virt-demo && sudo rc-update add amba-virt-demo default"
@@ -269,9 +277,14 @@ case "${DISTRO}" in
         # 4. Handle kernel module reload & insertion
         if [ "${RELOAD}" -eq 1 ]; then
             log_step "Reloading kernel modules on ${TARGET_NODE}..."
+            run_remote "sudo rmmod uvcvideo 2>/dev/null || true"
+            run_remote "sudo rmmod amba_virt_usb 2>/dev/null || true"
             run_remote "sudo rmmod amba_uart 2>/dev/null || true"
             run_remote "sudo modprobe amba_virt 2>/dev/null || sudo insmod /lib/modules/\$(uname -r)/extra/amba_virt.ko 2>/dev/null || true"
             run_remote "if [ -f /lib/modules/\$(uname -r)/extra/amba_uart.ko ]; then sudo modprobe amba_uart 2>/dev/null || sudo insmod /lib/modules/\$(uname -r)/extra/amba_uart.ko; fi"
+            run_remote "if [ -f /lib/modules/\$(uname -r)/extra/amba_virt_usb.ko ]; then sudo modprobe amba_virt_usb 2>/dev/null || sudo insmod /lib/modules/\$(uname -r)/extra/amba_virt_usb.ko; fi"
+            # uvcvideo comes from the Ubuntu linux-modules-extra package, not this tree.
+            run_remote "sudo modprobe uvcvideo 2>/dev/null || true"
         fi
 
 

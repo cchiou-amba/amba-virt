@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <string.h>
 
+#define YOLO_LETTERBOX_SIDE 640
+
 int yolo_geometry_init(struct yolo_geometry_config *cfg,
                        uint32_t input_w, uint32_t input_h,
                        uint32_t orig_w, uint32_t orig_h,
@@ -157,6 +159,59 @@ int yolo_geometry_normalize_box(const struct yolo_geometry_config *cfg,
     rc = yolo_geometry_inverse(cfg, tx2, ty2, &out_box->x2, &out_box->y2);
     if (rc < 0)
         return rc;
+
+    return 0;
+}
+
+int ResizeLetterbox640(const uint8_t *rgb, int src_w, int src_h,
+                       uint8_t *planar_out)
+{
+    const int side = YOLO_LETTERBOX_SIDE;
+
+    if (!rgb || !planar_out || src_w <= 0 || src_h <= 0)
+        return -EINVAL;
+
+    memset(planar_out, 114, (size_t)(3 * side * side));
+
+    float scale = fminf((float)side / (float)src_w, (float)side / (float)src_h);
+    if (!(scale > 0.0f) || isnan(scale) || isinf(scale))
+        return -EINVAL;
+
+    int nw = (int)((float)src_w * scale);
+    int nh = (int)((float)src_h * scale);
+    if (nw > side)
+        nw = side;
+    if (nh > side)
+        nh = side;
+    if (nw < 0)
+        nw = 0;
+    if (nh < 0)
+        nh = 0;
+
+    uint8_t *r_plane = planar_out;
+    uint8_t *g_plane = planar_out + (side * side);
+    uint8_t *b_plane = planar_out + (2 * side * side);
+
+    for (int y = 0; y < nh; y++) {
+        for (int x = 0; x < nw; x++) {
+            int src_x = (int)((float)x / scale);
+            int src_y = (int)((float)y / scale);
+            if (src_x > src_w - 1)
+                src_x = src_w - 1;
+            if (src_x < 0)
+                src_x = 0;
+            if (src_y > src_h - 1)
+                src_y = src_h - 1;
+            if (src_y < 0)
+                src_y = 0;
+
+            const uint8_t *sp = rgb + ((size_t)src_y * (size_t)src_w + (size_t)src_x) * 3;
+            int out_idx = y * side + x;
+            r_plane[out_idx] = sp[0];
+            g_plane[out_idx] = sp[1];
+            b_plane[out_idx] = sp[2];
+        }
+    }
 
     return 0;
 }

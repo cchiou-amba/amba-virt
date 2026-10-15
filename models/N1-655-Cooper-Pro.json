@@ -14,7 +14,9 @@
     {
       "ztype": "IO_TYPE_USB_CONTROLLER",
       "phylabel": "USB",
-      "phyaddrs": {},
+      "phyaddrs": {
+        "path": "xhci-hcd.0.auto"
+      },
       "logicallabel": "USB",
       "assigngrp": "USB",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
