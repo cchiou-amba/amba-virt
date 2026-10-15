@@ -21,15 +21,21 @@ This workspace builds the bootable QNX Neutrino RTOS 8.0 disk image for EVE-OS o
 
 ## Quick Start
 
+From the repository root:
+
 ```bash
 # 1. Source QNX SDP 8.0 environment
 source ~/qnx800/qnxsdp-env.sh
 
-# 2. Run the build script
-./build.sh
+# 2. Build QNX resource managers and the compressed QCOW2 disk image
+make guest-qnx
+make guest-qnx-image
 
-# 3. Uplink generated QCOW2 to ZedControl
-../amba-virt/scripts/zcli -- image uplink qnx-8.0-arm64-cloudimg \
+# 3. Stage and uplink generated QCOW2 to ZedControl
+cp -f guest-os/qnx/qnx-build/output/dist/qnx-8.0-arm64-cloudimg.qcow2 ~/public_html/cloud-images/qnx-8.0-arm64-cloudimg.qcow2
+./scripts/zcli -- image uplink qnx-8.0-arm64-cloudimg \
+  --datastore-name=LocalHTTP \
+  --image-url=cloud-images/qnx-8.0-arm64-cloudimg.qcow2 \
   --image-sha="<SHA256>" \
   --image-size="<SIZE>"
 ```
@@ -45,3 +51,5 @@ ssh -p 2322 root@<target-node-ip>
 # Serial / VirtIO console access via EVE
 eve enter debug "eve app console"
 ```
+
+Full QNX HVM guide: [doc/QNX-Guest-VM.md](../../../doc/QNX-Guest-VM.md). Full from-zero provisioning recipe for all six guests: [doc/EVE-EdgeApp-Instances.md](../../../doc/EVE-EdgeApp-Instances.md).

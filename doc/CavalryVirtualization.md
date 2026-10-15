@@ -295,7 +295,7 @@ Path A vs. Path B is strictly an architectural property of **Cavalry (VisORC NPU
 
 ## 7. Multi-Tenant Architecture & Memory Sizing Guidelines
 
-The running pool is eight 1 GiB Cavalry slices from `0x100000000`. `amba-virt-ctl pools` prints that geometry and the paired 512 MiB low pool. A guest receives one slice: the `amba_shm` ticket is index 0, and every other ticket (`amba_shm1` to `amba_shm7`) takes the lowest free index at or above 1. The digit in a ticket's name is an exclusivity label for the controller's one-instance-per-group rule: it does not select Cavalry slice N. The server keeps the lease until EVE deletes or cleans up the domain.
+The running pool is eight 1 GiB Cavalry slices (`8589934592` bytes total) from `0x100000000` (`server_published_window_bytes`, validated in 64-bit arithmetic with a 64-bit `slice_offset` across slices `0..7` without 32-bit `shm_size` saturation). `amba-virt-ctl pools` prints that geometry and the paired 512 MiB low pool. A guest receives one slice: the `amba_shm0` ticket is index 0, and every other ticket (`amba_shm1` to `amba_shm7`) takes the lowest free index at or above 1 (`camera=on` on `amba_shm0..3`, off on `amba_shm4..7`). The digit in a ticket's name is an exclusivity label for the controller's one-instance-per-group rule: it does not select Cavalry slice N. The server keeps the lease until EVE deletes or cleans up the domain.
 
 ### 7.1 Multi-Tenant Defense-in-Depth Architecture
 
@@ -427,10 +427,10 @@ The host server (`amba-virt-server`) serializes access to the single physical Vi
 
 ## 10. QNX Neutrino RTOS 8.0 Architecture (EL0 Resource Manager)
 
-On BlackBerry QNX Neutrino RTOS 8.0, the Cavalry frontend runs as a userspace POSIX Resource Manager (`amba-cavalry-resmgr`) rather than a kernel module:
+On BlackBerry QNX Neutrino RTOS 8.0 (`qnx_8_0.<node>`, pinned to `amba_shm4` / `/dev/amba_virt_shm4`, `camera=0`), the Cavalry frontend runs as a userspace POSIX Resource Manager (`amba-cavalry-resmgr`) rather than a kernel module:
 
-1. **Pathname Space Registration**: Exposes `/dev/cavalry` via `resmgr_attach()`, allowing unmodified applications using `libnnctrl` and `libcavalry_mem` to run seamlessly.
-2. **Bounds Negotiation**: Sends `AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ` over `libamba_virt` during initialization to acquire the tenant BAR memory pool and 1 MB control arena.
+1. **Pathname Space Registration**: Exposes `/dev/cavalry` via `resmgr_attach()`.
+2. **Slice Claim & Bounds Negotiation (D7(a))**: Sends `AMBA_VIRT_MSG_SLICE_CLAIM_REQ` (via `amba_virt_claim_slice()`) followed by `AMBA_VIRT_MSG_DEV_SET_BOUNDS_REQ` over `libamba_virt` during initialization to register the QNX tenant at `amba-cavalry-resmgr` startup (`registered tenant idx=4 ... off=0x100000000` in `server.log`) and acquire the tenant BAR memory pool and 1 MB control arena without requiring a host server restart. (A QNX Cavalry DAG client is future work; the current qualification verifies slice 4 claim and tenant registration.)
 3. **Cross-Process User Pointer Marshaling**: In QNX microkernel architecture, client user pointers (`reg_u->run_dags_ptr`) cannot be dereferenced directly by the resource manager process. Memory is safely retrieved using `pread()` on `/proc/<pid>/as` with PID discovery via `MsgInfo(ctp->rcvid, &info)`.
 4. **Zero-Copy Projection**: Implements `io_mmap` returning physical BAR offsets (`g_cav.bar_phys + offset`) to client address spaces.
 

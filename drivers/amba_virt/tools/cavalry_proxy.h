@@ -22,6 +22,8 @@ extern "C" {
 
 #define MAX_TENANTS              8
 
+struct cavalry_dag_desc_mfd;
+
 struct cavalry_tenant_ctx {
 	uint32_t cid;
 	uint32_t tenant_idx;
@@ -29,7 +31,7 @@ struct cavalry_tenant_ctx {
 	unsigned char *shm_map;
 	size_t shm_size;
 	uint64_t phys_base;
-	uint32_t slice_offset;
+	uint64_t slice_offset;
 	uint32_t cavalry_pool_base;
 	uint32_t cavalry_pool_size;
 	uint32_t rpc_arena_offset;
@@ -45,9 +47,10 @@ int cavalry_proxy_pool_size_for_usable(size_t usable_size, uint32_t *out_size);
 int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 				  int window_fd, unsigned char *shm_map,
 				  size_t shm_size, uint64_t phys_base,
-				  uint32_t slice_offset);
+				  uint64_t slice_offset);
 int cavalry_proxy_restore_bindings(const struct amba_virt_binding_list *list,
 				   unsigned char *window_map, size_t window_size);
+int cavalry_proxy_get_last_mfd_dag(uint32_t dag_idx, struct cavalry_dag_desc_mfd *out_dag);
 int cavalry_proxy_unregister_tenant(uint32_t cid);
 struct cavalry_tenant_ctx *cavalry_proxy_get_tenant(uint32_t cid);
 int cavalry_proxy_get_all_tenants(struct cavalry_tenant_ctx *out_tenants, int max_tenants);

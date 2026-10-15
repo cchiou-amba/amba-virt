@@ -437,9 +437,17 @@ static void server_unbind_cid(int fd, uint32_t cid)
 		fprintf(stderr, "unbind cid %u: %s\n", cid, strerror(errno));
 }
 
+static uint64_t server_active_window_bytes(const struct amba_virt_info *info)
+{
+	if (g_window_bytes)
+		return g_window_bytes;
+	return info ? (uint64_t)info->shm_size : 0;
+}
+
 static void server_restore_bindings(int fd, unsigned char *map, const struct amba_virt_info *info)
 {
 	struct amba_virt_binding_list bindings;
+	uint64_t win_bytes = server_active_window_bytes(info);
 	uint32_t i;
 
 	memset(&bindings, 0, sizeof(bindings));
@@ -449,7 +457,7 @@ static void server_restore_bindings(int fd, unsigned char *map, const struct amb
 	}
 
 	if (cavalry_proxy_restore_bindings(&bindings, map == MAP_FAILED ? NULL : map,
-					   info->shm_size) < 0) {
+					   (size_t)win_bytes) < 0) {
 		fprintf(stderr, "amba-virt-server: failed to restore slice bindings\n");
 		return;
 	}
@@ -576,7 +584,7 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 		tx->len = sizeof(*out);
 
 		if (map != MAP_FAILED &&
-		    (uint64_t)in->shm_off + in->shm_len <= info->shm_size) {
+		    (uint64_t)in->shm_off + in->shm_len <= server_active_window_bytes(info)) {
 			volatile uint8_t *p = map + in->shm_off;
 			uint8_t first_byte = p[0];
 			if (msg_count <= 5 || (msg_count % 1000 == 0)) {
@@ -619,10 +627,13 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 				if (!virt_acl_has_cap(rx->client_cid, cap)) {
 					copy.status = -EPERM;
 				} else {
-					uint32_t slice_off = tenant->slice_offset;
+					uint64_t slice_off = tenant->slice_offset;
 					int range_err = 0;
 
-					if (copy.flags & AMBA_VIRT_GDMA_F_PITCH) {
+					if (slice_off > UINT32_MAX ||
+					    slice_off + tenant->shm_size > UINT32_MAX) {
+						range_err = 1;
+					} else if (copy.flags & AMBA_VIRT_GDMA_F_PITCH) {
 						uint64_t src_end = (uint64_t)copy.src_off +
 							(uint64_t)(copy.height ? copy.height - 1 : 0) * copy.src_pitch + copy.width;
 						uint64_t dst_end = (uint64_t)copy.dst_off +
@@ -640,8 +651,8 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 							rx->client_cid, copy.src_off, copy.dst_off, copy.len, tenant->shm_size);
 						copy.status = -ERANGE;
 					} else {
-						copy.src_off += slice_off;
-						copy.dst_off += slice_off;
+						copy.src_off += (uint32_t)slice_off;
+						copy.dst_off += (uint32_t)slice_off;
 
 						pthread_mutex_lock(&g_gdma_hw_mutex);
 						if (ioctl(fd, AMBA_VIRT_IOC_HOST_GDMA_COPY, &copy) < 0)
@@ -933,9 +944,10 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 
 		struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(rx->client_cid);
 		uint64_t tenant_phys = tenant ? tenant->phys_base : info->shm_phys;
+		size_t tenant_size = tenant ? tenant->shm_size : info->shm_size;
 
 		virt_dma_handle_submit(rx->client_cid, fd, tenant_phys,
-				      info->shm_size, d_req, d_resp);
+				      tenant_size, d_req, d_resp);
 		tx->len = sizeof(*out) + sizeof(*d_resp);
 	} else if (in->type == AMBA_VIRT_MSG_DMA_TERMINATE_REQ) {
 		struct amba_virt_dma_terminate *d_req;
@@ -1006,13 +1018,14 @@ static void process_incoming_msg(const struct amba_virt_xfer *rx,
 					uint64_t off = bind.slice.offset;
 					uint64_t sz = bind.slice.slice_size;
 					uint32_t usable = bind.slice.usable_size;
-					unsigned char *submap = (map != MAP_FAILED && off + sz <= info->shm_size) ?
+					uint64_t win_bytes = server_active_window_bytes(info);
+					unsigned char *submap = (map != MAP_FAILED && off + sz <= win_bytes) ?
 								(map + off) : (unsigned char *)MAP_FAILED;
 					int reg_ret;
 					int pool_ret;
 
 					reg_ret = cavalry_proxy_register_tenant(rx->client_cid, idx, -1, submap, usable,
-										bind.slice.phys, (uint32_t)off);
+										bind.slice.phys, off);
 					if (reg_ret < 0) {
 						claim_resp.status = reg_ret;
 						server_unbind_cid(fd, rx->client_cid);
@@ -1073,11 +1086,42 @@ static int recv_exact_tcp(int sock, void *buf, size_t len)
 
 struct tcp_client_session {
 	int authenticated;
+	uint32_t client_cid;
 	uint32_t lease_id;
 	uint64_t epoch;
 	uint64_t capability;
 	uint8_t  session_key[32];
 };
+
+static int tcp_resolve_slice_cid(uint64_t nonce, const unsigned char *map,
+				 uint64_t win_bytes, uint32_t *out_cid)
+{
+	uint32_t i;
+
+	if (!nonce || !map || map == MAP_FAILED || !g_geometry_matched || !out_cid)
+		return -1;
+
+	for (i = 0; i < g_active_slices.count; i++) {
+		const struct amba_virt_slice_desc *s = &g_active_slices.slices[i];
+		struct amba_virt_slice_claim claim;
+
+		if (s->offset + s->slice_size > win_bytes ||
+		    s->usable_size + sizeof(claim) > s->slice_size)
+			continue;
+
+		memcpy(&claim, map + s->offset + s->usable_size, sizeof(claim));
+		if (claim.magic == AMBA_VIRT_SLICE_CLAIM_MAGIC && claim.nonce == nonce) {
+			*out_cid = 8800u + s->index;
+			return 0;
+		}
+		memcpy(&claim, map + s->offset + s->slice_size - sizeof(claim), sizeof(claim));
+		if (claim.magic == AMBA_VIRT_SLICE_CLAIM_MAGIC && claim.nonce == nonce) {
+			*out_cid = 8800u + s->index;
+			return 0;
+		}
+	}
+	return -1;
+}
 
 static void process_tcp_msg(struct tcp_client_session *sess,
                             struct amba_virt_xfer *rx,
@@ -1119,8 +1163,39 @@ static void process_tcp_msg(struct tcp_client_session *sess,
 		if (ret >= 0 && a_resp->status == 0) {
 			sess->authenticated = 1;
 			sess->epoch = a_req->epoch;
+			if (sess->client_cid <= 2)
+				sess->client_cid = 8900u + (a_req->lease_id & 0x7fu);
 		}
 		tx->len = sizeof(*out) + sizeof(*a_resp);
+		return;
+	}
+
+	if (in->type == AMBA_VIRT_MSG_SLICE_CLAIM_REQ) {
+		struct amba_virt_slice_claim_req claim_req;
+		uint32_t resolved_cid = sess->client_cid;
+
+		if (rx->len >= sizeof(*in) + sizeof(claim_req)) {
+			memcpy(&claim_req, rx->data + sizeof(*in), sizeof(claim_req));
+			(void)tcp_resolve_slice_cid(claim_req.nonce,
+						    (const unsigned char *)map,
+						    server_active_window_bytes(info),
+						    &resolved_cid);
+		}
+		if (resolved_cid <= 2)
+			resolved_cid = 8800u;
+		sess->client_cid = resolved_cid;
+		rx->client_cid = sess->client_cid;
+
+		process_incoming_msg(rx, tx, fd, map, info);
+
+		if (tx->len >= sizeof(*out) + sizeof(struct amba_virt_slice_claim_resp)) {
+			const struct amba_virt_slice_claim_resp *c_resp =
+				(const struct amba_virt_slice_claim_resp *)(tx->data + sizeof(*out));
+			if (c_resp->status == 0) {
+				sess->authenticated = 1;
+				sess->client_cid = 8800u + c_resp->index;
+			}
+		}
 		return;
 	}
 
@@ -1144,6 +1219,8 @@ static void process_tcp_msg(struct tcp_client_session *sess,
 		tx->len = sizeof(*out) + sizeof(*d_resp);
 		return;
 	}
+
+	rx->client_cid = sess->client_cid;
 
 	if (in->type == AMBA_VIRT_MSG_DMA_REQUEST_REQ) {
 		struct amba_virt_dma_request *d_req;
@@ -1187,7 +1264,7 @@ static void *tcp_client_worker(void *arg)
 			break;
 		memset(&rx, 0, sizeof(rx));
 		rx.len = len;
-		rx.client_cid = 0;
+		rx.client_cid = sess.client_cid;
 		if (recv_exact_tcp(sock, rx.data, len) < 0)
 			break;
 

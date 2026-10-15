@@ -270,7 +270,7 @@ static int amba_uart_rpc_dma_request(struct amba_uart_port *amb_port,
 
 	d_req = (struct amba_virt_dma_request *)(req_buf + sizeof(*msg));
 	d_req->cookie = ++amb_port->dma_cookie;
-	d_req->endpoint_id = AMBA_DMA_ENDPOINT_UART2;
+	d_req->endpoint_id = AMBA_DMA_ENDPOINT_NONE;
 	d_req->operation = operation;
 	d_req->offset = offset;
 	d_req->length = length;

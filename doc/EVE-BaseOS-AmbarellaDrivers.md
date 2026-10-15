@@ -45,7 +45,7 @@ and builds the layer:
 
 ```text
 /etc/init.d/021-amba-virt-server -> /usr/bin/amba-virt-server
-/etc/amba-virt/modules.conf          ambcma.ko (with parameters), cavalry.ko, amba_virt.ko
+/etc/amba-virt/modules.conf          ambcma.ko (with parameters), cavalry.ko, amba_virt.ko, amba_virt_dma.ko, amba_virt_iav_win.ko
 /etc/amba-virt/early-modules.conf    camera modules loaded before camera power
 /etc/amba-virt/late-modules.conf     camera modules loaded after camera power (the last is ambds.ko, the virtual video source)
 /etc/amba-virt/camera.conf           camera pipeline configuration (pipeline on)
@@ -67,8 +67,8 @@ The layer is tagged from a digest of the staged rootfs and reaches the EVE
 
 1. LinuxKit init runs `/etc/init.d/021-amba-virt-server` before the EVE
    system services (pillar, `domainmgr`) start.
-2. The server loads `modules.conf` (`ambcma.ko`, `cavalry.ko`, `amba_virt.ko`, then
-   `amba_virt_iav_win.ko`, which the IAV windows need) in order with `finit_module`, from
+2. The server loads `modules.conf` (`ambcma.ko`, `cavalry.ko`, `amba_virt.ko`,
+   `amba_virt_dma.ko`, then `amba_virt_iav_win.ko`, which the IAV windows need) in order with `finit_module`, from
    `/lib/modules/$(uname -r)/extra/`. A module already loaded with the same
    parameters is accepted; one loaded with different parameters fails the
    boot.
@@ -114,17 +114,18 @@ The ipcam-mini reserved-memory contract is:
 | `/memory` | `0x0000000000`–`0x07ffffffff` | 32 GiB | `device_type = "memory"` | Detected DRAM (`reg = <0x0 0x0 0x8 0x0>`) |
 | `/chosen/sys-dram-size` | `0x00000008 0x00000000` | 32 GiB | `u64` property | Size `ambcma.ko` validates |
 | `/reserved-memory/virtio_reserved@2000000` | `0x0002000000`–`0x00021fffff` | 2 MiB | `no-map;` | VirtIO device configuration window |
+| `/reserved-memory/dma32@17c00000` | `0x17c00000`–`0x1bbfffff` | 64 MiB | `no-map;` | Low-4 GiB DMA32 pool for `amba_virt_dma.ko` (four 16 MiB guest DMA lease windows) |
 | `/reserved-memory/cavalry@2` | `0x1fc00000`–`0x1fffffff` | 4 MiB | `no-map;` | Cavalry VisORC ucode staging buffer |
 | `/reserved-memory/cavalry@1` | none | 0 | `no-map;` | Node and phandle kept; this profile has no shared-pool `reg` |
 | `/reserved-memory/disp@0` | `0x20000000`–`0x27ffffff` | 128 MiB | `no-map;` | Display buffer |
 | `/reserved-memory/iav@1` | `0x28000000`–`0x3fffffff` | 384 MiB | `no-map;` | `IDSP_SHARED` |
 | `/reserved-memory/iav@0` | `0x40000000`–`0xffffffff` | 3072 MiB | `no-map;` | `IDSP_PRIVATE`, contiguous with `iav@1` and ending at 4 GiB |
-| `/reserved-memory/linux,cma` | Linux high, above `0x400000000` | 512 MiB | `reusable;` | Kernel CMA. Linux low is smaller than this pool |
+| `/reserved-memory/linux,cma` | Linux low `0x1bc00000`–`0x1fbfffff` (64 MiB) or high | 64–512 MiB | `reusable;` | Kernel CMA |
 | `/reserved-memory/cavalry@0` | `0x100000000`–`0x3ffffffff` | 12 GiB | `no-map;` | Cavalry private pool. Linux RAM continues from `0x400000000` to the detected DRAM top |
 
-`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it. `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. The device tree is unchanged. After `/dev/iav` exists, and before the sensor path, the server pins one 512 MiB private-bank `ambcma` partition inside `iav@0` and leases it as eight 64 MiB slices. On the 2026-10-12 image that pin returned pid 193 at `0x94000000`. The address is whatever `ambcma` returns on that boot.
+`iav@1` and `iav@0` form one 3456 MiB window, `0x28000000`–`0x100000000`. `disp@0` and `cavalry@2` sit directly below it, and `dma32@17c00000` (`0x17c00000`–`0x1bbfffff`, 64 MiB, DTS label `dma32_reserved`) sits immediately below `linux,cma` (`0x1bc00000`–`0x1fbfffff`). `cavalry@0` starts on the 4 GiB line, so it does not overlap that 32-bit window. After `/dev/iav` exists, and before the sensor path, the server pins one 512 MiB private-bank `ambcma` partition inside `iav@0` and leases it as eight 64 MiB slices. On the 2026-10-12 image that pin returned pid 193 at `0x94000000`. The address is whatever `ambcma` returns on that boot.
 
-In addition, the device tree declares the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specifies `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation.
+In addition, the device tree declares the `sub_scheduler0` platform device for Cavalry, `hwtimer` for IAV hardware timing, `vinbrg0..3` for SerDes bridge I2C buses, and specifies `enable-method = "spin-table"` under `/cpus/cpu@*` for SMP CPU activation. Because GRUB forwards the runtime-patched EFI FDT from U-Boot (`EXT_DTB` in `build/bin/u-boot.bin` on eMMC `boot0`), any change to `eve-kernel/arch/arm64/boot/dts/ambarella/n1_655.dts` also requires rebuilding that DTB, linking `build/bin/u-boot.bin` (`make u-boot`), and writing it to `boot0` at sector `0x100` ([EVE-Installation.md](EVE-Installation.md) §6).
 
 ### 3.2 The 32-Bit DSP Microcode Boundary & Address Alignment
 
@@ -159,9 +160,10 @@ od -An -tx1 /proc/device-tree/reserved-memory/iav@0/reg
 od -An -tx1 /proc/device-tree/reserved-memory/iav@1/reg
 od -An -tx1 /proc/device-tree/reserved-memory/cavalry@0/reg
 od -An -tx1 /proc/device-tree/reserved-memory/cavalry@2/reg
+od -An -tx1 /proc/device-tree/reserved-memory/dma32@17c00000/reg
 test ! -e /proc/device-tree/reserved-memory/cavalry@1/reg && echo cavalry@1-has-no-reg
-test ! -e /proc/device-tree/reserved-memory/dma32_reserved && echo dma32-absent
-grep -E 'Kernel code|1fc00000-3ffffffff' /proc/iomem
+test -d /proc/device-tree/reserved-memory/dma32@17c00000 && echo dma32-present
+grep -E 'Kernel code|17c00000-1bbfffff|1fc00000-3ffffffff' /proc/iomem
 ```
 
 `nproc --all` prints `4`. `/memory` and `sys-dram-size` are 32 GiB on these boards. Kernel code is outside `0x1fc00000`–`0x400000000`. Placement in Linux high is accepted.
@@ -180,7 +182,11 @@ When the server loads `cavalry.ko`:
 5. It creates device nodes `/dev/cavalry` and `/dev/cavalry_profile`.
 
 When the server loads `amba_virt.ko`, it creates `/dev/amba_virt` (the host
-end of the HVM transport) and the `/dev/amba_virt_shm*` backing nodes.
+end of the HVM transport) and the eight `/dev/amba_virt_shm0`..`/dev/amba_virt_shm7` backing nodes (eight 1 GiB Cavalry slices plus eight 64 MiB low pool slices, leased to guests holding tickets `amba_shm0`..`amba_shm7`).
+
+When the server loads `amba_virt_dma.ko`, it slices the 64 MiB `/reserved-memory/dma32@17c00000` (`0x17c00000`–`0x1bbfffff`) pool into four 16 MiB guest DMA lease windows (`0x17c00000`, `0x18c00000`, `0x19c00000`, `0x1ac00000`) and creates `/dev/amba_dma_ctl` and `/dev/amba_dma_lease0`..`/dev/amba_dma_lease3`.
+
+The in-tree EVE Dom0 kernel (`eve-kernel/arch/arm64/configs/eve_defconfig`) builds `CONFIG_VFIO=y`, `CONFIG_VFIO_PLATFORM=y`, `CONFIG_VFIO_VIRQFD=y`, and `CONFIG_VFIO_IOMMU_TYPE1=y` (`CONFIG_VFIO_NOIOMMU` is not enabled; platform devices without a hardware IOMMU group use the in-tree `VFIO_EMULATED_IOMMU` path via `vfio_register_emulated_iommu_dev`). When a guest holding a UART adapter starts, EVE Pillar (`eve/pkg/pillar/hypervisor/kvm.go` and `hypervisor.go`) automatically unbinds `ambarella-uart`, sets `driver_override` to `vfio-platform`, binds `ffe0018000.uart` (`UART2`) or `ffe0019000.uart` (`UART3`) to `vfio-platform`, and allocates a DMA32 lease from `/dev/amba_dma_ctl` with the UART's host-bound `endpoint_id` (`2` or `3`); when the domain stops or fails to start, Pillar clears `driver_override` and rebinds `ambarella-uart`.
 
 Expected kernel output highlights:
 ```text
@@ -189,12 +195,13 @@ cavalry_parse_reserved_mem: CVMEM(1:ucode) RANGE: [0x1fc00000 - 0x1fffffff]
 cavalry_parse_reserved_mem: CVMEM(0:user)  RANGE: [0x100000000 - 0x3ffffffff]
 show_ucode_version: Cavalry Ucode Version = N1_655-Ver.206-...
 visorc_start: Cavalry Ucode is started.
+amba_virt_dma: kernel DMA reference monitor initialized
 ```
 
 On the node, as root:
 ```bash
 grep 'is ready' /run/amba-virt/server-daemon.log
-ls -l /dev/cavalry /dev/amba_virt /dev/amba_virt_shm*
+ls -l /dev/cavalry /dev/amba_virt /dev/amba_virt_shm* /dev/amba_dma_ctl /dev/amba_dma_lease*
 dmesg | grep -E 'cavalry|amba_virt' | tail -n 25
 ```
 

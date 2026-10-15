@@ -206,7 +206,7 @@ amba-virt-image: linuxkit-ca-image $(DRIVER_DEPENDENCY)
 	done
 	set -e; d=$(AMBA_VIRT_ROOTFS)/etc/amba-virt; install -d $$d; \
 	printf '%s\n' '# Loaded by amba-virt-server when it starts, before any guest connects.' \
-		'ambcma.ko ama_enable=1 dsp_buf_size=0x40000000' 'cavalry.ko' 'amba_virt.ko' 'amba_virt_iav_win.ko' > $$d/modules.conf; \
+		'ambcma.ko ama_enable=1 dsp_buf_size=0x40000000' 'cavalry.ko' 'amba_virt.ko' 'amba_virt_dma.ko' 'amba_virt_iav_win.ko' > $$d/modules.conf; \
 	for c in early-modules late-modules camera iav; do install -m 0644 $(AMBA_VIRT_TOOLS)/$$c.conf.example $$d/$$c.conf; done; \
 	rel=$$(/sbin/modinfo -F vermagic $(BUILD_DIR)/modules/amba_virt.ko | cut -d' ' -f1); \
 	m=$(AMBA_VIRT_ROOTFS)/lib/modules/$$rel/extra; install -d $$m; \
@@ -234,7 +234,7 @@ eve-kernel:
 	@mkdir -p $(BUILD_DIR)
 	+$(EVE_MAKE) -C $(EVE_KERNEL_DIR) -f Makefile.eve \
 		BUILD_USER=$(EVE_KERNEL_BUILD_USER) $(EVE_KERNEL_TARGET) && \
-		rm -f $(BUILD_DIR)/.eve-kernel-headers.done $(BUILD_DIR)/.drivers.done && \
+		rm -rf $(BUILD_DIR)/.eve-kernel-headers.done $(BUILD_DIR)/.drivers.done $(BUILD_DIR)/usr/src/linux-headers-* && \
 		$(MAKE) -C $(EVE_KERNEL_DIR) -s --no-print-directory \
 			-f Makefile.eve BUILD_USER=$(EVE_KERNEL_BUILD_USER) \
 			$(EVE_KERNEL_TAG_CMD) > $(BUILD_DIR)/.eve-kernel.done
@@ -479,6 +479,37 @@ $(OOT_DRIVERS): %: $(call my-depend,eve-kernel-headers)
 
 test-gdma: diag
 
+.PHONY: test
+test:
+	@$(MAKE) --no-print-directory -C $(DRIVERS_DIR)/amba_virt/tools \
+		test_virt_host_ops test_virt_daemon test_virt_mem_pool test_admin_ipc \
+		test_virt_query test_virt_driver_matrix test_virt_module_loader \
+		test_drain_protocol test_boundary_stress test_state_desync \
+		test_fuzz_corruption test_security_exploits test_hardware_safety \
+		test_virt_dma_acl test_virt_uart test_virt_dma_broker test_hmac_sha256 \
+		test_host_iav_proxy test_host_cavalry_eve_sync test_host_camera_policy
+	@cd $(DRIVERS_DIR)/amba_virt/tools && \
+		./test_virt_host_ops && \
+		./test_virt_daemon && \
+		./test_virt_mem_pool && \
+		./test_admin_ipc && \
+		./test_virt_query && \
+		./test_virt_driver_matrix && \
+		./test_virt_module_loader && \
+		./test_drain_protocol && \
+		./test_boundary_stress && \
+		./test_state_desync && \
+		./test_fuzz_corruption && \
+		./test_security_exploits && \
+		./test_hardware_safety && \
+		./test_virt_dma_acl && \
+		./test_virt_uart && \
+		./test_virt_dma_broker && \
+		./test_hmac_sha256 && \
+		./test_host_iav_proxy -v && \
+		./test_host_cavalry_eve_sync && \
+		./test_host_camera_policy
+
 guest: guest-all
 
 guest-all:
@@ -576,9 +607,11 @@ host_mkimage:
 
 u-boot:
 	@mkdir -p $(BUILD_DIR)/bin
-	@if [ -z "$(UBOOT_DTB)" ] || [ ! -f "$(UBOOT_DTB)" ]; then \
-		echo "Building device tree blob in eve-kernel..."; \
-		$(MAKE) -C $(EVE_KERNEL_DIR) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dtbs || exit 1; \
+	@if [ ! -f "$(ROOT_DIR)/plan/extracted.dtb" ]; then \
+		echo "Building device tree blob $(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella/n1_655.dtb from n1_655.dts..."; \
+		cpp -nostdinc -I $(EVE_KERNEL_DIR)/include -I $(EVE_KERNEL_DIR)/arch/arm64/boot/dts -I $(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella \
+			-undef -x assembler-with-cpp $(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella/n1_655.dts | \
+			dtc -I dts -O dtb -o $(EVE_KERNEL_DIR)/arch/arm64/boot/dts/ambarella/n1_655.dtb - || exit 1; \
 	fi
 	@echo "Configuring U-Boot with $(UBOOT_DEFCONFIG)..."
 	+$(MAKE) -C $(UBOOT_DIR) ARCH=arm CROSS_COMPILE=aarch64-linux-gnu- $(UBOOT_DEFCONFIG)

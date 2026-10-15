@@ -66,6 +66,8 @@ typedef struct {
 
     /* Lease bootstrap and HMAC session */
     bool                    has_bootstrap;
+    bool                    has_slice_claim;
+    uint64_t                slice_nonce;
     uint32_t                lease_id;
     uint64_t                epoch;
     uint8_t                 hmac_key[32];
@@ -174,6 +176,41 @@ static int frame_recv(int sock, void *data, uint32_t cap, uint32_t *out_len, int
 
 static int authenticate_session(int sock)
 {
+    if (g_resmgr.has_slice_claim && g_resmgr.slice_nonce != 0) {
+        struct {
+            struct amba_virt_msg msg;
+            struct amba_virt_slice_claim_req req;
+        } c_req;
+        struct {
+            struct amba_virt_msg msg;
+            struct amba_virt_slice_claim_resp resp;
+        } c_resp;
+        uint32_t rx_len = 0;
+        int ret;
+
+        memset(&c_req, 0, sizeof(c_req));
+        c_req.msg.type = AMBA_VIRT_MSG_SLICE_CLAIM_REQ;
+        c_req.msg.shm_len = sizeof(c_req.req);
+        c_req.req.nonce = g_resmgr.slice_nonce;
+
+        ret = frame_send(sock, &c_req, sizeof(c_req));
+        if (ret < 0)
+            return ret;
+        memset(&c_resp, 0, sizeof(c_resp));
+        ret = frame_recv(sock, &c_resp, sizeof(c_resp), &rx_len, 5000);
+        if (ret < 0)
+            return ret;
+        if (rx_len < sizeof(c_resp) || c_resp.msg.type != AMBA_VIRT_MSG_SLICE_CLAIM_RESP)
+            return -EPROTO;
+        if (c_resp.resp.status != 0)
+            return c_resp.resp.status;
+
+        g_resmgr.authenticated = true;
+        printf("amba_virt_resmgr: slice claim authenticated idx=%u off=0x%llx usable=%u\n",
+               c_resp.resp.index, (unsigned long long)c_resp.resp.offset, c_resp.resp.usable_size);
+        return 0;
+    }
+
     if (!g_resmgr.has_bootstrap) {
         if (g_resmgr.verbose)
             printf("amba_virt_resmgr: no bootstrap credentials; proceeding unauthenticated\n");
@@ -349,6 +386,24 @@ static void inspect_bootstrap_header(void)
         } else {
             printf("amba_virt_resmgr: bootstrap magic mismatch (got 0x%08x, expected 0x%08x)\n",
                    boot->magic, (unsigned)AMBA_DMA_BOOTSTRAP_MAGIC);
+        }
+    }
+
+    if (!valid && g_resmgr.shm_base != 0 && g_resmgr.shm_size >= 4096) {
+        struct amba_virt_slice_claim claim;
+        const uint8_t *base = (const uint8_t *)g_resmgr.shm_base;
+
+        memcpy(&claim, base + g_resmgr.shm_size - sizeof(claim), sizeof(claim));
+        if (claim.magic != AMBA_VIRT_SLICE_CLAIM_MAGIC) {
+            memcpy(&claim, base + g_resmgr.shm_size - 4096, sizeof(claim));
+        }
+        if (claim.magic == AMBA_VIRT_SLICE_CLAIM_MAGIC && claim.nonce != 0) {
+            g_resmgr.has_slice_claim = true;
+            g_resmgr.slice_nonce = claim.nonce;
+            g_resmgr.has_bootstrap = false;
+            printf("amba_virt_resmgr: found slice claim trailer idx=%u usable=%u\n",
+                   claim.index, claim.usable_size);
+            return;
         }
     }
 

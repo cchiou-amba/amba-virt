@@ -95,8 +95,8 @@ windows unbound for it).
   `WAIT_NEXT_IDSP_FRAME`. Nothing that changes pipeline state.
 - **The primary guest (128, the 15 above and 113 more):** the guest the kernel
   has bound to the slice named by `primary-slice` in `/etc/amba-virt/iav.conf`
-  (the image ships `primary-slice 0`. The `amba_shm` ticket is reserved at
-  Cavalry index 0).
+  (the image ships `primary-slice 0`. The `amba_shm0` ticket is reserved at
+  Cavalry index 0; `amba_shm0`..`amba_shm3` carry `camera=on` and `amba_shm4`..`amba_shm7` have camera off).
   It may configure and run the pipeline: enter idle and preview, start and stop
   encode, system, stream, pyramid, VCAP, MJPEG, H.264 and H.265 configuration,
   frame-sync and DPTZ controls, VIN and VOUT controls, and decode: enter and leave decode mode, create and destroy a

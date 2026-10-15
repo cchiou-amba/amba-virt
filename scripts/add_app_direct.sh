@@ -106,7 +106,7 @@ def window_markers():
     VM: all it does is make the hypervisor emit an ivshmem device. Same rule
     kvm.go uses to recognise a window, so the two cannot drift.
     """
-    names = set()
+    names = {"amba_shm"}
     models = os.environ.get("ADD_APP_DIRECT_MODELS", "")
     if not models or not os.path.isdir(models):
         return names

@@ -71,13 +71,15 @@ reference design assigns none of the Ambarella chardevs this way.
   to an app even if `assigngrp` is set.
 - `cavalry`, `gpio0`, `iav`, and `amba_virt` are not model adapters.
   HVMs reach Cavalry and the camera through `amba-virt-server`.
-- Assign an admission ticket (`amba_shm`, `amba_shm1` to `amba_shm7`) only to HVMs. A ticket is
+- Assign an admission ticket (`amba_shm0` to `amba_shm7`) only to HVMs. A ticket is
   `cbattr shmassign=server` with no `shmpath`: it names no device. ZEDEDA lets one instance hold a given
   `assigngrp`, so every guest on a board needs a ticket of its own; the tickets are an exclusivity label
   for that rule and not eight memory pools. `amba-virt-server` leases the guest its Cavalry slice, its
   private IAV slice and, by the camera policy below, the shared camera windows. Only the ticket named
-  `amba_shm` is pinned to Cavalry slice 0; every other ticket takes the lowest free slice from 1. The
-  digit in `amba_shm1` to `amba_shm7` does not select Cavalry slice N. A bundle that only sets `shmpath`
+  `amba_shm0` is pinned to Cavalry slice 0; every other ticket takes the lowest free slice from 1. The
+  digit in `amba_shm1` to `amba_shm7` does not select Cavalry slice N (when the six instances are created in the
+  pinned `0..5` order on a clean board, `amba_shm<N>` maps to `/dev/amba_virt_shm<N>`; see
+  [EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md)). A bundle that only sets `shmpath`
   keeps that path and is not a dynamic grant.
 
 ## Shared `ioMemberList`
@@ -90,8 +92,8 @@ Both models have the same adapters (`zcli model show … --detail`):
 | eth0 | eth0 | `IO_TYPE_ETH` | eth0 | `Ifname=eth0` | **management** |
 | UART0 | UART0 | `IO_TYPE_OTHER` | *(empty)* | `cbattr uart=0` | **management** |
 | UART1 | UART1 | `IO_TYPE_OTHER` | uart1 | `cbattr uart=1` | unspecified |
-| UART2 | UART2 | `IO_TYPE_OTHER` | uart2 | `cbattr uart=2` | unspecified |
-| UART3 | UART3 | `IO_TYPE_OTHER` | uart3 | `cbattr uart=3` | unspecified |
+| UART2 | UART2 | `IO_TYPE_OTHER` | uart2 | `cbattr uart=2` (`0xffe0018000`, GIC SPI 115 / guest vIRQ 50, `vfio-platform`) | unspecified |
+| UART3 | UART3 | `IO_TYPE_OTHER` | uart3 | `cbattr uart=3` (`0xffe0019000`, GIC SPI 116 / guest vIRQ 50, `vfio-platform`) | unspecified |
 | UART4 | UART4 | `IO_TYPE_OTHER` | uart4 | `cbattr uart=4` | unspecified |
 | hwrng | hwrng | `IO_TYPE_OTHER` | hwrng | `Ifname=/dev/hwrng` | unspecified |
 | rng-mmio | rng-mmio | `IO_TYPE_OTHER` | rng-mmio | `cbattr rng=mmio` | unspecified |
@@ -105,20 +107,20 @@ backed by the leases). The digit is a label only.
 <!-- tickets:begin -->
 | ticket | ztype | assigngrp | cbattr | camera intent |
 |---|---|---|---|---|
-| `amba_shm` | `IO_TYPE_OTHER` | `amba_shm` | `shmassign=server`, `shmsize=1G`, `camera=on` | on; pinned to Cavalry slice 0 |
+| `amba_shm0` | `IO_TYPE_OTHER` | `amba_shm0` | `shmassign=server`, `shmsize=1G`, `camera=on` | on; pinned to Cavalry slice 0 |
 | `amba_shm1` | `IO_TYPE_OTHER` | `amba_shm1` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
-| `amba_shm2` | `IO_TYPE_OTHER` | `amba_shm2` | `shmassign=server`, `shmsize=1G` | off (no `camera` key) |
-| `amba_shm3` | `IO_TYPE_OTHER` | `amba_shm3` | `shmassign=server`, `shmsize=1G` | off |
-| `amba_shm4` | `IO_TYPE_OTHER` | `amba_shm4` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
-| `amba_shm5` | `IO_TYPE_OTHER` | `amba_shm5` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
+| `amba_shm2` | `IO_TYPE_OTHER` | `amba_shm2` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
+| `amba_shm3` | `IO_TYPE_OTHER` | `amba_shm3` | `shmassign=server`, `shmsize=1G`, `camera=on` | on |
+| `amba_shm4` | `IO_TYPE_OTHER` | `amba_shm4` | `shmassign=server`, `shmsize=1G` | off (no `camera` key) |
+| `amba_shm5` | `IO_TYPE_OTHER` | `amba_shm5` | `shmassign=server`, `shmsize=1G` | off |
 | `amba_shm6` | `IO_TYPE_OTHER` | `amba_shm6` | `shmassign=server`, `shmsize=1G` | off |
 | `amba_shm7` | `IO_TYPE_OTHER` | `amba_shm7` | `shmassign=server`, `shmsize=1G` | off |
 <!-- tickets:end -->
 
 Each ticket is an exclusivity label for ZEDEDA's one-instance-per-group rule and does not select Cavalry slice N.
-`amba_shm` is the one exception that has a meaning of its own: it is pinned to slice 0, and the guest that
+`amba_shm0` is the one exception that has a meaning of its own: it is pinned to slice 0, and the guest that
 holds slice 0 is the primary IAV client under the image's `/etc/amba-virt/iav.conf` (`primary-slice 0`).
-Every other ticket gets the lowest free slice from 1 and is a consumer
+Every other ticket (`amba_shm1`..`amba_shm7`) gets the lowest free slice from 1 and is a consumer
 (see [AmbaVirtServer.md](AmbaVirtServer.md) section 13.4). `shmsize` is the slice size the server grants.
 
 ### Camera windows and the camera policy
@@ -171,40 +173,39 @@ the padding behind it (the N1-655 has no SMMU); that is accepted for every guest
 These adapters no longer exist in the models; remove any instance that still holds one before pushing a
 model, because the controller cannot keep an assignment to an adapter that is gone:
 
+- `amba_shm` (unnumbered slice-0 ticket): replaced by `amba_shm0`.
 - `amba_iav_dsp`, `amba_iav_bsb`, `amba_iav_dec`, `amba_iav_ovl` and the same four with a `1` suffix
   (path-bearing window adapters, in two sets): replaced by the camera policy above.
 - `amba_iav_slice` (the private IAV slice marker): the private slice is leased with every ticket.
 - The host nodes `/dev/amba_virt_iav_{dsp,bsb,dec,ovl}1`: the window module has one set of nodes.
 <!-- retired-adapters:end -->
 
-Pulled from the controller on 2026-10-10 after `cavalry`, `cavalry_profile`, `gpio0`, `iav`, and `amba_virt`
-were removed. Deploy recipe: [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
+Deploy recipe: [EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md) and [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md).
 
-### Planned UART Adapter Bundles
+### UART Adapter Bundles (`UART0`–`UART4`)
 
-UART1/UART2 will use `IO_TYPE_OTHER` bundles with:
+`UART0`–`UART4` are published in the models as `IO_TYPE_OTHER` bundles with:
 
 - empty `PciLong`, `Ifname`, `Serial`, and `UsbAddr`;
-- an exclusive `assigngrp`;
-- UART-specific `cbattr`.
+- an exclusive `assigngrp` (`uart1`..`uart4`; `UART0` has an empty `assigngrp` and management usage);
+- `cbattr` `{"uart": "<N>"}`.
 
-This reuses the delivered ivshmem recognition shape and fails safe if a
-`Serial` value appears. `IO_TYPE_OTHER` does not mean “UART,” and the bundle is
-not inert: its `cbattr` designates real silicon.
+This reuses the ivshmem recognition shape and fails safe if a `Serial` value appears. `IO_TYPE_OTHER` does not
+mean "UART," and the bundle is not inert: its `cbattr` designates real silicon (`0xffe0018000` for `UART2`,
+`0xffe0019000` for `UART3`). When an instance holds `UART2` (`ubuntu_24_04.<node>`) or `UART3`
+(`alpine_3_20.<node>`), Pillar (`kvm.go` / `hypervisor.go`) automatically binds the platform device to
+`vfio-platform`, allocates a 16 MiB DMA32 lease from `/dev/amba_dma_ctl` with `endpoint_id` set to the UART
+number (`2` or `3`), and emits the `vfio-platform` device plus the ACPI `AMBA0001` DSDT node (guest vIRQ 50 /
+GSI 144). On domain stop or failed start, Pillar restores `ambarella-uart`.
 
-The UART parser and `amba_shm` bulk-window parser must be mutually exclusive on
-their `cbattr` keys. `IoOther` and `IoNVME` both have numeric value 255, so type
-alone cannot identify the bundle.
-
-The controller already publishes UART0–UART4. Each has empty `phyaddrs` and
-`cbattr` `uart` set to that index. UART0 has an empty `assigngrp` and
-management usage. There are no `COM1`/`COM2`/`COM3` entries.
+The UART parser and `amba_shm0..7` bulk-window parser are mutually exclusive on their `cbattr` keys.
+There are no `COM1`/`COM2`/`COM3` entries in the hardware models.
 
 ### Hardware RNG & VirtIO RNG Virtualization
 
 - **`hwrng` Dom0 Retention**: `/dev/hwrng` is created by `ambarella-rng.c` on Dom0. It is published in the model but must remain **unassigned** to any app instance. Dom0 retains exclusive ownership of physical TRNG registers (`0xe002f000`), constantly seeding the Dom0 kernel CSPRNG (`/dev/urandom`).
-- **Stock VirtIO RNG for HVMs**: All ARM64 `virt` HVM guests (Ubuntu, Alpine, Windows) automatically receive a stock `virtio-rng-pci` device backed by Dom0's `/dev/urandom` (with rate limit `max-bytes = "4096"`, `period = "1000"`). Like `vhost-vsock-pci`, this is a standard platform device and requires no custom model adapter assignments.
-- **QNX `rng-mmio` Adapter**: QNX guest VMs require MMIO transport (`virtio-rng-device` on `virtio-mmio-bus.0`) rather than PCI. To select MMIO, QNX instances are assigned the `rng-mmio` adapter (`IO_TYPE_OTHER`, empty `phyaddrs`, `cbattr: {"rng": "mmio"}`), which pairs with native QNX `random -l devr-virtio.so:mem=<address>`.
+- **Stock VirtIO RNG for HVMs**: All ARM64 `virt` HVM guests (Ubuntu, Alpine, Debian, Fedora, Windows) automatically receive a stock `virtio-rng-pci` device backed by Dom0's `/dev/urandom` (with rate limit `max-bytes = "4096"`, `period = "1000"`). Like `vhost-vsock-pci`, this is a standard platform device and requires no custom model adapter assignments.
+- **QNX `rng-mmio` Adapter**: QNX guest VMs require MMIO transport (`virtio-rng-device` on `virtio-mmio-bus.0`) rather than PCI. To select MMIO, QNX instances (`qnx_8_0.<node>`, `amba_shm4`) are assigned the `rng-mmio` adapter (`IO_TYPE_OTHER`, empty `phyaddrs`, `cbattr: {"rng": "mmio"}`), which pairs with native QNX `random -l devr-virtio.so:mem=<address>`.
 - **Exclusions**: OCI containers and x86 domains do not receive VirtIO RNG devices.
 
 `/dev/ucode` was not added (not confirmed on the host). Assigning a missing
@@ -214,14 +215,13 @@ The Dom0-owned nodes exist on the host once the server is ready (`/dev/iav`
 only while the camera pipeline is configured):
 
 ```bash
-ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav /dev/amba_virt
+ls -l /dev/cavalry /dev/cavalry_profile /dev/gpiochip0 /dev/iav /dev/amba_virt /dev/amba_dma_ctl
 ```
 
 ## Assign adapters to edge apps
 
-The model only **publishes** adapters. The reference design assigns one
-Ambarella adapter, `amba_shm`, to each HVM at instance create. Worked deploy:
-[EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Do not edit an existing
+The model only **publishes** adapters. Each HVM manifest (`apps/*.json`) names its memory slot `amba_shm`, bound at instance create to one of the model's tickets (`--adapter=amba_shm:amba_shm<N>`). Full per-app recipe:
+[EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md) and [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md). Do not edit an existing
 bundle in place; that is
 [EVE-ReconfigureEdgeApps.md](EVE-ReconfigureEdgeApps.md).
 
@@ -229,9 +229,9 @@ Wrappers: [ZedControl-scripts.md](ZedControl-scripts.md). `$ZCLI_TOKEN` must
 already be in the environment.
 
 ```text
-+--------------------+  amba_shm   +--------------------------------+  window marker  +----------------------+
-| Model ioMemberList |------------>| HVM instance create --adapter  |---------------->| ivshmem-plain (BAR2) |
-+--------------------+             +--------------------------------+                 +----------------------+
++--------------------+  amba_shm0..7  +--------------------------------+  window marker  +----------------------+
+| Model ioMemberList |--------------->| HVM instance create --adapter  |---------------->| ivshmem-plain (BAR2) |
++--------------------+                +--------------------------------+                 +----------------------+
 ```
 
 Confirm an HVM holds a window marker and not a host chardev:
@@ -247,7 +247,9 @@ Confirm an HVM holds a window marker and not a host chardev:
 |---|---|---|
 | eth0 | `mac0` (`ethernet0`) | Management; leave with EVE. |
 | USB | `usb_cdnsp` | Assignable as group `USB`. |
-| COM1 `/dev/ttyS0` | `uart0` (`serial0`, stdout) | Console. Do not assign away from EVE. |
+| UART0 `/dev/ttyS0` | `uart0` (`serial0`, stdout) | Dom0 console (`console0`). Do not assign away from EVE. |
+| UART2 | `ffe0018000.uart` (`uart2`) | Assigned to `ubuntu_24_04.<node>` (`console1`, `vfio-platform`). |
+| UART3 | `ffe0019000.uart` (`uart3`) | Assigned to `alpine_3_20.<node>` (`console2`, `vfio-platform`). |
 | cavalry, cavalry_profile | `sub_scheduler0` | Dom0 server only; never assigned. |
 | gpio0 | `gpio@0` (123 lines) | Dom0 server only (camera power lines); never assigned. |
 | iav | `compatible = "ambarella,iav"` | VIN/DSP through this chardev; Dom0 server only. |
@@ -257,7 +259,6 @@ Confirm an HVM holds a window marker and not a host chardev:
 | Expected | Why it matters | Suggested ztype if added later |
 |---|---|---|
 | `mac1` / eth1 | Second RGMII (not enabled in `n1_655.dts`) | `IO_TYPE_ETH` |
-| uart1–uart4 | HVM UART MMIO/vGIC adapter; planned, not delivered | `IO_TYPE_OTHER` with empty `phyaddrs` and UART `cbattr` |
 | `can0`–`can2` | dtsi CAN | `IO_TYPE_CAN` |
 | `/dev/ucode` | IAV companion if present on host | `IO_TYPE_OTHER` (`assigngrp` `iav`) |
 | PowerVR GPU | `ambarella,pvr-gpu` | `IO_TYPE_HDMI` + CDI, if used |
@@ -266,10 +267,11 @@ Confirm an HVM holds a window marker and not a host chardev:
 
 - **virtio-vsock** is stock on every HVM (`vhost-vsock-pci`). Not an adapter.
 
-**ivshmem is in the model** as `amba_shm` (empty `phyaddrs`, `cbattr.shmsize`).
+**ivshmem is in the model** as `amba_shm0`..`amba_shm7` (empty `phyaddrs`, `cbattr.shmsize`).
 The QEMU device is still emulated; the adapter only requests the window.
 The Dom0 server reaches that DRAM through `/dev/amba_virt`, not by opening
 the backing file.
 
 See [drivers/amba_virt/README.md](../drivers/amba_virt/README.md), [AmbaVirtServer.md](AmbaVirtServer.md),
 [EVE-Native-ivshmem-Support.md](EVE-Native-ivshmem-Support.md).
+

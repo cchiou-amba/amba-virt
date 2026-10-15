@@ -28,7 +28,7 @@ SSH_ALIAS="${AMBA_SSH_ALIAS:-n1-655-devkit-fedora}"
 # Accelerator memory: one admission ticket. amba-virt-server grants the Cavalry slice and the private IAV slice, and
 # attaches the shared camera windows when the ticket's camera policy says so (doc/EVE-Ambarella-Models.md). The digit of
 # the ticket is a label for the controller's one-instance-per-group rule, not a slice index.
-ADAPTERS=(amba_shm:amba_shm5)
+ADAPTERS=(amba_shm:amba_shm3)
 SSH_HOST_PORT=2622
 DEMO_PORT=8083
 VOLUME_MAXSIZE_KB=8388608   # 8 GiB = the image's virtual size; EVE admits volumes by reserved size and refused 10 GiB on the pro board

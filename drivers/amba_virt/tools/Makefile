@@ -166,8 +166,25 @@ test_virt_dma_acl: test_virt_dma_acl.c
 test_virt_uart: test_virt_uart.c
 	gcc $(TEST_CFLAGS) -I../../../ -o $@ $^
 
-test_virt_dma_broker: test_virt_dma_broker.c virt_dma_broker.c virt_acl.c hmac_sha256.c
-	gcc $(TEST_CFLAGS) -o $@ $^ -lpthread
+DMA_EP_SRC ?= ../amba_virt_dma.c
+DMA_EP_OUT := ../../../build/dma-ep
+
+test_virt_dma_broker: test_virt_dma_broker.c virt_dma_broker.c virt_acl.c hmac_sha256.c $(DMA_EP_SRC)
+	gcc $(TEST_CFLAGS) -DBUILD_HOST_UNIT_TEST -fsanitize=address,undefined -o $@ $^ -lpthread
+
+MUT_first_come_ownership_EXPR := s/if \(lease->bound_endpoint_id == AMBA_DMA_ENDPOINT_NONE\)/if (0)/
+MUT_guest_chosen_endpoint_EXPR := s/if \(req->endpoint_id != AMBA_DMA_ENDPOINT_NONE &&\n\t    req->endpoint_id != lease->bound_endpoint_id\)/if (0)/
+
+test_dma_ep_negctl:
+	test -n "$(MUTANT)"
+	test -n "$(MUT_$(MUTANT)_EXPR)"
+	rm -rf $(DMA_EP_OUT)/mut-$(MUTANT)
+	mkdir -p $(DMA_EP_OUT)/mut-$(MUTANT)
+	cp ../amba_virt_dma.c $(DMA_EP_OUT)/mut-$(MUTANT)/amba_virt_dma.c
+	perl -0pi -e '$(MUT_$(MUTANT)_EXPR)' $(DMA_EP_OUT)/mut-$(MUTANT)/amba_virt_dma.c
+	@if cmp -s ../amba_virt_dma.c $(DMA_EP_OUT)/mut-$(MUTANT)/amba_virt_dma.c; then echo "MUTATION DID NOT APPLY: $(MUTANT)"; exit 99; fi
+	gcc $(TEST_CFLAGS) -DBUILD_HOST_UNIT_TEST -fsanitize=address,undefined -o $(DMA_EP_OUT)/mut-$(MUTANT)/test_virt_dma_broker test_virt_dma_broker.c virt_dma_broker.c virt_acl.c hmac_sha256.c $(DMA_EP_OUT)/mut-$(MUTANT)/amba_virt_dma.c -lpthread
+	timeout 60 $(DMA_EP_OUT)/mut-$(MUTANT)/test_virt_dma_broker
 
 test_hmac_sha256: test_hmac_sha256.c hmac_sha256.c
 	gcc $(TEST_CFLAGS) -o $@ $^
@@ -203,6 +220,19 @@ test_host_cavalry_eve_sync: test/test_main.cxx test/TestHostCavalryEveSync.cxx t
 test_host_cavalry_eve_sync_run:
 	$(MAKE) -B test_host_cavalry_eve_sync
 	./test_host_cavalry_eve_sync
+
+SLICES_OUT := ../../../build/slices-negctl
+SLICES_MUT_truncate_32bit_offset_DEFINE := -DCAVALRY_PROXY_MUTANT_TRUNCATE_32BIT_OFFSET
+SLICES_MUT_saturate_32bit_window_DEFINE := -DCAVALRY_PROXY_MUTANT_SATURATE_32BIT_WINDOW
+
+test_slices_negctl: virt_mem_pool.host.o amba_virt_slice.host.o virt_slice_lease.host.o virt_camera_policy.host.o
+	test -n "$(MUTANT)"
+	test -n "$(SLICES_MUT_$(MUTANT)_DEFINE)"
+	rm -rf $(SLICES_OUT)/mut-$(MUTANT)
+	mkdir -p $(SLICES_OUT)/mut-$(MUTANT)
+	gcc $(TEST_CFLAGS) -I. -I.. $(SLICES_MUT_$(MUTANT)_DEFINE) -fsanitize=address,undefined -c -o $(SLICES_OUT)/mut-$(MUTANT)/cavalry_proxy.host.o cavalry_proxy.c
+	g++ $(CPPUTEST_CFLAGS) -o $(SLICES_OUT)/mut-$(MUTANT)/test_host_cavalry_eve_sync test/test_main.cxx test/TestHostCavalryEveSync.cxx test/TestHostSliceLease.cxx $(SLICES_OUT)/mut-$(MUTANT)/cavalry_proxy.host.o virt_mem_pool.host.o amba_virt_slice.host.o virt_slice_lease.host.o virt_camera_policy.host.o $(CPPUTEST_LDFLAGS)
+	timeout 60 $(SLICES_OUT)/mut-$(MUTANT)/test_host_cavalry_eve_sync
 
 test_iav_slice_rpc: test_iav_slice_rpc.c iav_slice_rpc.c iav_slice_client.c $(NANOPB_DIR)/pb_common.c $(NANOPB_DIR)/pb_encode.c $(NANOPB_DIR)/pb_decode.c $(PROTO_DIR)/amba_virt.pb.c
 	gcc -O1 -g -Wall -Wextra -Werror -I../include/uapi -I. $(NANOPB_CFLAGS) -o $@ $^

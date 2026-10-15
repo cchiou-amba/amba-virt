@@ -12,6 +12,7 @@ deploy. Example node:
 `defaultLocal-<node>` swapped.
 
 `$ZCLI_TOKEN` must already be in the environment. Wrappers never export it.
+All-instances recipe and pinned `0..5` mapping: [EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md).
 Catalog: [ZedControl-scripts.md](ZedControl-scripts.md). Models:
 [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md). Architecture:
 [Architecture.md](Architecture.md).
@@ -37,11 +38,11 @@ Network: `eth0:defaultLocal-n1-655-devkit`.
 
 | App | Adapters at instance create |
 |---|---|
-| HVM | `amba_shm:amba_shm` |
+| HVM | `amba_shm:amba_shm0` (`+ UART2:UART2` for `console1`) |
 
 Do not attach VisORC to any app. `cavalry`, `iav`, `gpio0`, and `amba_virt`
-belong to `amba-virt-server` in Dom0 and are never assigned. `amba_shm` is an
-`IO_TYPE_OTHER` window marker (empty `phyaddrs`); assigning it is what makes
+belong to `amba-virt-server` in Dom0 and are never assigned. `amba_shm0`..`amba_shm7` are
+`IO_TYPE_OTHER` admission tickets (empty `phyaddrs`, `camera=on` on `0..3` and off on `4..7`); assigning one to the app's `amba_shm` slot is what makes
 `kvm.go` emit `ivshmem-plain`.
 
 Production UART hardware passthrough assigns the physical controller via an
@@ -138,12 +139,12 @@ hardware the server needs, but delete it:
 ./scripts/zcli -- edge-app-instance delete ubuntu_24_04_container.n1-655-devkit -f
 ```
 
-Confirm the model publishes `amba_shm` and that its `cbattr.shmsize` is
+Confirm the model publishes `amba_shm0` and that its `cbattr.shmsize` is
 **1G**:
 
 ```bash
 ./scripts/zcli -- --format=json model show N1-655-Cooper-Devkit --detail \
-  | jq -r '.ioMemberList[] | select(.logicallabel=="amba_shm") | .cbattr'
+  | jq -r '.ioMemberList[] | select(.logicallabel=="amba_shm0") | .cbattr'
 ```
 
 If it still says `16M`, edit [models/N1-655-Cooper-Devkit.json](../models/N1-655-Cooper-Devkit.json)
@@ -401,13 +402,13 @@ Dry-run must show that flag. Override with
   --edge-app=ubuntu_24_04 \
   --edge-node=n1-655-devkit \
   --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=amba_shm:amba_shm \
+  --adapter=amba_shm:amba_shm0 \
   --dry-run
 ./scripts/create_instance.sh ubuntu_24_04.n1-655-devkit \
   --edge-app=ubuntu_24_04 \
   --edge-node=n1-655-devkit \
   --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=amba_shm:amba_shm
+  --adapter=amba_shm:amba_shm0
 ```
 
 Wait until `Online`:
@@ -585,7 +586,7 @@ instead, then verify CIDATA **before** any power cycle.
   --edge-app=ubuntu_24_04 \
   --edge-node=n1-655-devkit \
   --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=amba_shm:amba_shm
+  --adapter=amba_shm:amba_shm0
 ```
 
 Wait until

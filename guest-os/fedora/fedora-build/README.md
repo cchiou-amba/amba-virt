@@ -37,8 +37,10 @@ After the instance is up, deploy the guest drivers and the demo service:
 | Item | Value |
 |---|---|
 | Edge-app | `fedora_44` |
-| Instance | `fedora_44.n1-655-devkit` |
+| Instance | `fedora_44.n1-655-devkit`, `fedora_44.n1-655-pro` |
 | Image in ZedControl | `fedora-44-aarch64-hvm` |
-| Accelerator memory | the admission ticket `amba_shm:amba_shm5`; the server grants the slices and attaches the camera windows by the ticket's camera policy |
-| SSH | `ssh fedora@<node> -p 2622` (alias `n1-655-devkit-fedora`), password `fedora` |
+| Accelerator memory | the admission ticket `amba_shm:amba_shm3` (`/dev/amba_virt_shm3`, slice `3`, `camera=1`); the server grants the slices and attaches the camera windows by the ticket's camera policy |
+| SSH | `ssh fedora@<node> -p 2622` (alias `n1-655-devkit-fedora` / `n1-655-pro-fedora`), password `fedora` |
 | Demo | port 8083 |
+
+Full from-zero provisioning recipe for all six guests: [doc/EVE-EdgeApp-Instances.md](../../../doc/EVE-EdgeApp-Instances.md).

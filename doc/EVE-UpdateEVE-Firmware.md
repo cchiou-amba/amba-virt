@@ -274,7 +274,48 @@ EVE_VER=$(cat eve/dist/arm64/current/installer/eve_version)
    ./scripts/show_instances.sh --edge-node=n1-655-devkit
    ```
 
-## 6. Troubleshooting & Recovery from Upgrade Deadlocks
+---
+
+## 9. Reverting to the Previous EVE Image (Rollback)
+
+To revert an edge node from a new BaseOS image back to the previous known-good image:
+
+### Recorded Pre-VFIO Rollback Target (`n1-655-devkit` & `n1-655-pro`)
+- **Image Name**: `0.0.0-ambarella-eve-ffb9f9ba-k-arm64-v6.1.112-generic-b00cd5423ca9-custom-gcc-kvm-arm64`
+- **Datastore Relative Path**: `eve-images/0.0.0-ambarella-eve-ffb9f9ba-k-arm64-v6.1.112-generic-b00cd5423ca9-custom-gcc-kvm-arm64/rootfs.img`
+- **SHA-256**: `483fcdd4f84f8d4340e720d8f0b174ea856ccb7bdf3fd3f5ab6761efd3b1ae0b`
+- **Size**: `387268608` bytes
+
+### Step 1: Verify the Rollback Image Exists in the Datastore and ZedControl
+```bash
+ROLLBACK_IMG="0.0.0-ambarella-eve-ffb9f9ba-k-arm64-v6.1.112-generic-b00cd5423ca9-custom-gcc-kvm-arm64"
+
+./scripts/zcli -- image show "$ROLLBACK_IMG"
+ls -lh ~/public_html/eve-images/"$ROLLBACK_IMG"/rootfs.img
+```
+
+### Step 2: Revert via ZedControl (When the Node Is Reachable)
+```bash
+ROLLBACK_IMG="0.0.0-ambarella-eve-ffb9f9ba-k-arm64-v6.1.112-generic-b00cd5423ca9-custom-gcc-kvm-arm64"
+
+# 1. Stage the rollback image as the node's candidate BaseOS:
+./scripts/zcli -- edge-node eveimage-update n1-655-devkit --image="$ROLLBACK_IMG"
+
+# 2. Activate the rollback image (writes standby slot or switches partition and reboots):
+./scripts/zcli -- edge-node eveimage-update n1-655-devkit --image="$ROLLBACK_IMG" --activate
+```
+
+### Step 3: Local Partition Switch on the Node (If Needed Before Probation Expires)
+If the previous image still resides in the standby rootfs slot (`IMGA` or `IMGB`) on the node:
+```bash
+# Inspect active vs standby partitions and their installed version strings:
+ssh n1-655-devkit "eve exec pillar /usr/bin/zboot partstate IMGA -d; eve exec pillar /usr/bin/zboot partstate IMGB -d"
+```
+After aligning ZedControl to `$ROLLBACK_IMG` in Step 2, rebooting the node switches back to the rollback partition and restores all edge-app instances ([EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md#5-reverting-an-eve-baseos-image-update-rollback-target)).
+
+---
+
+## 10. Troubleshooting & Recovery from Upgrade Deadlocks
 
 ### Deadlock Symptom: Node Stuck in `Baseos_updating` and Apps in `Suspect`
 

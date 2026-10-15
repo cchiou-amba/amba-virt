@@ -5,6 +5,7 @@
  */
 
 /* SPDX-License-Identifier: GPL-2.0 */
+#ifndef BUILD_HOST_UNIT_TEST
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -20,15 +21,96 @@
 #include <linux/ktime.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
+#endif
 
 #include "amba_virt_dma.h"
 
 #define DRV_NAME "amba_virt_dma"
 
+#ifdef BUILD_HOST_UNIT_TEST
+static uint8_t host_mock_slice_buf[AMBA_DMA_BOOTSTRAP_SIZE];
+static u32 host_mock_rng_counter = 1;
+static u32 host_mock_last_dreq;
+static u32 host_mock_config_cnt;
+static struct dma_async_tx_descriptor host_mock_tx_desc;
+static struct dma_chan host_mock_u2_tx = { .name = "dma1chan13", .dreq = 13 };
+static struct dma_chan host_mock_u2_rx = { .name = "dma1chan14", .dreq = 14 };
+static struct dma_chan host_mock_u3_tx = { .name = "dma1chan15", .dreq = 15 };
+static struct dma_chan host_mock_u3_rx = { .name = "dma1chan16", .dreq = 16 };
+
+static inline void __iomem *ioremap_wc(phys_addr_t offset, size_t size)
+{
+	(void)offset;
+	(void)size;
+	return host_mock_slice_buf;
+}
+static inline void iounmap(volatile void __iomem *addr) { (void)addr; }
+static inline void memset_io(volatile void __iomem *addr, int val, size_t count)
+{
+	if (count > sizeof(host_mock_slice_buf))
+		count = sizeof(host_mock_slice_buf);
+	memset((void *)addr, val, count);
+}
+static inline void memcpy_toio(volatile void __iomem *dst, const void *src, size_t count)
+{
+	if (count > sizeof(host_mock_slice_buf))
+		count = sizeof(host_mock_slice_buf);
+	memcpy((void *)dst, src, count);
+}
+static inline void wmb(void) { }
+static inline void get_random_bytes(void *buf, size_t len)
+{
+	u8 *p = (u8 *)buf;
+	for (size_t i = 0; i < len; i++)
+		p[i] = (u8)((host_mock_rng_counter++ * 37u) + i + 1u);
+}
+static inline const char *dma_chan_name(struct dma_chan *chan)
+{
+	return chan ? chan->name : "null";
+}
+static inline int dmaengine_slave_config(struct dma_chan *chan, struct dma_slave_config *cfg)
+{
+	(void)cfg;
+	if (!chan)
+		return -ENODEV;
+	host_mock_last_dreq = chan->dreq;
+	host_mock_config_cnt++;
+	return 0;
+}
+static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_single(
+	struct dma_chan *chan, dma_addr_t buf, size_t len,
+	enum dma_transfer_direction dir, unsigned long flags)
+{
+	(void)chan;
+	(void)buf;
+	(void)len;
+	(void)dir;
+	(void)flags;
+	memset(&host_mock_tx_desc, 0, sizeof(host_mock_tx_desc));
+	return &host_mock_tx_desc;
+}
+static inline int dmaengine_submit(struct dma_async_tx_descriptor *desc)
+{
+	(void)desc;
+	return 0;
+}
+static inline void dma_async_issue_pending(struct dma_chan *chan)
+{
+	(void)chan;
+	if (host_mock_tx_desc.callback)
+		host_mock_tx_desc.callback(host_mock_tx_desc.callback_param);
+}
+static inline int dmaengine_terminate_sync(struct dma_chan *chan)
+{
+	(void)chan;
+	return 0;
+}
+#else
 static dev_t dma_devt_base;
 static struct class *dma_class;
 static struct cdev ctl_cdev;
 static struct device *ctl_device;
+#endif
 
 static struct amba_dma_lease leases[AMBA_VIRT_DMA32_NUM_SLICES];
 static struct mutex global_lock;
@@ -157,6 +239,11 @@ int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 	if (!alloc)
 		return -EINVAL;
 
+	if (alloc->endpoint_id != AMBA_DMA_ENDPOINT_NONE &&
+	    alloc->endpoint_id != AMBA_DMA_ENDPOINT_UART2 &&
+	    alloc->endpoint_id != AMBA_DMA_ENDPOINT_UART3)
+		return -EINVAL;
+
 	mutex_lock(&global_lock);
 
 	/* 1. If vsock_cid already has an allocated lease, return it */
@@ -167,7 +254,14 @@ int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 			if ((lease->state == AMBA_DMA_LEASE_ACTIVE ||
 			     lease->state == AMBA_DMA_LEASE_STARTING) &&
 			    lease->vsock_cid == alloc->vsock_cid) {
+				if (alloc->endpoint_id != AMBA_DMA_ENDPOINT_NONE &&
+				    alloc->endpoint_id != lease->bound_endpoint_id) {
+					mutex_unlock(&lease->lock);
+					mutex_unlock(&global_lock);
+					return -EBUSY;
+				}
 				alloc->lease_id = id;
+				alloc->endpoint_id = lease->bound_endpoint_id;
 				alloc->capability = lease->capability;
 				alloc->epoch = lease->epoch;
 				mutex_unlock(&lease->lock);
@@ -178,14 +272,40 @@ int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 		}
 	}
 
+	/* 2. Reject duplicate host-bound endpoint reservation across active leases */
+	if (alloc->endpoint_id != AMBA_DMA_ENDPOINT_NONE) {
+		for (id = 0; id < AMBA_VIRT_DMA32_NUM_SLICES; id++) {
+			lease = &leases[id];
+			mutex_lock(&lease->lock);
+			if (lease->state != AMBA_DMA_LEASE_FREE &&
+			    lease->bound_endpoint_id == alloc->endpoint_id) {
+				mutex_unlock(&lease->lock);
+				mutex_unlock(&global_lock);
+				return -EBUSY;
+			}
+			mutex_unlock(&lease->lock);
+		}
+	}
+
 	for (id = 0; id < AMBA_VIRT_DMA32_NUM_SLICES; id++) {
 		lease = &leases[id];
 		mutex_lock(&lease->lock);
 		if (lease->state == AMBA_DMA_LEASE_FREE) {
 			lease->state = AMBA_DMA_LEASE_STARTING;
+			lease->bound_endpoint_id = alloc->endpoint_id;
 			lease->boot_generation = alloc->boot_generation;
 			lease->vsock_cid = alloc->vsock_cid;
 			memcpy(lease->vm_uuid, alloc->vm_uuid, 16);
+
+			if (alloc->endpoint_id == AMBA_DMA_ENDPOINT_UART2) {
+				mutex_lock(&endpoint_uart2.lock);
+				endpoint_uart2.owner_lease = (int)id;
+				mutex_unlock(&endpoint_uart2.lock);
+			} else if (alloc->endpoint_id == AMBA_DMA_ENDPOINT_UART3) {
+				mutex_lock(&endpoint_uart3.lock);
+				endpoint_uart3.owner_lease = (int)id;
+				mutex_unlock(&endpoint_uart3.lock);
+			}
 
 			get_random_bytes(&lease->capability, sizeof(lease->capability));
 			get_random_bytes(lease->hmac_key, sizeof(lease->hmac_key));
@@ -197,8 +317,9 @@ int amba_dma_alloc_lease(struct amba_dma_lease_alloc *alloc)
 			alloc->capability = lease->capability;
 			alloc->epoch = lease->epoch;
 
-			pr_info("%s: allocated lease %u for CID %u (epoch %llu)\n",
-				DRV_NAME, id, lease->vsock_cid, lease->epoch);
+			pr_info("%s: allocated lease %u for CID %u (endpoint %u, epoch %llu)\n",
+				DRV_NAME, id, lease->vsock_cid,
+				lease->bound_endpoint_id, lease->epoch);
 
 			mutex_unlock(&lease->lock);
 			ret = 0;
@@ -307,6 +428,7 @@ int amba_dma_release_lease(u32 lease_id, u64 epoch)
 	}
 
 	/* Reset identity and state */
+	lease->bound_endpoint_id = AMBA_DMA_ENDPOINT_NONE;
 	lease->capability = 0;
 	memset(lease->hmac_key, 0, sizeof(lease->hmac_key));
 	lease->vsock_cid = 0;
@@ -351,6 +473,7 @@ int amba_dma_quarantine_release(u32 lease_id, u64 epoch)
 	mutex_unlock(&endpoint_uart3.lock);
 
 	amba_dma_sanitize_slice(lease);
+	lease->bound_endpoint_id = AMBA_DMA_ENDPOINT_NONE;
 	lease->state = AMBA_DMA_LEASE_FREE;
 	lease->epoch++;
 	memset(lease->hmac_key, 0, sizeof(lease->hmac_key));
@@ -409,11 +532,13 @@ int amba_dma_dispatch_request(u32 lease_id,
 			      struct amba_virt_dma_response *resp)
 {
 	struct amba_dma_lease *lease;
+	struct amba_dma_endpoint_policy *ep;
 	struct dma_chan *chan;
 	struct dma_async_tx_descriptor *tx_desc;
 	struct dma_slave_config cfg;
 	dma_addr_t buf_dma;
 	enum dma_transfer_direction dir;
+	u32 effective_ep;
 	int ret;
 
 	if (lease_id >= AMBA_VIRT_DMA32_NUM_SLICES || !req || !resp)
@@ -471,6 +596,12 @@ int amba_dma_dispatch_request(u32 lease_id,
 		return -ERANGE;
 	}
 
+	if ((req->offset & 3) != 0) {
+		lease->stats.err_invalid_bounds++;
+		mutex_unlock(&lease->lock);
+		return -EINVAL;
+	}
+
 	buf_dma = lease->slice_dma + req->offset;
 	if (buf_dma + req->length - 1 > U32_MAX) {
 		lease->stats.err_invalid_bounds++;
@@ -478,11 +609,31 @@ int amba_dma_dispatch_request(u32 lease_id,
 		return -EFBIG;
 	}
 
-	/* 5. Endpoint policy check */
-	struct amba_dma_endpoint_policy *ep;
-	if (req->endpoint_id == AMBA_DMA_ENDPOINT_UART2) {
+	/* 5. Host-bound endpoint policy check */
+	if (req->endpoint_id != AMBA_DMA_ENDPOINT_NONE &&
+	    req->endpoint_id != AMBA_DMA_ENDPOINT_UART2 &&
+	    req->endpoint_id != AMBA_DMA_ENDPOINT_UART3) {
+		mutex_unlock(&lease->lock);
+		return -ENODEV;
+	}
+
+	if (lease->bound_endpoint_id == AMBA_DMA_ENDPOINT_NONE) {
+		mutex_unlock(&lease->lock);
+		return -EPERM;
+	}
+
+	if (req->endpoint_id != AMBA_DMA_ENDPOINT_NONE &&
+	    req->endpoint_id != lease->bound_endpoint_id) {
+		mutex_unlock(&lease->lock);
+		return -EPERM;
+	}
+
+	effective_ep = (req->endpoint_id != AMBA_DMA_ENDPOINT_NONE) ?
+		       req->endpoint_id : lease->bound_endpoint_id;
+
+	if (effective_ep == AMBA_DMA_ENDPOINT_UART2) {
 		ep = &endpoint_uart2;
-	} else if (req->endpoint_id == AMBA_DMA_ENDPOINT_UART3) {
+	} else if (effective_ep == AMBA_DMA_ENDPOINT_UART3) {
 		ep = &endpoint_uart3;
 	} else {
 		mutex_unlock(&lease->lock);
@@ -558,7 +709,7 @@ int amba_dma_dispatch_request(u32 lease_id,
 	/* 7. Setup in-flight transaction */
 	lease->in_flight = true;
 	lease->active_cookie = req->cookie;
-	lease->active_endpoint = req->endpoint_id;
+	lease->active_endpoint = effective_ep;
 	lease->active_operation = req->operation;
 	lease->xfer_status = -EINPROGRESS;
 	lease->xfer_transferred = 0;
@@ -600,6 +751,54 @@ int amba_dma_dispatch_request(u32 lease_id,
 	return 0;
 }
 
+#ifdef BUILD_HOST_UNIT_TEST
+void amba_dma_host_test_reset(void)
+{
+	int i;
+
+	mutex_init(&global_lock);
+	mutex_init(&endpoint_uart2.lock);
+	mutex_init(&endpoint_uart3.lock);
+
+	endpoint_uart2.tx_chan = &host_mock_u2_tx;
+	endpoint_uart2.rx_chan = &host_mock_u2_rx;
+	endpoint_uart2.fifo_dma = endpoint_uart2.fifo_phys;
+	endpoint_uart2.owner_lease = -1;
+
+	endpoint_uart3.tx_chan = &host_mock_u3_tx;
+	endpoint_uart3.rx_chan = &host_mock_u3_rx;
+	endpoint_uart3.fifo_dma = endpoint_uart3.fifo_phys;
+	endpoint_uart3.owner_lease = -1;
+
+	host_mock_last_dreq = 0;
+	host_mock_config_cnt = 0;
+
+	memset(leases, 0, sizeof(leases));
+	for (i = 0; i < AMBA_VIRT_DMA32_NUM_SLICES; i++) {
+		struct amba_dma_lease *lease = &leases[i];
+		lease->lease_id = i;
+		lease->state = AMBA_DMA_LEASE_FREE;
+		lease->bound_endpoint_id = AMBA_DMA_ENDPOINT_NONE;
+		lease->epoch = 1;
+		lease->slice_phys = AMBA_VIRT_DMA32_POOL_BASE + (i * AMBA_VIRT_DMA32_SLICE_SIZE);
+		lease->slice_size = AMBA_VIRT_DMA32_SLICE_SIZE;
+		lease->slice_dma = lease->slice_phys;
+		mutex_init(&lease->lock);
+		init_completion(&lease->xfer_done);
+		timer_setup(&lease->watchdog, amba_dma_watchdog_fired, 0);
+	}
+}
+
+u32 amba_dma_host_test_last_configured_dreq(void)
+{
+	return host_mock_last_dreq;
+}
+
+u32 amba_dma_host_test_config_count(void)
+{
+	return host_mock_config_cnt;
+}
+#else
 int amba_dma_mmap_slice(u32 lease_id, struct vm_area_struct *vma)
 {
 	struct amba_dma_lease *lease;
@@ -625,10 +824,12 @@ static long amba_dma_ctl_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	switch (cmd) {
 	case AMBA_DMA_IOC_LEASE_ALLOC: {
 		struct amba_dma_lease_alloc alloc;
+		int ret;
 		if (copy_from_user(&alloc, (void __user *)arg, sizeof(alloc)))
 			return -EFAULT;
-		if (amba_dma_alloc_lease(&alloc))
-			return -ENOSPC;
+		ret = amba_dma_alloc_lease(&alloc);
+		if (ret)
+			return ret;
 		if (copy_to_user((void __user *)arg, &alloc, sizeof(alloc)))
 			return -EFAULT;
 		return 0;
@@ -869,6 +1070,7 @@ int amba_virt_dma_init(struct device *parent)
 
 		lease->lease_id = i;
 		lease->state = AMBA_DMA_LEASE_FREE;
+		lease->bound_endpoint_id = AMBA_DMA_ENDPOINT_NONE;
 		lease->epoch = 1;
 		lease->slice_phys = AMBA_VIRT_DMA32_POOL_BASE + (i * AMBA_VIRT_DMA32_SLICE_SIZE);
 		lease->slice_size = AMBA_VIRT_DMA32_SLICE_SIZE;
@@ -972,4 +1174,5 @@ module_exit(amba_dma_module_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Charles Chiou <cchiou@ambarella.com>");
 MODULE_DESCRIPTION("Ambarella Virtual DMA Authority and Lease Reference Monitor");
+#endif
 

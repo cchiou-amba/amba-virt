@@ -145,23 +145,35 @@ Enable-ShellLauncher -AppPath "C:\Program Files\EdgeAI\App.exe"
 
 - [guest-os/README.md](../README.md) — HVM guest architecture and compilation guide
 - [doc/Guest-OS-Cross-Compilation.md](../../doc/Guest-OS-Cross-Compilation.md) — Guest cross-compilation pipeline
+- [doc/EVE-EdgeApp-Instances.md](../../doc/EVE-EdgeApp-Instances.md) — Full from-zero provisioning recipe for all six guests
 
 ---
 
 ## 7. Deployment with `zcli`
 
-Once the compressed image is staged in `output/dist/`:
+Once the compressed image is staged in `guest-os/windows/windows-build/output/dist/windows-11-arm64-cloudimg.qcow2`:
 
 ```bash
-# 1. Uplink image to datastore (e.g. LocalHTTP)
+# 1. Stage and uplink image to datastore (e.g. LocalHTTP)
+cp -f guest-os/windows/windows-build/output/dist/windows-11-arm64-cloudimg.qcow2 ~/public_html/cloud-images/windows-11-arm64-cloudimg.qcow2
 ./scripts/zcli -- image uplink windows-11-arm64-cloudimg \
+    --datastore-name=LocalHTTP \
+    --image-url=cloud-images/windows-11-arm64-cloudimg.qcow2 \
     --image-sha="<IMAGE_SHA>" \
     --image-size="<IMAGE_SIZE>"
 
-# 2. Push edge application manifest
-./scripts/push_app.sh apps/windows_11_arm64.json
+# 2. Create or update the edge application manifest (apps/windows_11_arm64.json)
+./scripts/create_app.sh windows_11_arm64 --version=1.0
+# Or when updating an existing app with zero instances:
+./scripts/push_app.sh windows_11_arm64
 
-# 3. Create instance on target node
-./scripts/create_instance.sh windows_11_arm64 n1-655-devkit
+# 3. Create instance on target node with pinned slice 5 ticket (amba_shm5)
+./scripts/create_instance.sh windows_11_arm64.n1-655-devkit \
+    --edge-app=windows_11_arm64 \
+    --edge-node=n1-655-devkit \
+    --network-instance=eth0:defaultLocal-n1-655-devkit \
+    --adapter=amba_shm:amba_shm5 \
+    --no-custom-configuration
 ```
 
+Full from-zero provisioning recipe for all six guests: [doc/EVE-EdgeApp-Instances.md](../../doc/EVE-EdgeApp-Instances.md).

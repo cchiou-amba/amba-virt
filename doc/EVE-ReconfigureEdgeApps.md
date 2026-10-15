@@ -74,15 +74,16 @@ Window markers are allowed: an `IO_TYPE_OTHER` bundle with no
 `Ifname`/`PciLong`/`Serial`/`UsbAddr` carries no physical resource, so `amba_shm`
 goes onto an HVM without `--force` while `cavalry` does not.
 
-The planned UART adapter also has empty EVE resource fields, but it is not an
-inert window marker: UART-specific `cbattr` designates real silicon. Provision
-it only after the UART-aware safety check and Pillar parser are implemented.
-The UART and `amba_shm` parsers must be mutually exclusive on `cbattr` content.
+The UART adapters (`UART1`..`UART4`) also have empty EVE resource fields, but they are not
+inert window markers: UART-specific `cbattr` (`{"uart": "<N>"}`) designates real silicon
+(`ffe0018000.uart` for `UART2`, `ffe0019000.uart` for `UART3`), which Pillar (`kvm.go`) binds
+to `vfio-platform` on domain start and restores to `ambarella-uart` on domain stop.
+The UART and `amba_shm` parsers are mutually exclusive on `cbattr` content.
 
-Like every other interface, a future UART adapter must already be listed on a
-new edge-app and assigned when its new instance is created. Do not try to add
-it to an existing HVM in place, and do not substitute current `COM2`/`COM3`
-`Serial=/dev/ttyS*` entries; those emit QEMU `pci-serial`.
+Like every other interface, a UART adapter must already be listed on the
+edge-app and assigned when its instance is created. Do not try to add
+it to an existing HVM in place, and do not substitute legacy `Serial=/dev/ttyS*`
+entries; those emit QEMU `pci-serial`.
 
 ### 3. Create the edge-app (not update)
 
@@ -110,7 +111,7 @@ Io name is: gpio: model does not have adapter
   --edge-app=ubuntu_24_04-v2 \
   --edge-node=n1-655-devkit \
   --network-instance=eth0:defaultLocal-n1-655-devkit \
-  --adapter=amba_shm:amba_shm --dry-run
+  --adapter=amba_shm:amba_shm0 --dry-run
 ```
 
 An `assigngrp` can only be held by one instance at a time, so a new instance
@@ -120,19 +121,20 @@ first and accept the volume loss.
 
 ## Admission tickets
 
-A guest's memory and its camera windows come from one adapter, an admission ticket (`amba_shm`,
-`amba_shm1` to `amba_shm7`, [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md)). The ticket carries
-`cbattr shmassign=server`: `amba-virt-server` leases the guest a Cavalry slice and a private IAV slice and,
+A guest's memory and its camera windows come from one adapter, an admission ticket (`amba_shm0`
+to `amba_shm7`, [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md) and
+[EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md)). The ticket carries
+`cbattr shmassign=server` (`camera=on` on `amba_shm0..3`, off on `amba_shm4..7`): `amba-virt-server` leases the guest a Cavalry slice and a private IAV slice and,
 when the ticket's camera policy says so, attaches the shared camera windows. No other adapter is assigned for
 memory or for the camera. The number in a ticket's name is a label for the controller's
 one-instance-per-`assigngrp` rule: every guest on a board needs a ticket of its own, and the number
-does not select a slice. Only `amba_shm` is pinned to Cavalry slice 0 (the primary IAV client).
+does not select a slice. Only `amba_shm0` is pinned to Cavalry slice 0 (the primary IAV client).
 
 ### Worked example: replace guests so that each holds a ticket
 
 Use this when a model change removes adapters that instances hold (the camera window adapters of the earlier
-models are gone: see "Retired adapters" in [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md)), or when a new
-guest needs a ticket. The apps `ubuntu_24_04` and `alpine_3_20` list only `amba_shm` besides the network and
+models are gone: see "Retired adapters" in [EVE-Ambarella-Models.md](EVE-Ambarella-Models.md)), or when recreating
+all six guests under the pinned `0..5` mapping ([EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md)). The apps `ubuntu_24_04` and `alpine_3_20` list only `amba_shm` besides the network and
 the UARTs, and have the same image and ports as the apps they replace.
 
 1. Record what is there before anything is stopped: `./scripts/show_instances.sh --edge-node=<node>`, then
@@ -142,16 +144,16 @@ the UARTs, and have the same image and ports as the apps they replace.
    (`./scripts/zcli -- edge-app-instance delete <name> -f`; their volumes are lost). Deleting them first means
    the model push never meets an adapter that is still assigned.
 3. `./scripts/push_models.sh <model>`. Read the model back (`./scripts/zcli -- --format=json model show <model> --detail`)
-   and check that the eight tickets are there with the `camera` values the model file has, and that no
+   and check that the eight tickets (`amba_shm0`..`amba_shm7`) are there with the `camera` values the model file has, and that no
    retired adapter is. Never push a model while an app is active.
 4. Create each guest from its app, with its ticket at create (`--adapter=INTF:NAME` takes the adapter's `logicallabel`):
    - Ubuntu needs cloud-init user-data at create. An instance created with `--no-custom-configuration` has an empty
      CIDATA, the password is never set and the guest cannot be reached. Write `apps/ubuntu_24_04-cloud-init.json`
      from the `#cloud-config` of [EVE-EdgeApp-Provision.md](EVE-EdgeApp-Provision.md) section 2 (keep any SSH key out
      of the repository), then
-     `./scripts/create_instance.sh ubuntu_24_04.<node> --edge-app=ubuntu_24_04 --edge-node=<node> --network-instance=eth0:defaultLocal-<node> --adapter=amba_shm:amba_shm --custom-configuration=apps/ubuntu_24_04-cloud-init.json`.
+     `./scripts/create_instance.sh ubuntu_24_04.<node> --edge-app=ubuntu_24_04 --edge-node=<node> --network-instance=eth0:defaultLocal-<node> --adapter=amba_shm:amba_shm0 --adapter=UART2:UART2 --custom-configuration=apps/ubuntu_24_04-cloud-init.json`.
    - Alpine:
-     `./scripts/create_instance.sh alpine_3_20.<node> --edge-app=alpine_3_20 --edge-node=<node> --network-instance=eth0:defaultLocal-<node> --adapter=amba_shm:amba_shm1 --no-custom-configuration`.
+     `./scripts/create_instance.sh alpine_3_20.<node> --edge-app=alpine_3_20 --edge-node=<node> --network-instance=eth0:defaultLocal-<node> --adapter=amba_shm:amba_shm1 --adapter=COM3:UART3 --no-custom-configuration`.
    - An instance that exists without an adapter cannot be given one in place: the controller accepts
      `edge-app-instance update --adapter=...` and attaches nothing (observed on 2026-10-13: the instance kept only its
      network). Delete and recreate it with the ticket at create; its volume is lost.

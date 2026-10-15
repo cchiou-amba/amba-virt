@@ -28,7 +28,7 @@ SSH_ALIAS="${AMBA_SSH_ALIAS:-n1-655-pro-debian}"
 # Accelerator memory: one admission ticket. amba-virt-server grants the Cavalry slice and the private IAV slice, and
 # attaches the shared camera windows when the ticket's camera policy says so (doc/EVE-Ambarella-Models.md). The digit of
 # the ticket is a label for the controller's one-instance-per-group rule, not a slice index.
-ADAPTERS=(amba_shm:amba_shm4)
+ADAPTERS=(amba_shm:amba_shm2)
 SSH_HOST_PORT=2522
 DEMO_PORT=8082
 VOLUME_MAXSIZE_KB=4194304   # 4 GiB, as the Alpine guest; the Ubuntu template asks for 10 GiB, more than the pro board had free

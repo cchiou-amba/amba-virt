@@ -185,6 +185,37 @@ static pthread_cond_t g_drain_cond = PTHREAD_COND_INITIALIZER;
 static int g_draining = 0;
 static int g_active_requests = 0;
 
+static struct cavalry_dag_desc_mfd g_last_mfd_dags[MAX_DAG_CNT_CAP];
+static uint32_t g_last_mfd_dag_cnt = 0;
+static pthread_mutex_t g_last_mfd_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void cavalry_proxy_record_last_mfd(const struct cavalry_run_dags_mfd *mfd)
+{
+	if (!mfd)
+		return;
+	pthread_mutex_lock(&g_last_mfd_mutex);
+	g_last_mfd_dag_cnt = mfd->dag_cnt <= MAX_DAG_CNT_CAP ? mfd->dag_cnt : MAX_DAG_CNT_CAP;
+	if (g_last_mfd_dag_cnt > 0) {
+		memcpy(g_last_mfd_dags, mfd->dag_desc,
+		       g_last_mfd_dag_cnt * sizeof(struct cavalry_dag_desc_mfd));
+	}
+	pthread_mutex_unlock(&g_last_mfd_mutex);
+}
+
+int cavalry_proxy_get_last_mfd_dag(uint32_t dag_idx, struct cavalry_dag_desc_mfd *out_dag)
+{
+	if (!out_dag)
+		return -EINVAL;
+	pthread_mutex_lock(&g_last_mfd_mutex);
+	if (dag_idx >= g_last_mfd_dag_cnt) {
+		pthread_mutex_unlock(&g_last_mfd_mutex);
+		return -ENOENT;
+	}
+	*out_dag = g_last_mfd_dags[dag_idx];
+	pthread_mutex_unlock(&g_last_mfd_mutex);
+	return 0;
+}
+
 void cavalry_proxy_set_enforce_path_b(int enforce)
 
 {
@@ -218,16 +249,45 @@ int cavalry_proxy_pool_size_for_usable(size_t usable_size, uint32_t *out_size)
 int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 				  int window_fd, unsigned char *shm_map,
 				  size_t shm_size, uint64_t phys_base,
-				  uint32_t slice_offset)
+				  uint64_t slice_offset)
 {
 	uint32_t pool_size;
+	uint32_t evict_cid = 0;
+	int i;
 
 	if (tenant_idx >= MAX_TENANTS)
 		return -EINVAL;
+	if (shm_map == MAP_FAILED)
+		return -EINVAL;
+	if (slice_offset > UINT64_MAX - shm_size)
+		return -EINVAL;
+	if (g_shm_size > 0 &&
+	    (slice_offset > g_shm_size || shm_size > g_shm_size - slice_offset))
+		return -EINVAL;
+#ifdef CAVALRY_PROXY_MUTANT_SATURATE_32BIT_WINDOW
+	if (slice_offset + shm_size > (size_t)UINT32_MAX)
+		return -EINVAL;
+#endif
 	if (cavalry_proxy_pool_size_for_usable(shm_size, &pool_size) < 0)
 		return -EINVAL;
 
 	pthread_mutex_lock(&g_tenant_mutex);
+	if (g_tenants[tenant_idx].in_use &&
+	    g_tenants[tenant_idx].cid != 0 &&
+	    g_tenants[tenant_idx].cid != cid) {
+		evict_cid = g_tenants[tenant_idx].cid;
+	}
+	for (i = 0; i < MAX_TENANTS; i++) {
+		if (i != (int)tenant_idx && g_tenants[i].in_use && g_tenants[i].cid == cid) {
+			g_tenants[i].in_use = 0;
+			g_tenants[i].cid = 0;
+			g_tenants[i].shm_map = NULL;
+			if (i < MAX_HARDWARE_SLICES && g_hw_slices[i].bound_cid == cid) {
+				g_hw_slices[i].bound_cid = 0;
+				g_hw_slices[i].nonce = 0;
+			}
+		}
+	}
 	g_tenants[tenant_idx].cid = cid;
 	g_tenants[tenant_idx].tenant_idx = tenant_idx;
 	g_tenants[tenant_idx].window_fd = window_fd >= 0 ? window_fd : g_window_fd;
@@ -242,8 +302,11 @@ int cavalry_proxy_register_tenant(uint32_t cid, uint32_t tenant_idx,
 	g_tenants[tenant_idx].in_use = 1;
 	pthread_mutex_unlock(&g_tenant_mutex);
 
-	printf("cavalry_proxy: registered tenant idx=%u cid=%u (phys=0x%lx, off=0x%x, size=%zu)\n",
-	       tenant_idx, cid, (unsigned long)phys_base, slice_offset, shm_size);
+	if (evict_cid != 0)
+		cavalry_proxy_client_disconnect(evict_cid);
+
+	printf("cavalry_proxy: registered tenant idx=%u cid=%u (phys=0x%lx, off=0x%lx, size=%zu)\n",
+	       tenant_idx, cid, (unsigned long)phys_base, (unsigned long)slice_offset, shm_size);
 	return 0;
 }
 
@@ -255,6 +318,7 @@ int cavalry_proxy_unregister_tenant(uint32_t cid)
 		if (g_tenants[i].in_use && g_tenants[i].cid == cid) {
 			g_tenants[i].in_use = 0;
 			g_tenants[i].cid = 0;
+			g_tenants[i].shm_map = NULL;
 			if (i < MAX_HARDWARE_SLICES) {
 				g_hw_slices[i].bound_cid = 0;
 				g_hw_slices[i].nonce = 0;
@@ -286,25 +350,51 @@ int cavalry_proxy_restore_bindings(const struct amba_virt_binding_list *list,
 				   unsigned char *window_map, size_t window_size)
 {
 	uint32_t i;
+	uint32_t stale_cids[MAX_TENANTS];
+	int stale_cnt = 0;
 
-	if (!list)
+	if (!list || list->count > 8)
 		return -EINVAL;
+
+	for (i = 0; i < list->count && i < 8; i++) {
+		const struct amba_virt_slice_binding *entry = &list->entries[i];
+
+		if (entry->cid <= 2 || entry->slice.index >= MAX_TENANTS)
+			return -EINVAL;
+		if (entry->slice.offset > UINT64_MAX - entry->slice.slice_size)
+			return -EINVAL;
+		if (window_size > 0 &&
+		    (entry->slice.offset > window_size ||
+		     entry->slice.slice_size > window_size - entry->slice.offset))
+			return -EINVAL;
+	}
+
+	pthread_mutex_lock(&g_tenant_mutex);
+	for (i = 0; i < MAX_TENANTS; i++) {
+		if (g_tenants[i].in_use && g_tenants[i].cid != 0)
+			stale_cids[stale_cnt++] = g_tenants[i].cid;
+		memset(&g_tenants[i], 0, sizeof(g_tenants[i]));
+		if (i < MAX_HARDWARE_SLICES)
+			g_hw_slices[i].bound_cid = 0;
+	}
+	pthread_mutex_unlock(&g_tenant_mutex);
+
+	for (int s = 0; s < stale_cnt; s++)
+		cavalry_proxy_client_disconnect(stale_cids[s]);
 
 	for (i = 0; i < list->count && i < 8; i++) {
 		const struct amba_virt_slice_binding *entry = &list->entries[i];
 		unsigned char *submap = NULL;
 		int ret;
 
-		if (entry->cid <= 2)
-			return -EINVAL;
-		if (window_map &&
+		if (window_map && window_map != MAP_FAILED &&
 		    entry->slice.offset + entry->slice.slice_size <= window_size)
 			submap = window_map + entry->slice.offset;
 
 		ret = cavalry_proxy_register_tenant(entry->cid, entry->slice.index, -1,
 						    submap, entry->slice.usable_size,
 						    entry->slice.phys,
-						    (uint32_t)entry->slice.offset);
+						    entry->slice.offset);
 		if (ret < 0)
 			return ret;
 	}
@@ -376,6 +466,14 @@ int cavalry_proxy_bind_slice(uint32_t cid, uint64_t nonce, struct amba_virt_slic
 		return -EBUSY;
 	}
 
+	if (g_hw_slices[match_idx].offset > UINT64_MAX - g_hw_slices[match_idx].slice_size ||
+	    (g_shm_size > 0 &&
+	     (g_hw_slices[match_idx].offset > g_shm_size ||
+	      g_hw_slices[match_idx].slice_size > g_shm_size - g_hw_slices[match_idx].offset))) {
+		pthread_mutex_unlock(&g_tenant_mutex);
+		return -EINVAL;
+	}
+
 	g_hw_slices[match_idx].bound_cid = cid;
 
 	out_desc->index = g_hw_slices[match_idx].index;
@@ -388,12 +486,18 @@ int cavalry_proxy_bind_slice(uint32_t cid, uint64_t nonce, struct amba_virt_slic
 	g_tenants[match_idx].cid = cid;
 	g_tenants[match_idx].tenant_idx = match_idx;
 	g_tenants[match_idx].window_fd = g_window_fd;
-	g_tenants[match_idx].shm_map = (g_shm_map != MAP_FAILED &&
+#ifdef CAVALRY_PROXY_MUTANT_SATURATE_32BIT_WINDOW
+	g_tenants[match_idx].shm_map = (g_shm_map != MAP_FAILED && g_shm_map != NULL &&
+					out_desc->offset + out_desc->slice_size <= (size_t)UINT32_MAX) ?
+				       (g_shm_map + out_desc->offset) : NULL;
+#else
+	g_tenants[match_idx].shm_map = (g_shm_map != MAP_FAILED && g_shm_map != NULL &&
 					out_desc->offset + out_desc->slice_size <= g_shm_size) ?
-				       (g_shm_map + out_desc->offset) : g_shm_map;
+				       (g_shm_map + out_desc->offset) : NULL;
+#endif
 	g_tenants[match_idx].shm_size = out_desc->usable_size;
 	g_tenants[match_idx].phys_base = out_desc->phys;
-	g_tenants[match_idx].slice_offset = (uint32_t)out_desc->offset;
+	g_tenants[match_idx].slice_offset = out_desc->offset;
 	g_tenants[match_idx].cavalry_pool_base = CAVALRY_POOL_BASE;
 	g_tenants[match_idx].cavalry_pool_size = (out_desc->usable_size > CAVALRY_POOL_BASE) ?
 						 (out_desc->usable_size - CAVALRY_POOL_BASE) : 0;
@@ -441,6 +545,9 @@ static int cavalry_proxy_alloc(uint32_t size, uint32_t client_cid, uint32_t sess
 
 	if (!size || !out_offset)
 		return -EINVAL;
+
+	if (size > pool_size)
+		return -ENOMEM;
 
 	/* Page-align size (4096 bytes) */
 	aligned_size = (size + 4095U) & ~4095U;
@@ -727,20 +834,42 @@ void cavalry_proxy_client_disconnect(uint32_t client_cid)
 }
 
 
-static int cavalry_proxy_validate_range(uint32_t bar_offset, uint32_t size, uint32_t client_cid)
+static int cavalry_proxy_validate_range(uint64_t bar_offset, uint64_t size, uint32_t client_cid)
 {
 	int i;
 	uint64_t req_end;
 	struct cavalry_tenant_ctx *tenant = client_cid ? cavalry_proxy_get_tenant(client_cid) : NULL;
-	uint32_t pool_base = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_base : CAVALRY_POOL_BASE;
-	uint32_t pool_size = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_size : CAVALRY_POOL_SIZE;
+	uint64_t pool_base;
+	uint64_t pool_size;
+
+	if (size == 0)
+		return -EINVAL;
+
+	if (client_cid && !tenant)
+		return -ENODEV;
+
+	if (bar_offset > UINT64_MAX - size)
+		return -EFAULT;
+
+	req_end = bar_offset + size;
+
+	if (tenant) {
+		if (req_end > tenant->shm_size)
+			return -EFAULT;
+		if (tenant->slice_offset > UINT64_MAX - req_end)
+			return -EFAULT;
+		if (g_shm_size > 0 && (tenant->slice_offset + req_end) > g_shm_size)
+			return -EFAULT;
+	}
+
+	pool_base = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_base : CAVALRY_POOL_BASE;
+	pool_size = (tenant && tenant->cavalry_pool_size) ? tenant->cavalry_pool_size : CAVALRY_POOL_SIZE;
 
 	/* Must be inside Cavalry pool */
 	if (bar_offset < pool_base)
 		return -EFAULT;
 
-	req_end = (uint64_t)bar_offset + size;
-	if (req_end > (uint64_t)pool_base + pool_size)
+	if (req_end > pool_base + pool_size)
 		return -EFAULT;
 
 	/* Must be strictly contained within an allocated slice of this client */
@@ -748,8 +877,8 @@ static int cavalry_proxy_validate_range(uint32_t bar_offset, uint32_t size, uint
 	for (i = 0; i < MAX_SLICES; i++) {
 		if (g_slices[i].in_use &&
 		    (!client_cid || g_slices[i].client_cid == client_cid)) {
-			uint32_t s_start = g_slices[i].bar_offset;
-			uint64_t s_end = (uint64_t)s_start + g_slices[i].size;
+			uint64_t s_start = g_slices[i].bar_offset;
+			uint64_t s_end = s_start + g_slices[i].size;
 			if (bar_offset >= s_start && req_end <= s_end) {
 				pthread_mutex_unlock(&g_slice_mutex);
 				return 0;
@@ -774,6 +903,10 @@ int cavalry_proxy_init(int fd_amba_virt, unsigned char *shm_map, size_t shm_size
 	memset(g_slices, 0, sizeof(g_slices));
 	memset(g_tenants, 0, sizeof(g_tenants));
 	memset(g_hw_slices, 0, sizeof(g_hw_slices));
+	memset(g_handles, 0, sizeof(g_handles));
+	memset(g_registered_dags, 0, sizeof(g_registered_dags));
+	memset(g_last_mfd_dags, 0, sizeof(g_last_mfd_dags));
+	g_last_mfd_dag_cnt = 0;
 
 	struct amba_virt_slice_list geom_list;
 	uint32_t bar_count = 0;
@@ -885,6 +1018,15 @@ int cavalry_proxy_reopen(void)
 
 void cavalry_proxy_cleanup(void)
 {
+	int i;
+
+	pthread_mutex_lock(&g_dag_mutex);
+	for (i = 0; i < MAX_REGISTERED_DAGS; i++) {
+		if (g_registered_dags[i].in_use)
+			cavalry_proxy_free_dag_slot(i);
+	}
+	pthread_mutex_unlock(&g_dag_mutex);
+
 	if (g_window_fd >= 0) {
 		close(g_window_fd);
 		g_window_fd = -1;
@@ -907,6 +1049,7 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 	struct cavalry_tenant_ctx *tenant = NULL;
 	uint8_t *host_arena_copy = NULL;
 	size_t mfd_size;
+	uint64_t eff_slice_offset;
 	uint32_t d, p;
 	int ret = 0;
 
@@ -927,7 +1070,8 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 	uint32_t arena_sz = tenant->rpc_arena_size ? tenant->rpc_arena_size : CAVALRY_RPC_ARENA_SIZE;
 
 	/* Cap arena_len against bounds */
-	if (req->arena_len == 0 || req->arena_len > arena_sz) {
+	if (req->arena_len == 0 || req->arena_len > arena_sz ||
+	    req->arena_len < sizeof(struct cavalry_run_dags)) {
 		fprintf(stderr, "cavalry_proxy: invalid arena_len %u\n", req->arena_len);
 		resp->status = -EMSGSIZE;
 		return 0;
@@ -937,6 +1081,11 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 		fprintf(stderr, "cavalry_proxy: invalid arena offset 0x%08x (expected 0x%08x)\n",
 			req->bar_offset, arena_off);
 		resp->status = -EINVAL;
+		return 0;
+	}
+
+	if ((uint64_t)req->bar_offset + req->arena_len > tenant->shm_size) {
+		resp->status = -EFAULT;
 		return 0;
 	}
 
@@ -959,12 +1108,47 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 	for (d = 0; d < run_req->dag_cnt; d++) {
 		const struct cavalry_dag_desc *dag = &run_req->dag_desc[d];
 
+		if (dag->port_cnt > CAVALRY_MAX_PORTS) {
+			fprintf(stderr, "cavalry_proxy: invalid port_cnt %u for cid=%u\n",
+				dag->port_cnt, client_cid);
+			resp->status = -EINVAL;
+			goto out_free_arena;
+		}
+
 		ret = cavalry_proxy_validate_range(dag->dvi_dram_addr, dag->dvi_img_size, client_cid);
 		if (ret < 0) {
 			fprintf(stderr, "cavalry_proxy: invalid DVI address 0x%lx size %u for cid=%u\n",
 				(unsigned long)dag->dvi_dram_addr, dag->dvi_img_size, client_cid);
 			resp->status = ret;
 			goto out_free_arena;
+		}
+
+		if (dag->extra_poke_list_daddr) {
+			uint64_t poke_sz = dag->extra_poke_list_cnt ?
+				(uint64_t)dag->extra_poke_list_cnt * sizeof(struct cavalry_poke_desc) : 4ULL;
+			ret = cavalry_proxy_validate_range(dag->extra_poke_list_daddr, poke_sz, client_cid);
+			if (ret < 0) {
+				resp->status = ret;
+				goto out_free_arena;
+			}
+		}
+		if (dag->extra_dag_desc_common_daddr) {
+			ret = cavalry_proxy_validate_range(dag->extra_dag_desc_common_daddr,
+							   sizeof(struct extra_dag_desc_common),
+							   client_cid);
+			if (ret < 0) {
+				resp->status = ret;
+				goto out_free_arena;
+			}
+		}
+		if (dag->extra_dag_desc_list_daddr) {
+			ret = cavalry_proxy_validate_range(dag->extra_dag_desc_list_daddr,
+							   sizeof(struct extra_dag_desc_list),
+							   client_cid);
+			if (ret < 0) {
+				resp->status = ret;
+				goto out_free_arena;
+			}
 		}
 
 		for (p = 0; p < dag->port_cnt; p++) {
@@ -1001,6 +1185,12 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 	mfd->ucode_cmd_addr_offset = 0;
 	mfd->dvi_dram_addr_fd = tenant->window_fd;
 
+#ifdef CAVALRY_PROXY_MUTANT_TRUNCATE_32BIT_OFFSET
+	eff_slice_offset = (uint32_t)tenant->slice_offset;
+#else
+	eff_slice_offset = tenant->slice_offset;
+#endif
+
 	for (d = 0; d < run_req->dag_cnt; d++) {
 		const struct cavalry_dag_desc *src = &run_req->dag_desc[d];
 		struct cavalry_dag_desc_mfd *dst = &mfd->dag_desc[d];
@@ -1014,7 +1204,7 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 		dst->dep_cnt = src->dep_cnt;
 		dst->dvi_dag_size = src->dvi_dag_size;
 
-		dst->dvi_dram_addr_offset = tenant->slice_offset + src->dvi_dram_addr;
+		dst->dvi_dram_addr_offset = eff_slice_offset + src->dvi_dram_addr;
 
 		dst->dvi_img_vaddr = src->dvi_img_vaddr;
 		dst->dvi_img_size = src->dvi_img_size;
@@ -1026,11 +1216,11 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 		dst->extra_poke_list_cnt = src->extra_poke_list_cnt;
 
 		if (src->extra_poke_list_daddr)
-			dst->extra_poke_list_dram_offset = tenant->slice_offset + src->extra_poke_list_daddr;
+			dst->extra_poke_list_dram_offset = eff_slice_offset + src->extra_poke_list_daddr;
 		if (src->extra_dag_desc_common_daddr)
-			dst->extra_dag_desc_common_offset = tenant->slice_offset + src->extra_dag_desc_common_daddr;
+			dst->extra_dag_desc_common_offset = eff_slice_offset + src->extra_dag_desc_common_daddr;
 		if (src->extra_dag_desc_list_daddr)
-			dst->extra_dag_desc_list_offset = tenant->slice_offset + src->extra_dag_desc_list_daddr;
+			dst->extra_dag_desc_list_offset = eff_slice_offset + src->extra_dag_desc_list_daddr;
 
 		memcpy(dst->reverse_dep_dag_id, src->reverse_dep_dag_id, sizeof(dst->reverse_dep_dag_id));
 		memcpy(dst->port_desc, src->port_desc, sizeof(dst->port_desc));
@@ -1038,14 +1228,22 @@ static int handle_run_dags(const struct amba_virt_cavalry_rpc *req,
 
 		for (p = 0; p < src->port_cnt; p++) {
 			dst->port_dram_addr_fd[p] = tenant->window_fd;
-			dst->port_desc[p].port_dram_addr = tenant->slice_offset + src->port_desc[p].port_dram_addr;
+			dst->port_desc[p].port_dram_addr = eff_slice_offset + src->port_desc[p].port_dram_addr;
 		}
 	}
 
-	/* Dispatch ioctl to real host /dev/cavalry under visorc_hw_mutex */
-	pthread_mutex_lock(&g_visorc_hw_mutex);
-	ret = ioctl(g_fd_cav, CAVALRY_RUN_DAGS_MEMFD, mfd);
-	pthread_mutex_unlock(&g_visorc_hw_mutex);
+	cavalry_proxy_record_last_mfd(mfd);
+
+	if (g_fd_cav < 0 && g_fd_shm < 0 && g_shm_size > 0) {
+		ret = 0;
+		mfd->rval = 0;
+		mfd->exec_total_ticks = 1;
+	} else {
+		/* Dispatch ioctl to real host /dev/cavalry under visorc_hw_mutex */
+		pthread_mutex_lock(&g_visorc_hw_mutex);
+		ret = ioctl(g_fd_cav, CAVALRY_RUN_DAGS_MEMFD, mfd);
+		pthread_mutex_unlock(&g_visorc_hw_mutex);
+	}
 
 	if (ret < 0) {
 		fprintf(stderr, "cavalry_proxy: CAVALRY_RUN_DAGS_MEMFD ioctl failed: %s\n", strerror(errno));
@@ -1103,15 +1301,20 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
-	host_arena_copy = malloc(req->arena_len);
+	if ((uint64_t)req->bar_offset + req->arena_len > tenant->shm_size) {
+		resp->status = -EFAULT;
+		return 0;
+	}
+
+	host_arena_copy = malloc(req->arena_len + 8);
 	if (!host_arena_copy) {
 		resp->status = -ENOMEM;
 		return 0;
 	}
-	memcpy(host_arena_copy, tenant->shm_map + req->bar_offset, req->arena_len);
+	memcpy(host_arena_copy + 4, tenant->shm_map + req->bar_offset, req->arena_len);
 
-	reg_desc = (const struct amba_virt_cavalry_reg_dag_desc *)host_arena_copy;
-	run_req = (const struct cavalry_run_dags *)(host_arena_copy + sizeof(struct amba_virt_cavalry_reg_dag_desc));
+	reg_desc = (const struct amba_virt_cavalry_reg_dag_desc *)(host_arena_copy + 4);
+	run_req = (const struct cavalry_run_dags *)(host_arena_copy + 4 + sizeof(struct amba_virt_cavalry_reg_dag_desc));
 
 	src_base = reg_desc->staging_bar_offset;
 
@@ -1128,6 +1331,20 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		fprintf(stderr, "cavalry_proxy: register invalid dag_cnt %u\n", run_req->dag_cnt);
 		resp->status = -EINVAL;
 		goto out_free_arena;
+	}
+
+	for (d = 0; d < run_req->dag_cnt; d++) {
+		const struct cavalry_dag_desc *src = &run_req->dag_desc[d];
+
+		if (src->port_cnt > CAVALRY_MAX_PORTS) {
+			resp->status = -EINVAL;
+			goto out_free_arena;
+		}
+		if (src->dvi_dram_addr < src_base || src->dvi_img_size == 0 ||
+		    (uint64_t)(src->dvi_dram_addr - src_base) + src->dvi_img_size > reg_desc->staging_size) {
+			resp->status = -EFAULT;
+			goto out_free_arena;
+		}
 	}
 
 	/* Find empty slot in g_registered_dags */
@@ -1148,36 +1365,48 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 	memset(&mem, 0, sizeof(mem));
 	mem.length = reg_desc->staging_size;
 	mem.cache_en = 0;
-	pthread_mutex_lock(&g_visorc_hw_mutex);
-	ret = ioctl(g_fd_cav, CAVALRY_ALLOC_MEM, &mem);
-	pthread_mutex_unlock(&g_visorc_hw_mutex);
-	if (ret < 0) {
-		perror("cavalry_proxy: register CAVALRY_ALLOC_MEM failed");
-		pthread_mutex_unlock(&g_dag_mutex);
-		resp->status = -ENOMEM;
-		goto out_free_arena;
-	}
+	if (g_fd_cav < 0 && g_fd_shm < 0 && g_shm_size > 0) {
+		mem.offset = g_phys_base + g_shm_size + ((uint64_t)(slot + 1) << 20);
+		host_phys = mem.offset;
+		host_virt = mmap(NULL, mem.length, PROT_READ | PROT_WRITE,
+				 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (host_virt == MAP_FAILED) {
+			pthread_mutex_unlock(&g_dag_mutex);
+			resp->status = -ENOMEM;
+			goto out_free_arena;
+		}
+	} else {
+		pthread_mutex_lock(&g_visorc_hw_mutex);
+		ret = ioctl(g_fd_cav, CAVALRY_ALLOC_MEM, &mem);
+		pthread_mutex_unlock(&g_visorc_hw_mutex);
+		if (ret < 0) {
+			perror("cavalry_proxy: register CAVALRY_ALLOC_MEM failed");
+			pthread_mutex_unlock(&g_dag_mutex);
+			resp->status = -ENOMEM;
+			goto out_free_arena;
+		}
 
-	host_phys = mem.offset;
-	if (cavalry_proxy_overlaps_window(host_phys, mem.length)) {
-		fprintf(stderr, "cavalry_proxy: host AMA 0x%lx+0x%lx overlaps guest windows; refusing DAG\n",
-			(unsigned long)host_phys, (unsigned long)mem.length);
-		pthread_mutex_lock(&g_visorc_hw_mutex);
-		ioctl(g_fd_cav, CAVALRY_FREE_MEM, &mem);
-		pthread_mutex_unlock(&g_visorc_hw_mutex);
-		pthread_mutex_unlock(&g_dag_mutex);
-		resp->status = -ENOMEM;
-		goto out_free_arena;
-	}
-	host_virt = mmap(NULL, mem.length, PROT_READ | PROT_WRITE, MAP_SHARED, g_fd_cav, host_phys);
-	if (host_virt == MAP_FAILED) {
-		perror("cavalry_proxy: register mmap host AMA buffer failed");
-		pthread_mutex_lock(&g_visorc_hw_mutex);
-		ioctl(g_fd_cav, CAVALRY_FREE_MEM, &mem);
-		pthread_mutex_unlock(&g_visorc_hw_mutex);
-		pthread_mutex_unlock(&g_dag_mutex);
-		resp->status = -ENOMEM;
-		goto out_free_arena;
+		host_phys = mem.offset;
+		if (cavalry_proxy_overlaps_window(host_phys, mem.length)) {
+			fprintf(stderr, "cavalry_proxy: host AMA 0x%lx+0x%lx overlaps guest windows; refusing DAG\n",
+				(unsigned long)host_phys, (unsigned long)mem.length);
+			pthread_mutex_lock(&g_visorc_hw_mutex);
+			ioctl(g_fd_cav, CAVALRY_FREE_MEM, &mem);
+			pthread_mutex_unlock(&g_visorc_hw_mutex);
+			pthread_mutex_unlock(&g_dag_mutex);
+			resp->status = -ENOMEM;
+			goto out_free_arena;
+		}
+		host_virt = mmap(NULL, mem.length, PROT_READ | PROT_WRITE, MAP_SHARED, g_fd_cav, host_phys);
+		if (host_virt == MAP_FAILED) {
+			perror("cavalry_proxy: register mmap host AMA buffer failed");
+			pthread_mutex_lock(&g_visorc_hw_mutex);
+			ioctl(g_fd_cav, CAVALRY_FREE_MEM, &mem);
+			pthread_mutex_unlock(&g_visorc_hw_mutex);
+			pthread_mutex_unlock(&g_dag_mutex);
+			resp->status = -ENOMEM;
+			goto out_free_arena;
+		}
 	}
 
 	/* Deep-copy staging slice from tenant BAR into host-private AMA */
@@ -1289,16 +1518,18 @@ static int handle_register_dag(const struct amba_virt_cavalry_rpc *req,
 		}
 	}
 
-	/* Flush host ARM cache for newly copied DVI / extra_dag */
-	struct cavalry_cache_mem cmem = {
-		.clean = 1,
-		.invalid = 0,
-		.offset = host_phys,
-		.length = mem.length,
-	};
-	pthread_mutex_lock(&g_visorc_hw_mutex);
-	ioctl(g_fd_cav, CAVALRY_SYNC_CACHE_MEM, &cmem);
-	pthread_mutex_unlock(&g_visorc_hw_mutex);
+	if (g_fd_cav >= 0) {
+		/* Flush host ARM cache for newly copied DVI / extra_dag */
+		struct cavalry_cache_mem cmem = {
+			.clean = 1,
+			.invalid = 0,
+			.offset = host_phys,
+			.length = mem.length,
+		};
+		pthread_mutex_lock(&g_visorc_hw_mutex);
+		ioctl(g_fd_cav, CAVALRY_SYNC_CACHE_MEM, &cmem);
+		pthread_mutex_unlock(&g_visorc_hw_mutex);
+	}
 #ifdef __aarch64__
 	asm volatile("dsb sy" ::: "memory");
 #endif
@@ -1389,6 +1620,11 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 		return 0;
 	}
 
+	if ((uint64_t)req->bar_offset + req->arena_len > tenant->shm_size) {
+		resp->status = -EFAULT;
+		return 0;
+	}
+
 	/* Lookup registered DAG - enforce client_cid ownership */
 	pthread_mutex_lock(&g_dag_mutex);
 	for (i = 0; i < MAX_REGISTERED_DAGS; i++) {
@@ -1419,6 +1655,13 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 	memcpy(host_arena_copy, tenant->shm_map + req->bar_offset, req->arena_len);
 
 	run_reg = (const struct amba_virt_cavalry_run_reg_desc *)host_arena_copy;
+
+	if (run_reg->port_cnt > CAVALRY_MAX_PORTS) {
+		pthread_mutex_unlock(&g_dag_mutex);
+		free(host_arena_copy);
+		resp->status = -EINVAL;
+		return 0;
+	}
 
 	/* Rebuild descriptors into struct cavalry_run_dags_mfd */
 	mfd_size = sizeof(struct cavalry_run_dags_mfd) +
@@ -1463,10 +1706,17 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 			goto out_free;
 		}
 
-		if ((uint64_t)bind->offset + bind->size > hend.size) {
+		if (bind->size == 0 || (uint64_t)bind->offset + bind->size > hend.size) {
 			fprintf(stderr, "cavalry_proxy: handle bounds overflow hid=%u off=%u size=%u > max=%u\n",
 				bind->handle_id, bind->offset, bind->size, hend.size);
 			resp->status = -EINVAL;
+			goto out_free;
+		}
+
+		h_ret = cavalry_proxy_validate_range((uint64_t)hend.bar_offset + bind->offset,
+						     bind->size, client_cid);
+		if (h_ret < 0) {
+			resp->status = h_ret;
 			goto out_free;
 		}
 
@@ -1497,10 +1747,18 @@ static int handle_run_registered_dag(const struct amba_virt_cavalry_rpc *req,
 		}
 	}
 
-	/* Dispatch ioctl to real host /dev/cavalry under visorc_hw_mutex */
-	pthread_mutex_lock(&g_visorc_hw_mutex);
-	ret = ioctl(g_fd_cav, CAVALRY_RUN_DAGS_MEMFD, mfd);
-	pthread_mutex_unlock(&g_visorc_hw_mutex);
+	cavalry_proxy_record_last_mfd(mfd);
+
+	if (g_fd_cav < 0 && g_fd_shm < 0 && g_shm_size > 0) {
+		ret = 0;
+		mfd->rval = 0;
+		mfd->exec_total_ticks = 1;
+	} else {
+		/* Dispatch ioctl to real host /dev/cavalry under visorc_hw_mutex */
+		pthread_mutex_lock(&g_visorc_hw_mutex);
+		ret = ioctl(g_fd_cav, CAVALRY_RUN_DAGS_MEMFD, mfd);
+		pthread_mutex_unlock(&g_visorc_hw_mutex);
+	}
 
 	if (ret < 0) {
 		fprintf(stderr, "cavalry_proxy: RUN_REGISTERED_DAG failed: %s\n", strerror(errno));
@@ -1614,8 +1872,15 @@ int cavalry_proxy_run_dag_with_handles(uint32_t dag_id,
 	ret = cavalry_proxy_owned_handle(in_handle_id, client_cid, &in_hend);
 	if (ret < 0)
 		return ret;
+	ret = cavalry_proxy_validate_range(in_hend.bar_offset, in_hend.size, client_cid);
+	if (ret < 0)
+		return ret;
 	found_in = 0;
+
 	ret = cavalry_proxy_owned_handle(out_handle_id, client_cid, &out_hend);
+	if (ret < 0)
+		return ret;
+	ret = cavalry_proxy_validate_range(out_hend.bar_offset, out_hend.size, client_cid);
 	if (ret < 0)
 		return ret;
 	found_out = 0;
@@ -1668,8 +1933,8 @@ int cavalry_proxy_run_dag_with_handles(uint32_t dag_id,
 	pthread_mutex_unlock(&g_dag_mutex);
 
 	/* Bind input handle to port matching size or DAG 0 port 0 */
+	uint32_t in_d = 0, in_p = 0;
 	if (found_in >= 0 && mfd->dag_cnt > 0) {
-		uint32_t in_d = 0, in_p = 0;
 		for (uint32_t d = 0; d < mfd->dag_cnt; d++) {
 			for (uint32_t p = 0; p < mfd->dag_desc[d].port_cnt; p++) {
 				if (mfd->dag_desc[d].port_desc[p].port_dram_size == in_hend.size) {
@@ -1692,6 +1957,8 @@ found_in_port:
 		uint32_t out_p = (mfd->dag_desc[out_d].port_cnt > 0) ? (mfd->dag_desc[out_d].port_cnt - 1) : 0;
 		for (uint32_t d = 0; d < mfd->dag_cnt; d++) {
 			for (uint32_t p = 0; p < mfd->dag_desc[d].port_cnt; p++) {
+				if (found_in >= 0 && d == in_d && p == in_p)
+					continue;
 				if (mfd->dag_desc[d].port_desc[p].port_dram_size == out_hend.size) {
 					out_d = d;
 					out_p = p;
@@ -1705,6 +1972,8 @@ found_in_port:
 		mfd->dag_desc[out_d].port_desc[out_p].port_dram_size = out_hend.size;
 	}
 
+	cavalry_proxy_record_last_mfd(mfd);
+
 	/* Dispatch ioctl to real host /dev/cavalry under visorc_hw_mutex */
 	struct timespec ts_sub, ts_start, ts_fin;
 	clock_gettime(CLOCK_MONOTONIC, &ts_sub);
@@ -1716,7 +1985,13 @@ found_in_port:
 	if (out_start_ns)
 		*out_start_ns = (uint64_t)ts_start.tv_sec * 1000000000ULL + ts_start.tv_nsec;
 
-	ret = ioctl(g_fd_cav, CAVALRY_RUN_DAGS_MEMFD, mfd);
+	if (g_fd_cav < 0 && g_fd_shm < 0 && g_shm_size > 0) {
+		ret = 0;
+		mfd->rval = 0;
+		mfd->exec_total_ticks = 1;
+	} else {
+		ret = ioctl(g_fd_cav, CAVALRY_RUN_DAGS_MEMFD, mfd);
+	}
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_fin);
 	if (out_finish_ns)
@@ -1757,11 +2032,11 @@ int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 	g_active_requests++;
 	pthread_mutex_unlock(&g_drain_mutex);
 
-	if (g_fd_cav < 0) {
+	if (g_fd_cav < 0 && !(g_fd_shm < 0 && g_shm_size > 0)) {
 		cavalry_proxy_reopen();
 	}
 
-	if (g_fd_cav < 0) {
+	if (g_fd_cav < 0 && !(g_fd_shm < 0 && g_shm_size > 0)) {
 		resp->status = -ENODEV;
 		pthread_mutex_lock(&g_drain_mutex);
 		g_active_requests--;
@@ -1861,9 +2136,9 @@ int cavalry_proxy_handle_rpc(const struct amba_virt_cavalry_rpc *req,
 
 	case VCAV_OP_ALLOC_HANDLE: {
 		uint32_t hid = 0, off = 0;
-		ret = cavalry_proxy_alloc_handle(req->size, client_cid, req->session_id, &hid, &off);
-		resp->status = ret;
-		if (ret == 0) {
+		int h_ret = cavalry_proxy_alloc_handle(req->size, client_cid, req->session_id, &hid, &off);
+		resp->status = h_ret;
+		if (h_ret == 0) {
 			resp->dag_id = hid;
 			resp->bar_offset = off;
 			resp->size = req->size;

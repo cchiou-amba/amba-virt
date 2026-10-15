@@ -97,6 +97,69 @@ static int cav_send_rpc(struct amba_virt_cavalry_rpc *rpc)
     return rpc->status;
 }
 
+static int cav_claim_slice(void)
+{
+    struct amba_virt_slice_claim claim;
+    struct {
+        struct amba_virt_msg msg;
+        struct amba_virt_slice_claim_req req;
+    } req_pkt;
+    struct {
+        struct amba_virt_msg msg;
+        struct amba_virt_slice_claim_resp resp;
+    } resp_pkt;
+    uint32_t resp_len = sizeof(resp_pkt);
+    const uint8_t *base;
+    int ret;
+
+    if (g_cav.bar_virt == 0 || g_cav.bar_size < sizeof(claim))
+        return -ENODEV;
+
+    base = (const uint8_t *)g_cav.bar_virt;
+    memset(&claim, 0, sizeof(claim));
+    memcpy(&claim, base + g_cav.bar_size - sizeof(claim), sizeof(claim));
+    if (claim.magic != AMBA_VIRT_SLICE_CLAIM_MAGIC && g_cav.bar_size >= 4096) {
+        memcpy(&claim, base + g_cav.bar_size - 4096, sizeof(claim));
+    }
+
+    if (claim.magic != AMBA_VIRT_SLICE_CLAIM_MAGIC || claim.nonce == 0) {
+        fprintf(stderr, "amba_cavalry_resmgr: slice claim trailer magic mismatch (0x%08x)\n",
+                claim.magic);
+        return -ENOENT;
+    }
+
+    memset(&req_pkt, 0, sizeof(req_pkt));
+    req_pkt.msg.type = AMBA_VIRT_MSG_SLICE_CLAIM_REQ;
+    req_pkt.msg.seq = ++g_cav.sequence;
+    req_pkt.msg.shm_len = sizeof(req_pkt.req);
+    req_pkt.req.nonce = claim.nonce;
+
+    memset(&resp_pkt, 0, sizeof(resp_pkt));
+    ret = amba_virt_rpc(&req_pkt, sizeof(req_pkt), &resp_pkt, &resp_len, 5000);
+    if (ret < 0) {
+        fprintf(stderr, "amba_cavalry_resmgr: slice claim RPC failed: %d\n", ret);
+        return ret;
+    }
+
+    if (resp_len < sizeof(resp_pkt) ||
+        resp_pkt.msg.type != AMBA_VIRT_MSG_SLICE_CLAIM_RESP)
+        return -EPROTO;
+
+    if (resp_pkt.resp.status != 0) {
+        fprintf(stderr, "amba_cavalry_resmgr: slice claim rejected with status %d\n",
+                resp_pkt.resp.status);
+        return resp_pkt.resp.status;
+    }
+
+    g_cav.bar_size = resp_pkt.resp.usable_size;
+    printf("amba_cavalry_resmgr: claimed slice idx=%u off=0x%llx phys=0x%llx usable=%u\n",
+           resp_pkt.resp.index,
+           (unsigned long long)resp_pkt.resp.offset,
+           (unsigned long long)resp_pkt.resp.phys,
+           resp_pkt.resp.usable_size);
+    return 0;
+}
+
 static int cav_negotiate_bounds(void)
 {
     struct {
@@ -638,7 +701,10 @@ int main(int argc, char **argv)
     g_cav.bar_virt = (uintptr_t)virt;
     g_cav.bar_size = size;
 
-    /* 2. Negotiate Cavalry pool bounds with host amba-virt-server */
+    /* 2. Claim slice ticket and negotiate Cavalry pool bounds with host amba-virt-server */
+    if (cav_claim_slice() < 0) {
+        fprintf(stderr, "amba_cavalry_resmgr: warning: slice claim RPC did not succeed\n");
+    }
     if (cav_negotiate_bounds() < 0) {
         fprintf(stderr, "amba_cavalry_resmgr: warning: using default local pool offsets\n");
     }

@@ -8,8 +8,7 @@ The **`amba-virt-server`** is the privileged host-side virtualization daemon run
 - **VisORC NPU (Cavalry)**: Deep learning neural network acceleration (`/dev/cavalry`).
 - **GDMA Engine**: Hardware-accelerated 2D pitch copy and memory DMA (`/dev/gdma`).
 - **Image Audio Video (IAV)**: Video sensor capture pipelines and DSP encoding (`/dev/iav`).
-- **Planned UART / Peripheral DMA**: UART IRQ relay and host-owned Generic-DMA
-  submission for HVM serial frontends. This path is not delivered yet.
+- **Peripheral DMA Broker (`virt_dma_broker`)**: Mediated Generic-DMA1 (`0xffe0021000`) submission over vsock to `/dev/amba_dma_lease0..3` (`amba_virt_dma.ko`, 64 MiB `dma32@17c00000` pool at `0x17c00000`–`0x1bbfffff`) with host-bound `endpoint_id` (`2` for `UART2`, `3` for `UART3`), while UART MMIO and physical IRQs are passed directly via `vfio-platform`.
 
 ```text
 +-----------------------------------------------------------------------------------------------+
@@ -155,9 +154,9 @@ Rather than provisioning separate PCI apertures for each virtualized peripheral,
 The server architecture distinguishes between two UART modes:
 
 1. **True MMIO Passthrough (Production Standard)**:
-   - UART MMIO and physical IRQs bypass `amba-virt-server` completely.
-   - Assigned directly via `vfio-platform` to the guest Stage-2 page table.
-   - Physical GIC SPI 115 is handled via in-kernel KVM `irqfd` and `resamplefd`,
+   - UART MMIO (`0xffe0018000` for `UART2`, `0xffe0019000` for `UART3`) and physical IRQs bypass `amba-virt-server` completely.
+   - Assigned directly via `vfio-platform` to the guest Stage-2 page table (automatically bound by EVE Pillar `kvm.go` on domain start and restored to `ambarella-uart` on domain stop).
+   - Physical GIC SPI 115 (`UART2`) and SPI 116 (`UART3`) are handled via in-kernel KVM `irqfd` and `resamplefd` (guest vIRQ 50 / GSI 144),
      eliminating userspace doorbell ACK round-trips and eventfd proxy latency.
 
 2. **IVSHMEM-Doorbell Emulated Proxy (Retired & Deleted)**:
@@ -171,10 +170,10 @@ The server architecture distinguishes between two UART modes:
 Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
 
 - **Dual-Window Data Plane**:
-  - **Bulk 1 GiB Window**: High-memory DRAM `ivshmem-plain` window for Cavalry NPU
+  - **Bulk 1 GiB Window**: High-memory DRAM `ivshmem-plain` window (`/dev/amba_virt_shm0..7`) for Cavalry NPU
     and GDMA transfers.
-  - **DMA32 16 MiB Window**: Low-memory 32-bit `ivshmem-plain` window backed by an
-    exclusive 16 MiB slice of the 64 MiB `no-map` pool at `0x6c000000`, satisfying
+  - **DMA32 16 MiB Window**: Low-memory 32-bit `ivshmem-plain` window (`/dev/amba_dma_lease0..3`) backed by an
+    exclusive 16 MiB slice of the 64 MiB `no-map` pool `/reserved-memory/dma32@17c00000` (`0x17c00000`–`0x1bbfffff`), satisfying
     Generic-DMA1 32-bit addressing constraints.
 
 - **Split Authority & Reference Monitor**:
@@ -185,7 +184,7 @@ Peripheral DMA (Generic-DMA1 at `0xffe0021000`) uses a split-authority model:
       (`/dev/amba_dma_lease<N>`).
     - Holds zero address, FIFO, or Generic-DMA1 channel policy.
   - **Dom0 Kernel Reference Monitor (`amba_virt_dma.ko`, Trusted)**:
-    - Exclusively owns Generic-DMA1 execution channels and endpoint policies.
+    - Exclusively owns Generic-DMA1 execution channels and host-bound `endpoint_id` policies (`2` for `UART2`, `3` for `UART3`, fixed at `AMBA_DMA_IOC_LEASE_ALLOC`).
     - Resolves slice offsets to valid 32-bit DMA addresses.
     - Programs and executes hardware DMA descriptors.
     - Enforces synchronous watchdogs, mapping invalidation, and slice sanitization
@@ -1151,9 +1150,9 @@ and `-P <slice>` (the ivshmem slice, 0 to 7, whose guest is the primary IAV clie
   pipeline through the virtual `/dev/iav`. Without the line no guest is primary.
 - A line that is not understood is reported on stderr and ignored, so a typo cannot widen what
   a guest may do.
-- The image ships `primary-slice 0`. The `amba_shm` ticket is reserved at
+- The image ships `primary-slice 0`. The `amba_shm0` ticket is reserved at
   Cavalry index 0 (`/dev/amba_virt_shm0`). Every other ticket (`amba_shm1` to `amba_shm7`) takes the lowest
-  free index at or above 1. All tickets are `shmassign=server` with `shmsize=1G`.
+  free index at or above 1. All tickets are `shmassign=server` with `shmsize=1G` (`camera=on` on `amba_shm0..3`, off on `amba_shm4..7`).
   They are admission tickets and an exclusivity label for the controller's one-instance-per-group
   rule, not separate memory pools; the digit does not select the slice. Guest ids change
   at every VM start, so the designation is by slice. The file is part of the image; changing

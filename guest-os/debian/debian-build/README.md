@@ -36,8 +36,10 @@ After the instance is up, deploy the guest drivers and the demo service:
 | Item | Value |
 |---|---|
 | Edge-app | `debian_13` |
-| Instance | `debian_13.n1-655-pro` |
+| Instance | `debian_13.n1-655-devkit`, `debian_13.n1-655-pro` |
 | Image in ZedControl | `debian-13-trixie-arm64-hvm` |
-| Accelerator memory | the admission ticket `amba_shm:amba_shm4`; the server grants the slices and attaches the camera windows by the ticket's camera policy |
-| SSH | `ssh debian@<node> -p 2522` (alias `n1-655-pro-debian`), password `debian` |
+| Accelerator memory | the admission ticket `amba_shm:amba_shm2` (`/dev/amba_virt_shm2`, slice `2`, `camera=1`); the server grants the slices and attaches the camera windows by the ticket's camera policy |
+| SSH | `ssh debian@<node> -p 2522` (alias `n1-655-devkit-debian` / `n1-655-pro-debian`), password `debian` |
 | Demo | port 8082 |
+
+Full from-zero provisioning recipe for all six guests: [doc/EVE-EdgeApp-Instances.md](../../../doc/EVE-EdgeApp-Instances.md).

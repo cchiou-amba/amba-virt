@@ -22,11 +22,9 @@ However, the hardware peripheral DMA controller (**`dma1` at MMIO `0xffe0021000`
 
 ### Delivery Status
 
-The guest protocol, channel ACL, ivshmem bounds checks, and watchdog framework
-exist. The host broker does not yet submit or abort real physical peripheral
-DMA transfers; those paths remain TODOs in
-`drivers/amba_virt/tools/virt_dma_broker.c`. This document specifies the target
-architecture and must not be read as hardware qualification.
+The guest protocol (`amba_dma.ko`), vsock DMA broker (`drivers/amba_virt/tools/virt_dma_broker.c`),
+and Dom0 kernel reference monitor (`drivers/amba_virt/amba_virt_dma.c`) are implemented and
+hardware-qualified on `n1-655-devkit` and `n1-655-pro` ([UART-Passthrough.md](UART-Passthrough.md)).
 
 UART register access and UART interrupts are strictly decoupled from this DMA data
 path. Under the True MMIO Passthrough architecture, the guest reaches UART registers
@@ -35,13 +33,15 @@ level interrupts via in-kernel GICv2 `irqfd` resampling. Physical Generic-DMA1 r
 (`0xffe0021000`) never enter the guest.
 
 For DMA data transfers, the architecture uses a **Dual-Window model**:
-- **Bulk 1 GiB Window**: High-memory DRAM IVSHMEM window for Cavalry/GDMA bulk buffers.
-- **DMA32 16 MiB Window**: Low-memory 32-bit IVSHMEM window backed by a dedicated 16 MiB
-  slice of the 64 MiB `no-map` pool (`0x6c000000`), required for Generic-DMA1 32-bit descriptors.
-- **Split Authority**: Untrusted guest frontends submit offset-only requests over vsock
-  RPC to the DMA broker in `amba-virt-server`; the trusted Dom0 kernel authority
-  (`amba_virt_dma.ko`) enforces bounds, channel policy, 32-bit DMA masks, single-flight
-  execution, and synchronous timeouts.
+- **Bulk 1 GiB Window**: High-memory DRAM IVSHMEM window (`/dev/amba_virt_shm0..7`) for Cavalry/GDMA bulk buffers.
+- **DMA32 16 MiB Window**: Low-memory 32-bit IVSHMEM window (`/dev/amba_dma_lease0..3`) backed by a dedicated 16 MiB
+  slice of the 64 MiB `no-map` pool `/reserved-memory/dma32@17c00000` (`0x17c00000`–`0x1bbfffff`), required for Generic-DMA1 32-bit descriptors.
+- **Split Authority & Host-Bound Endpoint (`endpoint_id`)**: At lease allocation (`AMBA_DMA_IOC_LEASE_ALLOC` on `/dev/amba_dma_ctl`),
+  EVE Pillar fixes `struct amba_dma_lease_alloc.endpoint_id` from the assigned UART adapter (`2` for `UART2`, `3` for `UART3`).
+  Untrusted guest frontends submit offset-only requests (`endpoint_id = 0` or the lease's bound endpoint) over vsock
+  RPC to the DMA broker in `amba-virt-server`; the trusted Dom0 kernel authority (`amba_virt_dma.ko`) enforces
+  the host-bound `endpoint_id` (rejecting any other endpoint with `-EPERM`), address bounds, 32-bit DMA masks,
+  single-flight execution, and synchronous 500 ms timeouts.
 
 ---
 
@@ -52,32 +52,32 @@ For DMA data transfers, the architecture uses a **Dual-Window model**:
 |                                    GUEST DOMAINS (Multi-Tenant Isolation)                         |
 |                                                                                                   |
 |   +-------------------------------------------------------+  +--------------------------------+   |
-|   | Ubuntu 24.04 LTS HVM (runtime CID, Console 2)          |  | QNX Neutrino RTOS 8.0          |   |
-|   |   - /dev/ttyAMBA0 (serial-getty@ttyAMBA0.service)     |  |   - /dev/ser2 (tinit / ksh)    |   |
-|   |   - amba_uart.ko (UART BAR + vGIC IRQ)                |  |   - QNX UART BAR frontend      |   |
-|   |   - amba_dma.ko (Virtual dmaengine provider)          |  |   - Optional DMA client        |   |
+|   | Ubuntu 24.04 LTS HVM (amba_shm0, UART2, console1)     |  | Alpine Linux 3.20 HVM          |   |
+|   |   - /dev/ttyAMBA0 (serial-getty@ttyAMBA0.service)     |  |   (amba_shm1, UART3, console2) |   |
+|   |   - amba_uart.ko (UART2 BAR + vGIC IRQ 50 / GSI 144)  |  |   - /dev/ttyAMBA0 (/etc/inittab)|   |
+|   |   - amba_dma.ko (endpoint_id = 0 -> lease endpoint 2) |  |   - amba_uart.ko + amba_dma.ko |   |
 |   +---------------------------|---------------------------+  +----------------|---------------+   |
-|                               | (Chan 11 TX / 12 RX)                          | (Chan 13/14)      |
+|                               | (DREQ 13 TX / 14 RX)                          | (DREQ 15/16)      |
 +===============================|===============================================|===================+
                                 |                                               |
-              AF_VSOCK Control  | | ivshmem 1 GiB BAR         AF_VSOCK Control  | | ivshmem 1 GiB BAR
-              (Port 5555)       | | (Zero-Copy Data Plane)    (Port 5555)       | | (Zero-Copy Data)
+              AF_VSOCK Control  | | ivshmem 16 MiB DMA32      AF_VSOCK Control  | | ivshmem 16 MiB DMA32
+              (Port 5555)       | | (/dev/amba_dma_lease0)    (Port 5555)       | | (/dev/amba_dma_lease1)
                                 v v                                             v v
 +===================================================================================================+
 |                                  HOST DOMAIN (EVE OS Dom0)                                        |
 |                                                                                                   |
 |   +-------------------------------------------------------------------------------------------+   |
-|   | amba-virt-server (Virt Daemon & Security ACL Gatekeeper)                                  |   |
+|   | amba-virt-server (virt_dma_broker) + amba_virt_dma.ko (Kernel Reference Monitor)          |   |
 |   |                                                                                           |   |
 |   |   +-----------------------------------------------------------------------------------+   |   |
-|   |   | CID Channel Authorization Matrix (ACL Verification)                               |   |   |
-|   |   |   - Assigned Ubuntu CID: UART1 TX (11) & RX (12).                                 |   |   |
-|   |   |   - Assigned QNX CID:    UART2 TX (13) & RX (14).                                 |   |   |
-|   |   |   - Unauthorized channel access rejected with -EPERM (Security Event EVT-092)     |   |   |
+|   |   | Host-Bound Lease Endpoint Enforcement (AMBA_DMA_IOC_LEASE_ALLOC)                  |   |   |
+|   |   |   - Lease 0 (Ubuntu CID): bound to endpoint_id=2 -> UART2 TX (13) & RX (14).      |   |   |
+|   |   |   - Lease 1 (Alpine CID): bound to endpoint_id=3 -> UART3 TX (15) & RX (16).      |   |   |
+|   |   |   - Cross-endpoint requests rejected with -EPERM before touching DMA channels.    |   |   |
 |   |   +-----------------------------------------------------------------------------------+   |   |
-|   |   | ivshmem 1 GiB Memory Bounds Clamping                                              |   |   |
-|   |   |   - Asserts: 0 <= buf_offset + buf_len <= window_size                             |   |   |
-|   |   |   - Rejects out-of-bounds descriptors with -ERANGE (Security Log EVT-091)         |   |   |
+|   |   | DMA32 16 MiB Slice Bounds Clamping (dma32@17c00000: 0x17c00000..0x1bbfffff)       |   |   |
+|   |   |   - Asserts offset/length within the tenant's 16 MiB DMA32 slice                  |   |   |
+|   |   |   - Rejects out-of-bounds descriptors and sanitizes slice on teardown             |   |   |
 |   |   +-----------------------------------------------------------------------------------+   |   |
 |   |   | 500ms Hardware Watchdog Timer & Channel Recovery Engine                           |   |   |
 |   |   |   - Aborts stalled peripheral DREQ transfers without hanging host CPU             |   |   |
@@ -106,14 +106,14 @@ For DMA data transfers, the architecture uses a **Dual-Window model**:
 |                           |                                           |                           |
 |                           v                                           v                           |
 |   +-----------------------------------+       +-----------------------------------+               |
-|   | UART1 (0xffe0017000, GIC SPI 114) |       | UART2 (0xffe0018000, GIC SPI 115) |               |
+|   | UART2 (0xffe0018000, GIC SPI 115) |       | UART3 (0xffe0019000, GIC SPI 116) |               |
 |   +-----------------|-----------------+       +-----------------|-----------------+               |
 |                     |                                           |                                 |
-|                     v (RS-232 Port 1)                           v (RS-232 Port 2)                 |
+|                     v (CH9344 Port 1)                           v (CH9344 Port 2)                 |
 |   +-------------------------------------------------------------------------------------------+   |
 |   | Onboard CH9344 USB-to-Quad-UART Bridge                                                    |   |
-|   |   - Channel 1: "Console 2" (Ubuntu 24.04 HVM shell, ttyCH9344USB1/9)                      |   |
-|   |   - Channel 2: "Console 3" (QNX Neutrino RTOS 8.0 shell, ttyCH9344USB2/10)                |   |
+|   |   - Port 1: "console1" (Ubuntu 24.04 HVM shell, ttyCH9344USB9 / 6071, USB1 / 6061)        |   |
+|   |   - Port 2: "console2" (Alpine 3.20 HVM shell, ttyCH9344USB10 / 6072, USB2 / 6062)        |   |
 |   +-------------------------------------------------------------------------------------------+   |
 +===================================================================================================+
 ```
@@ -132,22 +132,18 @@ Defined in
 ### 3.2 Protocol Sequence Diagram
 
 ```text
-Guest Driver (amba_uart)     Guest Virt DMA (amba_dma)      Host Server (amba-virt-server)       Physical Hardware (dma1)
+Guest Driver (amba_uart)     Guest Virt DMA (amba_dma)      Host Broker + amba_virt_dma.ko       Physical Hardware (dma1)
           │                            │                                  │                                  │
           │── dma_request_channel() ──>│                                  │                                  │
-          │                            │── OP_REQUEST_CHAN (chan 11) ────>│                                  │
-          │                            │                                  │── Verify CID ACL (Pass)          │
-          │                            │<── RESP (status=0, handle=1) ────│                                  │
-          │<── struct dma_chan ────────│                                  │                                  │
-          │                            │                                  │                                  │
           │── dmaengine_submit(desc) ─>│                                  │                                  │
           │── dma_async_issue_pending()│                                  │                                  │
-          │                            │── OP_SUBMIT_BURST (buf, len) ───>│                                  │
-          │                            │                                  │── Verify ivshmem bounds (Pass)   │
+          │                            │── SUBMIT (endpoint_id=0, off) ──>│                                  │
+          │                            │                                  │── Verify CID, epoch & endpoint   │
+          │                            │                                  │── Verify 16 MiB DMA32 bounds     │
           │                            │                                  │── dmaengine_submit() ───────────>│
           │                            │                                  │                                  │── DMA Burst Execution
           │                            │                                  │<── Physical IRQ (SPI 131) ───────│
-          │                            │<── MSG_DMA_COMPLETE (residue=0) ─│                                  │
+          │                            │<── DMA_RESP (status=0, xfer) ────│                                  │
           │<── desc->callback() ───────│                                  │                                  │
 ```
 
@@ -157,8 +153,8 @@ Guest Driver (amba_uart)     Guest Virt DMA (amba_dma)      Host Server (amba-vi
 
 | Security Vector | Threat / Attack Description | Mitigation & Enforcement Mechanism |
 | :--- | :--- | :--- |
-| **Channel Hijacking** | Rogue guest attempts to allocate or inject commands into another VM's UART DMA channel. | `amba-virt-server` checks the kernel-authenticated runtime CID against current adapter ownership; unauthorized requests are rejected with `-EPERM` (`EVT-092`). |
-| **Memory Boundary Escape** | Guest passes DMA buffer addresses pointing outside its assigned partition into host DRAM. | Strict clamping: `0 <= offset + len <= window_size` (1 GiB ivshmem extent). Out-of-bounds requests rejected with `-ERANGE` (`EVT-091`). |
+| **Channel Hijacking** | Rogue guest attempts to allocate or inject commands into another VM's UART DMA channel. | Pillar fixes `endpoint_id` at `AMBA_DMA_IOC_LEASE_ALLOC`; `amba_virt_dma.ko` rejects any request whose `endpoint_id` is neither `0` nor the lease's bound endpoint with `-EPERM`. |
+| **Memory Boundary Escape** | Guest passes DMA buffer addresses pointing outside its assigned partition into host DRAM. | Strict clamping within the tenant's 16 MiB DMA32 slice (`dma32@17c00000`, above the 4 KiB bootstrap header). Out-of-bounds or misaligned requests are rejected. |
 | **RPC DoS Flooding** | Compromised guest floods vsock with rapid requests to exhaust host CPU. | Per-CID token bucket rate limiting drops excessive requests without impacting legitimate owner VM. |
 | **Hardware DREQ Stall** | Faulty peripheral fails to assert hardware DREQ lines, stalling the DMA controller. | 500 ms watchdog timer aborts stalled transfer, resets channel, and returns `-ETIMEDOUT`. |
 | **Malformed Payloads** | Fuzzing packets with invalid lengths, corrupted opcodes, or null pointers. | Strict parameter sanitization and bounds checking discard malformed frames cleanly with zero daemon crashes. |

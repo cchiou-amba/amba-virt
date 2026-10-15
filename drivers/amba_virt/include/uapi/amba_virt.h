@@ -563,9 +563,9 @@ struct amba_virt_dma_complete {
 	__s32 status;		/* 0 = success, -ETIMEDOUT = watchdog */
 };
 
-/* ---- Mediated Low-DMA32 and Lease-Control UAPI ---- */
+/* ---- Mediated Low-DMA32 and Lease-Control UAPI (v2: host-bound endpoint_id) ---- */
 
-#define AMBA_VIRT_DMA32_POOL_BASE       0x6c000000ULL
+#define AMBA_VIRT_DMA32_POOL_BASE       0x17c00000ULL
 #define AMBA_VIRT_DMA32_POOL_SIZE       0x04000000ULL /* 64 MiB */
 #define AMBA_VIRT_DMA32_NUM_SLICES      4
 #define AMBA_VIRT_DMA32_SLICE_SIZE      0x01000000ULL /* 16 MiB */
@@ -579,9 +579,9 @@ struct amba_virt_dma_complete {
 #define AMBA_DMA_LEASE_QUARANTINED      5
 
 /* Endpoint IDs (controller-neutral reference monitor policies) */
-#define AMBA_DMA_ENDPOINT_NONE          0
-#define AMBA_DMA_ENDPOINT_UART2         1
-#define AMBA_DMA_ENDPOINT_UART3         2u
+#define AMBA_DMA_ENDPOINT_NONE          0u
+#define AMBA_DMA_ENDPOINT_UART2         2u
+#define AMBA_DMA_ENDPOINT_UART3         3u
 
 #define AMBA_DMA_BOOTSTRAP_MAGIC        0x414d4253u /* 'AMBS' */
 #define AMBA_DMA_BOOTSTRAP_VERSION      1u
@@ -626,14 +626,19 @@ struct amba_virt_dma_response {
 	__u32 reserved;
 };
 
-/* Pillar lease allocation */
+/*
+ * Pillar lease allocation (UAPI v2).
+ * endpoint_id occupies the 4-byte padding slot between lease_id and capability,
+ * preserving the 48-byte struct size and AMBA_DMA_IOC_LEASE_ALLOC (0xc0304131).
+ */
 struct amba_dma_lease_alloc {
 	__u8  vm_uuid[16];
 	__u32 boot_generation;
 	__u32 vsock_cid;
-	__u32 lease_id;   /* Output: 0..3 */
-	__u64 capability; /* Output: 64-bit secret capability token */
-	__u64 epoch;      /* Output: initial 64-bit epoch */
+	__u32 lease_id;    /* Output: 0..3 */
+	__u32 endpoint_id; /* Input/Output: AMBA_DMA_ENDPOINT_* bound by host */
+	__u64 capability;  /* Output: 64-bit secret capability token */
+	__u64 epoch;       /* Output: initial 64-bit epoch */
 };
 
 /* Pillar lease control */

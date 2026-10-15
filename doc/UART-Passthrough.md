@@ -10,21 +10,19 @@
 
 ## 1. Overview & Architecture
 
-This guide describes the hardware-qualified UART virtualization architecture and operational runbook for Ambarella CV3-AD655 edge platforms running EVE OS with multi-tenant guest virtual machines (Ubuntu 24.04 LTS and BlackBerry QNX Neutrino 8.0).
+This guide describes the hardware-qualified UART virtualization architecture and operational runbook for Ambarella CV3-AD655 edge platforms (`n1-655-devkit` and `n1-655-pro`) running EVE-OS with multi-tenant HVM guest virtual machines: **Ubuntu 24.04 LTS** (`ubuntu_24_04`, `amba_shm0`, **UART2** on `console1`) and **Alpine Linux 3.20** (`alpine_3_20`, `amba_shm1`, **UART3** on `console2`). Under the pinned `0..5` board topology ([EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md)), **BlackBerry QNX Neutrino 8.0** (`qnx_8_0`, `amba_shm4`) is provisioned with `rng-mmio` and **no UART passthrough**.
 
 The architecture enforces true zero-copy hardware virtualization:
-1. **True MMIO Passthrough with Split DMA (Production Standard)**:
-   Direct guest Stage-2 register access via `vfio-platform` for narrow non-bus-master
-   controllers (e.g., UART2 at `0xffe0018000`, 4 KiB, GIC SPI 115) paired with in-kernel
-   GICv2 level IRQ resampling (`x-irqfd` + `resamplefd`), dual IVSHMEM windows (1 GiB bulk +
-   16 MiB DMA32 low carveout), and Dom0-enforced split peripheral DMA authority.
-2. **ACPI Dynamic Enumeration (`AMBA0001:00`)**:
-   QEMU dynamically emits `Device (URTx)` under `\_SB` in the DSDT AML with `_HID ("AMBA0001")`,
-   `_UID`, `_CRS` (`Memory32Fixed` + `Interrupt(144)`), and `_DSD` (`reg-io-width = 4`, `clock-frequency = 24000000`).
-   The guest driver binds automatically via standard `.acpi_match_table` without manual fallbacks or hardcoded addresses.
-3. **Single Control Plane Invariant**:
-   The legacy userspace proxy (`amba_virt_uart_server`) has been permanently retired and deleted.
-   Rollback from any future regression is strictly image-level and package-level.
+1. **In-Tree VFIO & Automatic Host Binding (`vfio-platform`)**:
+   - The EVE Dom0 kernel (`eve-kernel/arch/arm64/configs/eve_defconfig`) builds VFIO in-tree with `CONFIG_VFIO=y`, `CONFIG_VFIO_PLATFORM=y`, `CONFIG_VFIO_VIRQFD=y`, and `CONFIG_VFIO_IOMMU_TYPE1=y`. (`CONFIG_VFIO_NOIOMMU` is not enabled; platform devices without a hardware IOMMU group use the in-tree `VFIO_EMULATED_IOMMU` path via `vfio_register_emulated_iommu_dev` from commit `eb5e281e5e4d`).
+   - EVE Pillar (`eve/pkg/pillar/hypervisor/kvm.go` and `hypervisor.go`) automatically unbinds the host `ambarella-uart` driver, sets `driver_override` to `vfio-platform`, and binds the physical UART device (`ffe0018000.uart` for `UART2`, `ffe0019000.uart` for `UART3`) before QEMU domain start. When the domain stops—or if domain creation fails (`BootFailed`)—Pillar clears `driver_override`, rebinds `ambarella-uart`, and releases the adapter reservation.
+2. **True MMIO Passthrough with Split Host-Bound DMA**:
+   - Direct guest Stage-2 register access via `vfio-platform` (`0xffe0018000` for UART2 / GIC SPI 115, `0xffe0019000` for UART3 / GIC SPI 116; 4 KiB aperture mapped at guest GPA `0x0c000000`) paired with in-kernel GICv2 level IRQ resampling (`x-irqfd` + `resamplefd`, guest vIRQ 50 / GSI 144).
+   - Dual `ivshmem-plain` windows: a 1 GiB shared high-DRAM slice (`/dev/amba_virt_shm0..7`) and a 16 MiB low-DMA32 lease window (`/dev/amba_dma_lease0..3`) carved from `/reserved-memory/dma32@17c00000` (`0x17c00000`–`0x1bbfffff`, 64 MiB).
+   - **Host-Bound DMA Endpoint**: At lease allocation (`AMBA_DMA_IOC_LEASE_ALLOC` on `/dev/amba_dma_ctl`), Pillar fixes `struct amba_dma_lease_alloc.endpoint_id` from the assigned UART adapter (`2` for `UART2`, `3` for `UART3`). Guest `amba_uart.ko` submits `endpoint_id = 0` ("my lease's bound endpoint"); `amba_virt_dma.ko` rejects any request naming another UART's endpoint with `-EPERM`.
+3. **ACPI Dynamic Enumeration (`AMBA0001:00`)**:
+   - QEMU dynamically emits `Device (URTx)` under `\_SB` in the DSDT AML with `_HID ("AMBA0001")`, `_UID`, `_CRS` (`Memory32Fixed` at `0x0c000000` + `Interrupt(144)`), and `_DSD` (`reg-io-width = 4`, `clock-frequency = 24000000`).
+   - Both Ubuntu 24.04 (`6.8.0-101-generic`) and Alpine 3.20 (`6.6.142-0-virt`) match `AMBA0001` via `.acpi_match_table` with zero hardcoded physical addresses.
 
 ```text
 ZEDEDA Cloud
@@ -32,27 +30,28 @@ ZEDEDA Cloud
   empty phyaddrs + cbattr {"uart": "N"} + exclusive assigngrp
           |
           v
-EVE Pillar / QEMU Lifecycle
-  vfio-platform:    True MMIO 4 KiB Stage-2 aperture + irqfd/resamplefd (SPI 115)
-  virt-acpi-build:  Dynamic DSDT AML generator emits Device (URTx) with AMBA0001
-  ivshmem-plain #1: 1 GiB shared high DRAM window (amba_shm bulk)
-  ivshmem-plain #2: 16 MiB low DMA32 window (amba_dma32, carveout 0x6c000000)
+EVE Pillar (kvm.go / hypervisor.go) & QEMU Lifecycle
+  Host Bind Path:   Unbinds ambarella-uart -> binds vfio-platform on start; restores on stop
+  DMA Lease Alloc:  AMBA_DMA_IOC_LEASE_ALLOC binds lease endpoint_id (2=UART2, 3=UART3)
+  vfio-platform:    True MMIO 4 KiB Stage-2 aperture + irqfd/resamplefd (SPI 115 / SPI 116)
+  virt-acpi-build:  Dynamic DSDT AML generator emits Device (URTx) with AMBA0001 (GSI 144 / vIRQ 50)
+  ivshmem-plain #1: 1 GiB shared high DRAM window (/dev/amba_virt_shm0..7, amba_shm0..7)
+  ivshmem-plain #2: 16 MiB low DMA32 window (/dev/amba_dma_lease0..3, dma32@17c00000)
           |
           +-----------------------------------+-----------------------------------+
           |                                   |                                   |
           v                                   v                                   v
-Ubuntu 24.04 HVM                    QNX Neutrino 8.0 HVM                Dom0 Host Reference Monitor
-  amba_uart (platform driver)         devc-seramb (platform/io-char)      amba_virt_dma.ko
-  ACPI match table (AMBA0001)         direct MMIO access (0x0c000000)     exclusive Generic-DMA1 authority
-  direct readl/writel on UART2        Level IRQ 144 + amba-virt-resmgr    enforces bounds, masks, timeouts
-  amba_dma (mediated Generic-DMA1)    Generic-DMA1 acceleration           leases 16 MiB slices
-  /dev/ttyAMBA0                       /dev/ser3                                   |
+Ubuntu 24.04 HVM (amba_shm0)        Alpine 3.20 HVM (amba_shm1)         Dom0 Host Reference Monitor
+  amba_uart.ko + amba_dma.ko          amba_uart.ko + amba_dma.ko          amba_virt_dma.ko
+  ACPI match table (AMBA0001)         ACPI match table (AMBA0001)         exclusive Generic-DMA1 authority
+  direct readl/writel on UART2        direct readl/writel on UART3        enforces host-bound endpoint_id
+  Level vIRQ 50 (GSI 144)             Level vIRQ 50 (GSI 144)             leases 16 MiB slices from 0x17c00000
+  systemd serial-getty@ttyAMBA0       OpenRC /etc/inittab getty ttyAMBA0          |
           |                                   |                                   |
           v                                   v                                   v
-CH9344 Port 1 (Console 2)           CH9344 Port 2 (Console 3)           CH9344 Port 0 (Dom0 Console)
-ttyCH9344USB9 (Devkit)              ttyCH9344USB10 (Devkit)             ttyCH9344USB8 (Devkit)
-ttyCH9344USB1 (Pro)                 ttyCH9344USB2 (Pro)                 ttyCH9344USB0 (Pro)
-Telnet Port 6071                    Telnet Port 6072                    Telnet Port 6070
+CH9344 Port 1 (console1)            CH9344 Port 2 (console2)            CH9344 Port 0 (console0)
+ttyCH9344USB9 (Devkit, Port 6071)   ttyCH9344USB10 (Devkit, Port 6072)  ttyCH9344USB8 (Devkit, Port 6070)
+ttyCH9344USB1 (Pro, Port 6061)      ttyCH9344USB2 (Pro, Port 6062)      ttyCH9344USB0 (Pro, Port 6060)
 ```
 
 ---
@@ -63,10 +62,10 @@ Cross-referenced against the CV3-AD655 Hardware Programming Reference Manual, Da
 
 | Controller | Register Base | Physical IRQ | DMA Reqs | PCB Hardware Routing | Assigned Tenant / Endpoint |
 |---|---|---|---|---|---|
-| **UART0** (`uart0_apb`) | `0xffe4000000` | GIC SPI 192 | — | Carrier Sheet 8 $\rightarrow$ CH9344 Port 0 | **Dom0 / EVE / U-Boot Console** (`ttyCH9344USB8` / Port 6070) |
-| **UART1** (`uart1_ahb`) | `0xffe0017000` | GIC SPI 114 | TX 11, RX 12 | Carrier Sheet 17 $\rightarrow$ AzureWave AW-XM612-SUR Bluetooth (U31) | **Bluetooth 5.4 HCI Subsystem** (Internal) |
-| **UART2** (`uart2_ahb`) | `0xffe0018000` | GIC SPI 115 | TX 13, RX 14 | Carrier Sheet 8 $\rightarrow$ CH9344 Port 1 | **Ubuntu 24.04 HVM** (Console 2 / `ttyCH9344USB9` / Port 6071) |
-| **UART3** (`uart3_ahb`) | `0xffe0019000` | GIC SPI 116 | TX 15, RX 16 | Carrier Sheet 8 $\rightarrow$ CH9344 Port 2 (SMIO 5..8 mux) | **QNX 8.0 HVM** (Console 3 / `ttyCH9344USB10` / Port 6072) |
+| **UART0** (`uart0_apb`) | `0xffe4000000` | GIC SPI 192 | — | Carrier Sheet 8 $\rightarrow$ CH9344 Port 0 | **Dom0 / EVE / U-Boot Console** (`console0`: `6070` Devkit / `6060` Pro) |
+| **UART1** (`uart1_ahb`) | `0xffe0017000` | GIC SPI 114 | TX 11, RX 12 | Carrier Sheet 17 $\rightarrow$ AzureWave AW-XM612-SUR Bluetooth (U31) | **Bluetooth 5.4 HCI Subsystem** (Dom0 `ambarella-uart`) |
+| **UART2** (`uart2_ahb`) | `0xffe0018000` | GIC SPI 115 (guest vIRQ 50 / GSI 144) | TX 13, RX 14 | Carrier Sheet 8 $\rightarrow$ CH9344 Port 1 | **Ubuntu 24.04 HVM** (`ubuntu_24_04.<node>`, `amba_shm0`, `console1`: `6071` Devkit / `6061` Pro) |
+| **UART3** (`uart3_ahb`) | `0xffe0019000` | GIC SPI 116 (guest vIRQ 50 / GSI 144) | TX 15, RX 16 | Carrier Sheet 8 $\rightarrow$ CH9344 Port 2 (SMIO 5..8 mux) | **Alpine 3.20 HVM** (`alpine_3_20.<node>`, `amba_shm1`, `console2`: `6072` Devkit / `6062` Pro) |
 | **UART4** (`uart4_ahb`) | `0xffe001a000` | GIC SPI 117 | TX 17, RX 18 | Pin conflicts with Wi-Fi Power Enable & Ethernet 0 | *Reserved / Do Not Assign* |
 | **Generic-DMA1** | `0xffe0021000` | GIC SPI 131 | Multi-channel | Monolithic bus master | **Dom0 Only** (Mediated via `amba_virt_dma.ko` & vsock broker) |
 
@@ -75,104 +74,71 @@ Cross-referenced against the CV3-AD655 Hardware Programming Reference Manual, Da
 ## 3. Host Low-DMA32 Reference Monitor Subsystem (`amba_virt_dma`)
 
 ### 3.1 Kernel Driver (`drivers/amba_virt/amba_virt_dma.c`)
-- Slices the 64 MiB DT carveout (`0x6c000000`) into four isolated 16 MiB slices.
+- Loaded automatically at boot by `amba-virt-server` via `/etc/amba-virt/modules.conf` ([EVE-BaseOS-AmbarellaDrivers.md](EVE-BaseOS-AmbarellaDrivers.md)).
+- Slices the 64 MiB DT carveout `/reserved-memory/dma32@17c00000` (`0x17c00000`–`0x1bbfffff`, DTS label `dma32_reserved`, `compatible = "ambarella,dma32-pool"`, `no-map`) into four isolated 16 MiB slices (`0x17c00000`, `0x18c00000`, `0x19c00000`, `0x1ac00000`).
 - Exposes control device `/dev/amba_dma_ctl` and per-slice character devices `/dev/amba_dma_lease0`..`/dev/amba_dma_lease3`.
-- Enforces an immutable reference monitor: validates capability keys, generation epochs, transfer lengths, and address bounds.
-- Restricts hardware peripheral DMA channel programming to trusted kernel code, completely preventing tenant authority over physical bus masters.
-- Enforces a 500 ms hardware watchdog timer and guarantees teardown zero-fill memory sanitization upon release or tenant crash.
+- **Host-Bound Endpoint Enforcement**: `struct amba_dma_lease_alloc` carries `endpoint_id` (`2` for `UART2`, `3` for `UART3`), set by Pillar from the adapter's UART number when allocating the lease. A guest DMA request must specify `endpoint_id == 0` (use the lease's bound endpoint) or equal the lease's `endpoint_id`; any other value is rejected with `-EPERM` before touching a DMA channel. A second lease requesting an already-bound UART endpoint is rejected at allocation time with `-EBUSY`.
+- Restricts hardware peripheral DMA channel programming (`dma1chan0` `dreq=13` for UART2 TX, `dma1chan2` `dreq=15` for UART3 TX) to trusted kernel code, preventing tenant authority over physical bus masters.
+- Enforces a 500 ms hardware watchdog timer and guarantees teardown zero-fill memory sanitization (`memset_io(0)`) upon lease release or tenant crash.
 
 ### 3.2 DMA Broker in `amba-virt-server` (`drivers/amba_virt/tools/virt_dma_broker.c`)
 - Runs inside `amba-virt-server` in EVE Dom0 and holds no address, FIFO, or channel policy of its own.
-- Forwards guest DMA requests over vsock to `/dev/amba_dma_leaseN` with token-bucket rate limiting (2,000 ops/sec, 50 MiB/sec).
-- Implements controller-neutral endpoint forwarding, maintaining full architectural decoupling between peripheral drivers and DMA controllers.
+- Authenticates the guest caller by `AF_VSOCK` peer CID and forwards guest DMA requests to the matching `/dev/amba_dma_lease<N>` with token-bucket rate limiting (2,000 ops/sec, 50 MiB/sec).
 
 ---
 
-## 4. Linux Guest Driver (`amba_uart.ko`)
+## 4. Linux Guest Driver (`amba_uart.ko` & `amba_dma.ko`)
 
-- **Location:** [`guest-os/linux/amba-uart/`](../guest-os/linux/amba-uart/)
+- **Locations:** [`guest-os/linux/amba-uart/`](../guest-os/linux/amba-uart/) and [`guest-os/linux/amba-dma/`](../guest-os/linux/amba-dma/)
+- **Supported Linux Guests:**
+  - **Ubuntu 24.04 LTS** (`6.8.0-101-generic`, slice 0 / `amba_shm0`, `UART2` $\rightarrow$ `console1`): started via systemd `serial-getty@ttyAMBA0.service`.
+  - **Alpine Linux 3.20** (`6.6.142-0-virt`, slice 1 / `amba_shm1`, `UART3` $\rightarrow$ `console2`): modules loaded via `/etc/modules` (`amba_virt`, `amba_dma`, `amba_uart`) and getty spawned via `/etc/inittab` (`ttyAMBA0::respawn:/sbin/getty -L 115200 ttyAMBA0 vt100`).
 - **ACPI Matching:** Declares `amba_uart_acpi_match[]` for `AMBA0001` and hooks `.acpi_match_table` into `amba_uart_platform_driver`.
-- **Resource Parsing:** Resolves MMIO via `platform_get_resource()` and IRQ via `platform_get_irq()`. Reads properties via `device_property_read_u32()`:
+- **Resource Parsing:** Resolves MMIO via `platform_get_resource()` (`0x0c000000`) and IRQ via `platform_get_irq()` (guest vIRQ `50`, mapped to GIC `144 Level`). Reads properties via `device_property_read_u32()`:
   - `reg-io-width`: Enforces 4 (rejects non-4).
   - `clock-frequency`: Defaults to 24,000,000 Hz.
-- **Zero Hardcoded GPA/GSI**: Zero literal addresses or manual platform-device registration fallbacks exist in the driver.
+- **Host-Bound DMA Endpoint (`endpoint_id = 0`):** `amba_uart.c` does not hardcode a UART index; it submits DMA transfers with `endpoint_id = 0`, allowing the same driver binary to drive `UART2` on Ubuntu and `UART3` on Alpine as determined by the host lease.
 - **Device Node:** Registers `/dev/ttyAMBA0`.
 - **Sysfs Control Interfaces (`/sys/bus/platform/drivers/amba_uart/`):**
-  - `use_dma` (`RW`): `1` enables Generic-DMA1 hardware offloading; `0` forces CPU PIO.
-  - `force_poll` (`RW`): `1` forces 1 ms `hrtimer` polling mode; `0` enables hardware Level IRQ (vIRQ 50 / GSI 144).
+  - `use_dma` (`RW`, default `1`): `1` enables Generic-DMA1 hardware offloading; `0` forces CPU PIO.
+  - `force_poll` (`RW`, default `0`): `1` forces 1 ms `hrtimer` polling mode; `0` enables hardware Level IRQ (vIRQ 50 / GSI 144).
   - `dma_rx` (`RW`): Writes buffer size to arm continuous RX DMA test stream.
   - `clk_hz` (`RO`): Reports UART peripheral input clock (24 MHz).
 - **Diagnostics Node (`/proc/tty/driver/amba_uart`):**
-  - Reports port state, DMA activity, active IRQ, TX/RX byte counts, and hardware error counters (`oe`: overrun, `pe`: parity, `fe`: framing, `brk`: break).
-- **System Service:** `serial-getty@ttyAMBA0.service` provides an interactive login prompt on Console 2 (Port 6071 / `ttyCH9344USB9`).
+  - Reports port state, `dma:active`, active IRQ (`irq:50`), TX/RX byte counts, and hardware error counters (`fe`, `oe`, `pe`, `brk`).
 
 ---
 
-## 5. QNX Neutrino 8.0 Guest Subsystem
+## 5. QNX Neutrino 8.0 Guest Subsystem (Reference Only — No UART Assigned)
 
-### 5.1 Stage-2 Hardware Virtualization Mapping
-Under QEMU `virt` platform-bus virtualization with host `vfio-platform` device assignment:
-- **Host Physical Device:** `ffe0019000.uart` (UART3, 4 KiB, GIC SPI 116 / INTID 148, SMIO 5..8 pinmux).
-- **Guest Stage-2 GPA Aperture:** `0x0c000000` (4 KiB page-aligned MMIO aperture assigned via `vfio-platform` sysbus passthrough).
-- **Interrupt Routing (vGIC Status):** Physical GIC SPI 116 is routed via host `vfio-platform` eventfd and mapped to guest Level IRQ 144. `devc-seramb` attaches to IRQ 144 via `InterruptAttachEvent()`.
-- **DMA Acceleration:** Mediated Generic-DMA1 acceleration via `amba-virt-resmgr` (`/dev/amba_virt`) backed by the 16 MiB low-DMA32 lease window (`dma32-lease`).
-- **Physical Serial Wire:** Routes to CH9344 Port 2 (`ttyCH9344USB10` on Devkit / `ttyCH9344USB2` on Pro), exposed via terminal server bridge **Port `6072`**.
+Under the pinned `0..5` board configuration ([EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md) and [QNX-Guest-VM.md](QNX-Guest-VM.md)), `qnx_8_0.<node>` runs on slice `4` (`amba_shm4`) with `rng-mmio` and **no UART passthrough** (`UART2` belongs to Ubuntu and `UART3` belongs to Alpine).
 
-### 5.2 Serial Driver (`devc-seramb`)
-- **Location:** [`guest-os/qnx/amba-uart/devc-seramb.c`](../guest-os/qnx/amba-uart/devc-seramb.c)
-- **Framework:** Native QNX `io-char` character device library (`libio-char.a`, `<sys/io-char.h>`).
-- **MMIO Aperture Discovery:** Maps Stage-2 GPA `0x0c000000` via `mmap_device_memory(0x0c000000, 0x1000, PROT_READ|PROT_WRITE|PROT_NOCACHE)`.
-- **Interrupt & DMA Engine:** Operates in hardware interrupt-driven mode on IRQ 144 via `InterruptAttachEvent()` with dedicated interrupt thread. When DMA acceleration is enabled (default), bulk transfers (> 64 bytes) are offloaded to host Generic-DMA1 via `amba-virt-resmgr` (`/dev/amba_virt`), with seamless fallback to PIO for small interactive keystrokes.
-- **Resource Manager Registration (`io-char`):**
-  - Sets `ttyctrl.perm = 0666;` prior to `ttc(TTC_INIT_PROC)` for full user permissions.
-  - Registers device name and unit via `ttc(TTC_INIT_TTYNAME, &dev->tty, NUMBER_DEV_FROM_USER | SET_NAME_NUMBER(unit))` for `/dev/ser3`.
-  - **Negative Constraint:** Calling `ttc(TTC_INIT_EDIT)` is strictly avoided—in QNX 8.0 `io-char`, `TTC_INIT_EDIT` treats the argument as an edit-options buffer, overwriting `iofunc_attr_t` flags at offset `0x20` and triggering `EINVAL` on `stat()`/`open()`.
-- **CLI Options & Operational Modes:**
-  - `-p <device>`: Target device node name (default: `/dev/ser3`).
-  - `-a <phys_addr>`: Stage-2 MMIO physical aperture base (default: `0x0c000000`).
-  - `-i <irq>`: Hardware IRQ vector (`144` for Level IRQ, `0` for 1 ms polling timer mode).
-  - `--no-dma`: Disables Generic-DMA1 acceleration, enforcing PIO character I/O.
-  - `-b <baud>`: Baud rate (default: `115200`).
-  - `-c <clk>`: Input clock frequency in Hz (default: `24000000`).
-  - `-v`: Enable verbose debug logging.
-  - **Operational Quadrants Supported:**
-    - **Mode Q-1 (Accelerated DMA):** `devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144`
-    - **Mode Q-2 (Interrupt PIO):** `devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144 --no-dma`
-    - **Mode Q-3 (Polling DMA):** `devc-seramb -p /dev/ser3 -a 0x0c000000 -i 0`
-    - **Mode Q-4 (Polling PIO):** `devc-seramb -p /dev/ser3 -a 0x0c000000 -i 0 --no-dma`
-
-### 5.3 Getty Supervisor (`qnx-getty`)
-- **Location:** [`guest-os/qnx/amba-uart/qnx-getty.c`](../guest-os/qnx/amba-uart/qnx-getty.c)
-- **Single Supervisor Ownership:** Strictly replaces competing while-true shell scripts and default `/system/bin/login` (which deadlocks in raw non-echoing mode).
-- **Line Discipline:** Configures POSIX termios flags: `CS8 | CREAD | CLOCAL`, `ICRNL | IXON`, `OPOST | ONLCR`, `ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN` at 115,200 baud.
-- **Session Leadership & Controlling TTY:** Calls `setsid()` to establish a clean session leader and acquires `/dev/ser3` as the controlling terminal (`/dev/tty`), ensuring full POSIX job control.
-- **Welcome Banner & Auto-Respawn:** Emits a welcome banner and spawns `/proc/boot/sh -l`. Monitors child exit via `waitpid()` and immediately auto-respawns a fresh session upon logout.
+The QNX serial driver (`guest-os/qnx/amba-uart/devc-seramb.c`) and getty supervisor (`guest-os/qnx/amba-uart/qnx-getty.c`) remain in the repository as reference components compatible with the updated `amba_virt.h` DMA lease UAPI.
 
 ---
 
 ## 6. Build & Deployment Automation
 
-### 6.1 Building All Guest OS Artifacts
-To cross-compile all kernel modules, drivers, resource managers, and daemons:
+### 6.1 Building Guest OS Artifacts
 ```bash
 # Build Ubuntu, Alpine, and QNX guest packages:
-./guest-os/build_guest.sh --distro=all
+make guest-all
 
-# Or build specifically for QNX:
-./guest-os/build_guest.sh --distro=qnx
+# Rebuild the bootable Alpine 3.20 QCOW2 image with amba_uart.ko, amba_dma.ko, and /etc/inittab getty:
+./guest-os/build_guest.sh --distro=alpine --alpine-image
 ```
-Output artifacts are staged under `build/guest/ubuntu/` and `build/guest/qnx/`.
+Output artifacts are staged under `build/guest/ubuntu/`, `build/guest/alpine/`, and `build/guest/qnx/`.
 
 ### 6.2 Deploying to Live Target Boards
 
-#### Deploy to Ubuntu HVM (`n1-655-devkit-ubuntu`):
-```bash
-./guest-os/deploy_guest.sh n1-655-devkit-ubuntu --reload --enable-serial
-```
+Full from-zero instance provisioning is documented in [EVE-EdgeApp-Instances.md](EVE-EdgeApp-Instances.md). To update guest drivers over SSH on a running board:
 
-#### Deploy to QNX HVM (`n1-655-devkit-qnx`):
 ```bash
-./guest-os/deploy_guest.sh n1-655-devkit-qnx --reload --enable-serial
+# Deploy to Ubuntu HVM (UART2 / console1):
+./guest-os/deploy_guest.sh n1-655-devkit-ubuntu --reload --enable-serial
+
+# Deploy to Alpine HVM (UART3 / console2):
+./guest-os/deploy_guest.sh n1-655-devkit-alpine --distro=alpine --reload
 ```
 
 ---
@@ -181,202 +147,77 @@ Output artifacts are staged under `build/guest/ubuntu/` and `build/guest/qnx/`.
 
 ### 7.1 Accessing the Consoles
 
-| Target Domain | Serial Port Endpoint | Telnet Bridge Port | Login Credentials |
-|---|---|---|---|
-| **EVE Dom0 Console** | `/dev/ttyCH9344USB8` (Devkit) / `ttyCH9344USB0` (Pro) | `telnet <host> 6070` | `root` (no password) |
-| **Ubuntu 24.04 Console 2** | `/dev/ttyCH9344USB9` (Devkit) / `ttyCH9344USB1` (Pro) | `telnet <host> 6071` | `ubuntu` / `ubuntu` |
-| **QNX 8.0 Console 3** | `/dev/ttyCH9344USB10` (Devkit) / `ttyCH9344USB2` (Pro) | `telnet <host> 6072` | `root` (auto-login / blank) |
+| Target Domain | Hardware UART | Serial Port Endpoint | Telnet Bridge Port | Login Credentials |
+|---|---|---|---|---|
+| **EVE Dom0 (`console0`)** | `UART0` (`0xffe4000000`) | `ttyCH9344USB8` (Devkit) / `ttyCH9344USB0` (Pro) | `6070` (Devkit) / `6060` (Pro) | `root` (no password) |
+| **Ubuntu 24.04 (`console1`)** | `UART2` (`0xffe0018000`) | `ttyCH9344USB9` (Devkit) / `ttyCH9344USB1` (Pro) | `6071` (Devkit) / `6061` (Pro) | `ubuntu` / `ubuntu` |
+| **Alpine 3.20 (`console2`)** | `UART3` (`0xffe0019000`) | `ttyCH9344USB10` (Devkit) / `ttyCH9344USB2` (Pro) | `6072` (Devkit) / `6062` (Pro) | `alpine` / `alpine` |
 
-### 7.2 Verifying In-Guest State
+### 7.2 Verifying In-Guest and Dom0 State
 
-#### On Ubuntu HVM:
 ```bash
-# Check loaded module and MMIO statistics:
-sudo cat /proc/tty/driver/amba_uart
+# On Ubuntu HVM (console1 / UART2) or Alpine HVM (console2 / UART3):
+cat /sys/bus/platform/drivers/amba_uart/use_dma /sys/bus/platform/drivers/amba_uart/force_poll
+# Expected: 1 and 0
+cat /proc/tty/driver/amba_uart
 # Expected: 0: uart:amba_uart dma:active mmio:0x0C000000 irq:50 tx:<count> rx:<count> RTS|CTS|DTR|DSR|CD
-```
+grep amba_uart /proc/interrupts
+# Expected: 50: <count> ... GIC-0 144 Level amba_uart
 
-#### On QNX HVM:
-```bash
-# Check running serial driver and login supervisor:
-pidin | grep -E "devc-ser|getty|sh|qnx"
-
-# Check interrupt vector 144 (0x90):
-pidin irqs | grep 0x90
-
-# Check registered serial device:
-ls -la /dev/ser*
-# Expected: /dev/ser1, /dev/ser3 (crw-rw-rw-)
+# On Dom0: verify vfio-platform binding and DMA32 lease telemetry:
+readlink /sys/bus/platform/devices/ffe0018000.uart/driver
+readlink /sys/bus/platform/devices/ffe0019000.uart/driver
+# Expected while Ubuntu and Alpine run: ../../../../bus/platform/drivers/vfio-platform
+dmesg | grep amba_virt_dma
 ```
 
 ---
 
 ## 8. Troubleshooting
 
-1. **Host vfio-platform Device Contention (`-EBUSY` on Domain Start):**
-   - If QEMU fails to bind `vfio-platform` with `-EBUSY`, ensure no host driver is bound to the target UART device node in Dom0:
-     ```bash
-     # For UART2 (0xffe0018000, Ubuntu HVM):
-     echo ffe0018000.uart > /sys/bus/platform/drivers/amba-uart/unbind 2>/dev/null || true
-     echo vfio-platform > /sys/bus/platform/devices/ffe0018000.uart/driver_override
-     echo ffe0018000.uart > /sys/bus/platform/drivers/vfio-platform/bind
-
-     # For UART3 (0xffe0019000, QNX HVM):
-     echo ffe0019000.uart > /sys/bus/platform/drivers/amba-uart/unbind 2>/dev/null || true
-     echo vfio-platform > /sys/bus/platform/devices/ffe0019000.uart/driver_override
-     echo ffe0019000.uart > /sys/bus/platform/drivers/vfio-platform/bind
-     ```
-2. **Restarting QNX Serial Driver & Console:**
-   - Slay any running instances before restarting the driver daemon and login supervisor:
-     ```bash
-     slay -f qnx-getty devc-seramb amba-virt-resmgr 2>/dev/null || true
-     /system/bin/amba-virt-resmgr &
-     /system/bin/devc-seramb -p /dev/ser3 -a 0x0c000000 -i 144 &
-     /system/bin/qnx-getty /dev/ser3 115200 &
-     ```
+1. **Verifying Automatic `vfio-platform` Bind and Restore Lifecycle:**
+   - Pillar (`kvm.go` / `hypervisor.go`) manages `driver_override` and `vfio-platform` binding automatically. Do not run manual sysfs bind scripts on a running node.
+   - While `ubuntu_24_04.<node>` and `alpine_3_20.<node>` are running, `ffe0018000.uart` and `ffe0019000.uart` bind to `vfio-platform` (`ffe0017000.uart` stays on `ambarella-uart` for Bluetooth).
+   - When an instance is stopped or deleted, Pillar clears `driver_override` and restores `ambarella-uart`.
+2. **Checking `/dev/amba_dma_ctl` and `dma32@17c00000` Readiness:**
+   - If a UART-assigned guest fails to start, verify on Dom0 that `/proc/device-tree/reserved-memory/dma32@17c00000` exists (`0x17c00000`–`0x1bbfffff` in `/proc/iomem`) and that `amba_virt_dma` is loaded (`ls -l /dev/amba_dma_ctl /dev/amba_dma_lease0..3`). If `/dev/amba_dma_ctl` is absent, Pillar refuses to start a UART domain rather than emitting an unbacked lease file.
 
 ---
 
-## 9. Performance Benchmarks & Virtualization Overhead
+## 9. Silicon Qualification Results (`n1-655-devkit` & `n1-655-pro`)
 
-This section documents the virtualization performance characteristics, empirical measurements, and architectural overhead models for serial virtualization on Ambarella CV3-AD655 (`n1-655-devkit`).
+All measurements in this section are recorded directly from the hardware qualification artifacts in `plan/plan_kernel_vfio.artifacts/envelope-8-devkit/` and `plan/plan_kernel_vfio.artifacts/envelope-9-pro/` on image `0.0.0-ambarella-eve-21.19.0-k-arm64-v6.1.112-generic-5f934bbbe612-dirty-gcc-kvm-arm64` using the `aimon` physical serial console tools (`embdevenv_console_write`, `embdevenv_console_expect`, `embdevenv_console_read`).
 
-### 9.1 Evaluation Matrix & Status
+### 9.1 Console Identity & No-Cross-Talk Swap Check
 
-Measurements were conducted over physical serial hardware connected to active guest virtual machines:
-- **Console 2** (Port 6071 / `ttyCH9344USB9` at 115,200 baud, 8N1) $\rightarrow$ **Ubuntu 24.04 HVM** (`/dev/ttyAMBA0`, UART2)
-- **Console 3** (Port 6072 / `ttyCH9344USB10` at 115,200 baud, 8N1) $\rightarrow$ **QNX Neutrino 8.0 HVM** (`/dev/ser3`, UART3)
-
-| Operating Quadrant | OS Target | Character Delivery Model | Driver & Channel Architecture | Silicon Qualification Status | Verified Empirical Metrics (Physical Serial Wire) |
+| Board | Console (`aimon` Target) | Assigned Guest & Ticket | Physical Controller & Lease | Verified Guest `uname` / TTY | Cross-Console Leakage |
 |---|---|---|---|---|---|
-| **Quadrant 1: Accelerated DMA** *(Default)* | **Ubuntu & QNX** | Mediated Generic-DMA1 Bus Master | `amba_uart.ko` (use_dma=1) / `devc-seramb` (-i 144) $\rightarrow$ `dma1` broker | **Verified on Silicon** | **4 KiB TX/RX: Bit-Exact PASS**. Host interrupts reduced by **92.8%** (293 vs 4,051). Host CPU load reduced by **46.7%** (7.42% vs 13.93%). Sustained throughput: 11.20 KB/s (97.3% wire saturation). |
-| **Quadrant 2: Autonomous Interrupt (PIO)** | **Ubuntu & QNX** | Direct GIC Level IRQ | `amba_uart.ko` (use_dma=0) / `devc-seramb` (-i 144 --no-dma) | **Verified on Silicon** | **RTT Echo Median: 1.043 ms** (p99: 1.285 ms, Min: 0.941 ms, StdDev: 0.045 ms). Zero keystroke drop. Throughput: 10.94 KB/s. Idle wakeups: 0. |
-| **Quadrant 3: Polling DMA** | **Ubuntu & QNX** | Timer-Polled DMA Completion | `amba_uart.ko` (enable_irq=0) / `devc-seramb` (-i 0) | **Verified on Silicon** | Asynchronous DMA batch execution without guest interrupt line dependency. RTT: ~1.4 ms. Throughput: 11.20 KB/s. |
-| **Quadrant 4: Polling PIO** *(Baseline)* | **Ubuntu & QNX** | 1 ms Timer-Polled FIFO | `amba_uart.ko` (poll_mode=1) / `devc-seramb` (-i 0 --no-dma) | **Verified on Silicon** | RTT Echo: ~1.85 ms (1 ms timer jitter bound). Idle: 1,000 wakeups/s per core. Throughput: 11.21 KB/s. |
+| `n1-655-devkit` | `console1` (Port `6071`) | `ubuntu_24_04.n1-655-devkit` (`amba_shm0`) | `ffe0018000.uart` (`UART2`), `lease_id=0`, `endpoint=2`, CID `901` | `Linux ubuntu 6.8.0-101-generic aarch64`, `/dev/ttyAMBA0` | `0` lines on `console2` |
+| `n1-655-devkit` | `console2` (Port `6072`) | `alpine_3_20.n1-655-devkit` (`amba_shm1`) | `ffe0019000.uart` (`UART3`), `lease_id=1`, `endpoint=3`, CID `902` | `Linux (none) 6.6.142-0-virt aarch64`, `/dev/ttyAMBA0` | `0` lines on `console1` |
+| `n1-655-pro` | `console1` (Port `6061`) | `ubuntu_24_04.n1-655-pro` (`amba_shm0`) | `ffe0018000.uart` (`UART2`), `lease_id=0`, `endpoint=2`, CID `1301` | `Linux ubuntu 6.8.0-101-generic aarch64`, `/dev/ttyAMBA0` | `0` lines on `console2` |
+| `n1-655-pro` | `console2` (Port `6062`) | `alpine_3_20.n1-655-pro` (`amba_shm1`) | `ffe0019000.uart` (`UART3`), `lease_id=1`, `endpoint=3`, CID `1308` | `Linux (none) 6.6.142-0-virt aarch64`, `/dev/ttyAMBA0` | `0` lines on `console1` |
 
----
+### 9.2 Bidirectional 4 KiB Bulk Wire Verification, Level IRQ & Generic-DMA1 Telemetry
 
-### 9.2 The Terminal Performance Problem: PIO vs. DMA Architecture
+Every test ran with `use_dma=1` and `force_poll=0` (`dma:active`, `mmio:0x0C000000`, `irq:50` / `GIC-0 144 Level`), transferring 4,096 pseudo-random binary bytes in each direction over the physical serial wire and comparing SHA-256 digests between host and guest (`fe:0 oe:0 pe:0 brk:0`):
 
-During intensive terminal screen redraws (such as interactive monitoring via `top`, `htop`, or full-screen editing in `vim`), applications emit large contiguous bursts of ANSI escape sequences (typically 2,048 to 4,096 bytes per frame).
+| Board | Console / Guest / UART | Direction | Raw Bytes (Wire Base64) | Verified SHA-256 Digest | Guest IRQ 50 (Pre $\rightarrow$ Post) | Guest `amba_uart` Counters (Pre $\rightarrow$ Post) | Host `amba_virt_dma` Lease & Channel Evidence |
+|---|---|---|---|---|---|---|---|
+| `n1-655-devkit` | `console1` / Ubuntu / `UART2` | Guest $\rightarrow$ Host | `4096` (`5464` B) | `063814d743f2655146e63935497f413f4ec4c17370e9bfed9d44dd5f019b3d45` | `501` $\rightarrow$ `1952` (`+1451`) | `tx:6898->12667` (`+5769`), `rx:462->6663` (`+6201`) | `lease 0` (`0x17d00000`), `dma1chan0 dreq=13`, `rx_requests_total: 3->5`, `rx_bytes_total: 5889->9503` |
+| `n1-655-devkit` | `console1` / Ubuntu / `UART2` | Host $\rightarrow$ Guest | `4096` (`5464` B) | `5c83923449dd413e49b2b26a07b1511af8d28c0adf1a2255608dac24f8f81213` | *(included above)* | *(included above)* | *(host-to-guest RX over physical UART2 FIFO + Level IRQ 50)* |
+| `n1-655-devkit` | `console2` / Alpine / `UART3` | Guest $\rightarrow$ Host | `4096` (`5464` B) | `fc8493c0a3a6c20bce430bb6cc10817e7017b922b64a0a6705211aae74c6813c` | `75` $\rightarrow$ `1573` (`+1498`) | `tx:738->7219` (`+6481`), `rx:63->6243` (`+6180`) | `lease 1` (`0x18d00000`), `dma1chan2 dreq=15`, `rx_requests_total: 0->2`, `rx_bytes_total: 0->5464` (`4095 + 1369`) |
+| `n1-655-devkit` | `console2` / Alpine / `UART3` | Host $\rightarrow$ Guest | `4096` (`5464` B) | `60e402886d9d3552a49adff62c583acae9c5333182719dd081c9e74e75f99259` | *(included above)* | *(included above)* | *(host-to-guest RX over physical UART3 FIFO + Level IRQ 50)* |
+| `n1-655-pro` | `console1` / Ubuntu / `UART2` | Guest $\rightarrow$ Host | `4096` (`5536` B) | `9930ce7d609062792e11d41bd3ac4125e2998b8094af1e909e1902df52b4c4f9` | `92` $\rightarrow$ `6687` (`+6595`) | `tx:985->21164` (`+20179`), `rx:63->5977` (`+5914`) | `lease 0` (`0x17d00000`), `dma1chan0 dreq=13`, `rx_requests_total: 1->3`, `rx_bytes_total: 425->4794` (`4095 + 274`) |
+| `n1-655-pro` | `console1` / Ubuntu / `UART2` | Host $\rightarrow$ Guest | `4096` (`5536` B) | `532ef93b35c92b30c21bd960f5f7f2a699c8d317304768a7e317390928b50e19` | *(included above)* | *(included above)* | *(host-to-guest RX over physical UART2 FIFO + Level IRQ 50)* |
+| `n1-655-pro` | `console2` / Alpine / `UART3` | Guest $\rightarrow$ Host | `4096` (`5536` B) | `d32df00bff84e892364dee4a1d9038e611c5494618de46d8b6b2c5b5ed0993bc` | `90` $\rightarrow$ `6708` (`+6618`) | `tx:738->12896` (`+12158`), `rx:62->5981` (`+5919`) | `lease 1` (`0x18d00000`), `dma1chan2 dreq=15`, `rx_requests_total: 0->2`, `rx_bytes_total: 0->4411` (`4095 + 316`) |
+| `n1-655-pro` | `console2` / Alpine / `UART3` | Host $\rightarrow$ Guest | `4096` (`5536` B) | `8683ef7b12d96730f416f452b9eb808cc672f621f2eae4ddd255574d1fb04462` | *(included above)* | *(included above)* | *(host-to-guest RX over physical UART3 FIFO + Level IRQ 50)* |
 
-1. **The PIO Bottleneck:**
-   - The physical DesignWare 16550 UART hardware has a maximum FIFO depth of 64 bytes.
-   - In PIO interrupt mode, transmitting a 4 KB screen frame requires at least 64 discrete FIFO-drain iterations. Each iteration triggers:
-     - Hardware Transmitter Holding Register Empty (`UART_II_THRE`) interrupt.
-     - Host GIC SPI 115 (UART2) or SPI 116 (UART3) interrupt into Dom0.
-     - Eventfd write and QEMU KVM level IRQ injection into guest.
-     - Guest OS interrupt service routine, spinning on `UART_LS_THRE` while refilling the 64-byte FIFO.
-   - For a single 4 KB frame, this causes repetitive context switches and interrupts, driving guest vCPU utilization up and starving userspace tasks.
+### 9.3 Cross-Guest Endpoint Isolation (`-EPERM`) & Bind Lifecycle Qualification
 
-2. **The Verified Generic-DMA1 Acceleration Architecture:**
-   - In DMA mode (`use_dma=1` / `devc-seramb`), bursts $\ge 64$ bytes bypass the CPU:
-     - The guest allocates a contiguous buffer in its dedicated 16 MiB low-DMA32 lease window (`dma32-lease`).
-     - The driver queues a mediated DMA descriptor to Ambarella Generic-DMA1 via `amba-virt-server`.
-     - Generic-DMA1 streams data directly from shared DRAM into the UART TX FIFO aperture at maximum bus speed without CPU intervention.
-     - A single completion event is signaled when the entire multi-kilobyte transfer finishes, eliminating repetitive CPU context switches and delivering full wire-speed rendering.
-
----
-
-### 9.3 Architectural Latency Budget Model (Theoretical Estimations)
-
-The hardware passthrough architecture minimizes virtualization overhead by eliminating hypervisor emulation traps along the critical data path.
-
-| Transit Stage | Path / Mechanism | Analytical Estimate | Model Rationale |
-|---|---|---|---|
-| **1. MMIO Register Access** | Stage-2 `vfio-platform` Direct Passthrough | **0.00 µs (0 traps)** | Direct KVM Stage-2 1:1 physical page mapping into guest address space. Direct read/write to physical DesignWare registers without VM exit. |
-| **2. Physical RX Interrupt** | UART RX FIFO Threshold $\rightarrow$ Host GIC SPI 115/116 | ~1.20 µs | Physical hardware interrupt propagation from UART peripheral into ARM Cortex core. |
-| **3. Host VFIO & KVM Routing** | `vfio-platform` $\rightarrow$ KVM `irqfd` | ~1.50 µs | Kernel VFIO eventfd notification triggers KVM irqfd directly in kernel space without hypervisor context switch. |
-| **4. Level IRQ Resampling** | GICv2 `resamplefd` in-kernel bypass | ~0.80 µs | Level-sensitive line deassertion automatically managed by KVM irqchip on guest EOI, eliminating userspace ACK round trips. |
-| **5. Guest vGIC Injection** | vGIC List Register $\rightarrow$ Guest vCPU | ~1.00 µs | ARM virtual CPU interface asserts virtual IRQ (GSI 144 / vIRQ 50) into guest execution context. |
-| **Model IRQ Transit Total** | **Physical Pin $\rightarrow$ Guest ISR Entry** | **~4.50 µs** | Analytical propagation budget, well within the 86.8 µs per-character transmission window at 115,200 baud. |
-
----
-
-### 9.4 Reproducing Benchmarks
-
-The automated benchmark harness is available in the repository at `tools/bringup/scripts/run_uart_bench.py` with the companion guest agent at `tools/bringup/uart_bench_agent.c`.
-
-#### Running the Benchmark Suite:
-
-```bash
-# Run multi-mode benchmark on Ubuntu HVM (Console 2 / port 6071):
-python3 tools/bringup/scripts/run_uart_bench.py \
-    --guest-os ubuntu \
-    --port 6071 \
-    --guest-alias n1-655-devkit-ubuntu \
-    --dom0-alias n1-655-devkit \
-    --jsonl-out plan/plan_hvm_uart_irq_dma.artifacts/envelope5/ubuntu.jsonl \
-    --blocks 5
-
-# Run multi-mode benchmark on QNX HVM (Console 3 / port 6072):
-python3 tools/bringup/scripts/run_uart_bench.py \
-    --guest-os qnx \
-    --port 6072 \
-    --guest-alias n1-655-devkit-qnx \
-    --dom0-alias n1-655-devkit \
-    --jsonl-out plan/plan_hvm_uart_irq_dma.artifacts/envelope5/qnx.jsonl \
-    --blocks 1
-```
-
----
-
-### 9.5 Empirical Multi-Mode Silicon Benchmark Comparison (Envelope 5 Dataset)
-
-The empirical virtualization benchmark suite was executed across operating modes on the live physical Ambarella CV3-AD655 testbed (`n1-655-devkit` Dom0 + Ubuntu 24.04 LTS HVM / QNX 8.0 HVM guests) connected to terminal server bridges on Port 6071 and Port 6072.
-
-#### 1. Workload 1: Interactive Single-Byte Keystroke Latency (1,000 Samples per Mode)
-
-| Guest OS | Operating Mode | Median RTT (p50) | 95th Percentile (p95) | 99th Percentile (p99) | Verification Status |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Ubuntu 24.04** | `dma-irq` | **1.431 ms** | 1.479 ms | 1.536 ms | **PASS** (1000/1000) |
-| **Ubuntu 24.04** | `pio-irq` | **1.409 ms** | 1.467 ms | 1.574 ms | **PASS** (1000/1000) |
-| **Ubuntu 24.04** | `dma-poll` | **1.863 ms** | 1.918 ms | 1.964 ms | **PASS** (1000/1000) |
-| **Ubuntu 24.04** | `pio-poll` | **1.864 ms** | 1.924 ms | 1.994 ms | **PASS** (1000/1000) |
-| **QNX 8.0** | `pio-irq` (IRQ 144) | **1.866 ms** | 1.943 ms | 1.994 ms | **PASS** (1000/1000) |
-| **QNX 8.0** | `pio-poll` | **1.861 ms** | 1.944 ms | 2.016 ms | **PASS** (1000/1000) |
-
-> **Latency Finding**: On Linux, hardware interrupt notification (`dma-irq` / `pio-irq`) delivers a **~0.43 ms (23.5%) reduction in round-trip latency** over polling mode with near-zero jitter ($\text{MAD} \le 15\ \mu\text{s}$).
-
-#### 2. Workload 2: Directional Bulk TX Throughput Scaling (32 B to 64 KiB)
-
-*Guest transmits deterministic PRBS-9 frame; Host verifies bit-exact SHA-256 and CRC-32 over physical wire.*
-
-| Payload Size | Ubuntu `dma-irq` | Ubuntu `pio-irq` | Ubuntu `dma-poll` | Ubuntu `pio-poll` | QNX `pio-irq` | QNX `pio-poll` | Integrity |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **32 B** | 0.07 KB/s | 0.07 KB/s | 0.07 KB/s | 0.07 KB/s | 0.11 KB/s | 0.11 KB/s | **PASS** (Bit-exact) |
-| **63 B** | 0.11 KB/s | 0.12 KB/s | 0.12 KB/s | 0.11 KB/s | 0.19 KB/s | 0.17 KB/s | **PASS** (Bit-exact) |
-| **64 B** | 0.11 KB/s | 0.11 KB/s | 0.11 KB/s | 0.12 KB/s | 0.18 KB/s | 0.17 KB/s | **PASS** (Bit-exact) |
-| **128 B** | 0.22 KB/s | 0.20 KB/s | 0.19 KB/s | 0.20 KB/s | 0.35 KB/s | 0.29 KB/s | **PASS** (Bit-exact) |
-| **256 B** | 0.38 KB/s | 0.35 KB/s | 0.36 KB/s | 0.35 KB/s | 0.56 KB/s | 0.55 KB/s | **PASS** (Bit-exact) |
-| **512 B** | 0.69 KB/s | 0.65 KB/s | 0.69 KB/s | 0.70 KB/s | 1.12 KB/s | 0.99 KB/s | **PASS** (Bit-exact) |
-| **1,024 B** | 1.30 KB/s | 1.28 KB/s | 1.24 KB/s | 1.29 KB/s | 2.01 KB/s | 1.97 KB/s | **PASS** (Bit-exact) |
-| **4,096 B** | 3.86 KB/s | 3.84 KB/s | 3.82 KB/s | 3.86 KB/s | 5.48 KB/s | 5.13 KB/s | **PASS** (Bit-exact) |
-| **16,384 B** | 7.50 KB/s | 7.74 KB/s | 7.50 KB/s | 7.62 KB/s | — | 8.48 KB/s | **PASS** (Bit-exact) |
-| **65,536 B** | **10.00 KB/s** | **10.02 KB/s** | **10.05 KB/s** | **10.02 KB/s** | — | **10.47 KB/s** | **PASS** (Bit-exact) |
-
-#### 3. Workload 3: Sustained 30-Second Streaming Wire Saturation
-
-| Guest OS | Mode | Duration | Effective Wire Throughput | Hardware LSR Errors (OE/FE/PE/BRK) | Status |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Ubuntu 24.04** | `dma-irq` | 35.90 s | **9.40 KB/s** | 0 / 0 / 0 / 0 | **PASS** |
-| **Ubuntu 24.04** | `pio-irq` | 35.80 s | **9.43 KB/s** | 0 / 0 / 0 / 0 | **PASS** |
-| **Ubuntu 24.04** | `dma-poll` | 35.86 s | **9.42 KB/s** | 0 / 0 / 0 / 0 | **PASS** |
-| **Ubuntu 24.04** | `pio-poll` | 35.73 s | **9.45 KB/s** | 0 / 0 / 0 / 0 | **PASS** |
-| **QNX 8.0** | `pio-poll` | 35.42 s | **8.51 KB/s** | 0 / 0 / 0 / 0 | **PASS** |
-
----
-
-### 9.6 Production Hardware Qualification Summary (Envelopes 0–5)
-
-| Qualification Envelope | Subsystem / Focus Area | Empirical Result | Silicon Verification Evidence |
-|---|---|---|---|
-| **Envelope 0** | Baseline & Safety Controls | **PASS** | Safe unbinding, device node guards (`/dev/ttyAMBA0`), process kill safety |
-| **Envelope 1** | Cryptographic Broker Vectors | **PASS** | NIST SHA-256, RFC 4231 HMAC-SHA-256, RFC 5869 HKDF-SHA-256 passed |
-| **Envelope 2** | Ubuntu UART2 Generic-DMA1 Wire Test | **PASS** | 4 KiB TX & RX bit-exact across wire (Port 6071); DREQ 13/14 verified |
-| **Envelope 3** | QNX UART3 Level-IRQ & DMA Wire Test | **PASS** | 4 KiB TX & RX bit-exact across wire (Port 6072); DREQ 15/16 & IRQ 144 verified |
-| **Envelope 4** | Interactive Consoles & Smooth Echo | **PASS** | Sub-2 ms interactive echo, smooth typing, zero dropped keystrokes on both guests |
-| **Envelope 5** | Multi-Mode Silicon Benchmarking | **PASS** | Full 4-mode matrix, PRBS-9 SHA/CRC verification, 30s wire streaming passed |
-
-
-
+1. **Cross-Guest DMA Endpoint Isolation (`11-uart-isolation-eperm.log`):**
+   - On both `n1-655-devkit` and `n1-655-pro`, an in-guest request from Alpine (`endpoint=3` lease) asking for `requested_endpoint=2` (`UART2`) returned `status=-1` (`-EPERM`) with `transferred=0`, leaving `console1` (Ubuntu) undisturbed (`0` extraneous bytes) and host `rx_requests_total` / `rx_bytes_total` unchanged.
+   - Conversely, an in-guest request from Ubuntu (`endpoint=2` lease) asking for `requested_endpoint=3` (`UART3`) returned `status=-1` (`-EPERM`) with `transferred=0`, leaving `console2` (Alpine) undisturbed.
+2. **Host `vfio-platform` Bind/Unbind Lifecycle (`12-uart-bind-lifecycle.log`):**
+   - On both `n1-655-devkit` and `n1-655-pro`, while `ubuntu_24_04.<node>` and `alpine_3_20.<node>` were active, sysfs reported `ffe0018000.uart` and `ffe0019000.uart` bound to `/sys/bus/platform/drivers/vfio-platform` (`driver_override='vfio-platform'`) and `ffe0017000.uart` bound to `/sys/bus/platform/drivers/ambarella-uart`.
+   - Stopping `alpine_3_20.<node>` automatically cleared `driver_override` on `ffe0019000.uart`, restored `/sys/bus/platform/drivers/ambarella-uart`, drained and zero-sanitized `lease 1` (`2729 us` on `n1-655-pro`), and left `zedbox_d_state_threads=0`.
+   - Restarting `alpine_3_20.<node>` rebound `ffe0019000.uart` to `vfio-platform`, allocated a fresh epoch on `lease 1`, and restored interactive login on `console2` (`/dev/ttyAMBA0`, `dma:active`, `irq:50`).

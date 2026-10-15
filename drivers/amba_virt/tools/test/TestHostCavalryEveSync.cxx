@@ -22,7 +22,12 @@ extern "C" {
 #include "virt_mem_pool.h"
 #include "amba_virt.h"
 #include "amba_virt_slice.h"
+#include "cavalry_ioctl.h"
+int cavalry_proxy_get_last_mfd_dag(uint32_t dag_idx,
+                                   struct cavalry_dag_desc_mfd *out_dag) __attribute__((weak));
 }
+
+#include <sys/mman.h>
 
 TEST_GROUP(CavalryEveSync)
 {
@@ -403,6 +408,480 @@ TEST(CavalryEveSync, test_restore_binding_keeps_cid)
 }
 
 /*
+ * Envelope 4: Claim and register for every slice index 0 to 7;
+ * the slice view (shm_map) and 64-bit slice_offset exist and are exact for each.
+ */
+TEST(CavalryEveSync, test_claim_and_register_slices_0_to_7)
+{
+    const uint64_t gib = 1ULL << 30;
+    const uint64_t win_bytes = 8 * gib;
+    const uint64_t phys_base = 0x100000000ULL;
+
+    unsigned char *win_map = static_cast<unsigned char *>(
+        mmap(nullptr, win_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+    CHECK_TRUE(win_map != MAP_FAILED);
+
+    cavalry_proxy_cleanup();
+    int ret = cavalry_proxy_init(-1, win_map, win_bytes, phys_base);
+    LONGS_EQUAL(0, ret);
+
+    for (uint32_t i = 0; i < 8; i++) {
+        uint64_t nonce = 0x1111000000000000ULL + i + 1;
+        uint32_t cid = 30 + i;
+        struct amba_virt_slice_desc desc;
+        memset(&desc, 0, sizeof(desc));
+
+        cavalry_proxy_set_slice_nonce(i, nonce);
+        ret = cavalry_proxy_bind_slice(cid, nonce, &desc);
+        LONGS_EQUAL(0, ret);
+        UNSIGNED_LONGS_EQUAL(i, desc.index);
+        UNSIGNED_LONGS_EQUAL(i * gib, desc.offset);
+        UNSIGNED_LONGS_EQUAL(phys_base + i * gib, desc.phys);
+        UNSIGNED_LONGS_EQUAL(gib, desc.slice_size);
+        UNSIGNED_LONGS_EQUAL(gib - 4096U, desc.usable_size);
+
+        struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(cid);
+        CHECK_TRUE(tenant != nullptr);
+        POINTERS_EQUAL(win_map + i * gib, tenant->shm_map);
+        UNSIGNED_LONGS_EQUAL(i * gib, static_cast<uint64_t>(tenant->slice_offset));
+        UNSIGNED_LONGS_EQUAL(phys_base + i * gib, tenant->phys_base);
+    }
+
+    munmap(win_map, win_bytes);
+}
+
+/*
+ * Envelope 4: DAG register and run translate to the correct absolute 64-bit offset
+ * for indexes 0, 3, 4 and 7, and two tenants never receive overlapping translated ranges.
+ */
+TEST(CavalryEveSync, test_dag_register_and_run_slices_0_3_4_7)
+{
+    const uint64_t gib = 1ULL << 30;
+    const uint64_t win_bytes = 8 * gib;
+    const uint64_t phys_base = 0x100000000ULL;
+    const uint32_t indices[4] = { 0, 3, 4, 7 };
+
+    CHECK_TRUE_TEXT(cavalry_proxy_get_last_mfd_dag != nullptr,
+                    "cavalry_proxy_get_last_mfd_dag missing");
+
+    unsigned char *win_map = static_cast<unsigned char *>(
+        mmap(nullptr, win_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+    CHECK_TRUE(win_map != MAP_FAILED);
+
+    cavalry_proxy_cleanup();
+    LONGS_EQUAL(0, cavalry_proxy_init(-1, win_map, win_bytes, phys_base));
+
+    uint64_t translated_dvi_start[4] = { 0 };
+    uint64_t translated_dvi_end[4] = { 0 };
+    uint64_t translated_port_start[4] = { 0 };
+    uint64_t translated_port_end[4] = { 0 };
+
+    for (size_t k = 0; k < 4; k++) {
+        uint32_t idx = indices[k];
+        uint32_t cid = 40 + idx;
+        uint64_t nonce = 0x2222000000000000ULL + idx + 1;
+        struct amba_virt_slice_desc desc;
+        memset(&desc, 0, sizeof(desc));
+
+        cavalry_proxy_set_slice_nonce(idx, nonce);
+        LONGS_EQUAL(0, cavalry_proxy_bind_slice(cid, nonce, &desc));
+
+        struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(cid);
+        CHECK_TRUE(tenant != nullptr);
+        UNSIGNED_LONGS_EQUAL(idx * gib, static_cast<uint64_t>(tenant->slice_offset));
+
+        /* 1. Allocate a 64 KiB buffer inside the tenant's Cavalry pool */
+        struct amba_virt_cavalry_rpc req, resp;
+        memset(&req, 0, sizeof(req));
+        req.opcode = VCAV_OP_ALLOC_MEM;
+        req.session_id = 1;
+        req.size = 65536;
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        LONGS_EQUAL(0, resp.status);
+        uint32_t buf_off = resp.bar_offset;
+        CHECK_TRUE(buf_off >= CAVALRY_POOL_BASE);
+
+        /* 2. Build a Path A RUN_DAGS request in the tenant's RPC arena */
+        size_t run_bytes = sizeof(struct cavalry_run_dags) + sizeof(struct cavalry_dag_desc);
+        struct cavalry_run_dags *run_req = reinterpret_cast<struct cavalry_run_dags *>(
+            tenant->shm_map + tenant->rpc_arena_offset);
+        memset(run_req, 0, run_bytes);
+        run_req->dag_cnt = 1;
+        run_req->session_id = 1;
+        run_req->dag_desc[0].dvi_dram_addr = buf_off;
+        run_req->dag_desc[0].dvi_img_size = 4096;
+        run_req->dag_desc[0].port_cnt = 1;
+        run_req->dag_desc[0].port_desc[0].port_dram_addr = buf_off + 4096;
+        run_req->dag_desc[0].port_desc[0].port_dram_size = 4096;
+
+        memset(&req, 0, sizeof(req));
+        req.opcode = VCAV_OP_RUN_DAGS;
+        req.session_id = 1;
+        req.bar_offset = tenant->rpc_arena_offset;
+        req.arena_len = static_cast<uint32_t>(run_bytes);
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        LONGS_EQUAL(0, resp.status);
+
+        struct cavalry_dag_desc_mfd mfd_dag;
+        memset(&mfd_dag, 0, sizeof(mfd_dag));
+        LONGS_EQUAL(0, cavalry_proxy_get_last_mfd_dag(0, &mfd_dag));
+        UNSIGNED_LONGS_EQUAL(idx * gib + buf_off, mfd_dag.dvi_dram_addr_offset);
+        UNSIGNED_LONGS_EQUAL(idx * gib + buf_off + 4096, mfd_dag.port_desc[0].port_dram_addr);
+
+        translated_dvi_start[k] = mfd_dag.dvi_dram_addr_offset;
+        translated_dvi_end[k] = mfd_dag.dvi_dram_addr_offset + 4096;
+
+        /* 3. Register DAG (Path B) and run with handles */
+        size_t reg_bytes = sizeof(struct amba_virt_cavalry_reg_dag_desc) + run_bytes;
+        auto *reg_desc = reinterpret_cast<struct amba_virt_cavalry_reg_dag_desc *>(
+            tenant->shm_map + tenant->rpc_arena_offset);
+        memset(reg_desc, 0, reg_bytes);
+        reg_desc->staging_bar_offset = buf_off;
+        reg_desc->staging_size = 16384;
+        reg_desc->run_dags_bytes = static_cast<uint32_t>(run_bytes);
+        struct cavalry_run_dags *reg_run = static_cast<struct cavalry_run_dags *>(calloc(1, run_bytes));
+        CHECK_TRUE(reg_run != nullptr);
+        reg_run->dag_cnt = 1;
+        reg_run->dag_desc[0].dvi_dram_addr = buf_off;
+        reg_run->dag_desc[0].dvi_img_size = 4096;
+        reg_run->dag_desc[0].port_cnt = 2;
+        reg_run->dag_desc[0].port_desc[0].port_dram_addr = buf_off + 4096;
+        reg_run->dag_desc[0].port_desc[0].port_dram_size = 4096;
+        reg_run->dag_desc[0].port_desc[1].port_dram_addr = buf_off + 8192;
+        reg_run->dag_desc[0].port_desc[1].port_dram_size = 4096;
+        memcpy(tenant->shm_map + tenant->rpc_arena_offset + sizeof(*reg_desc), reg_run, run_bytes);
+        free(reg_run);
+
+        memset(&req, 0, sizeof(req));
+        req.opcode = VCAV_OP_REGISTER_DAG;
+        req.session_id = 1;
+        req.bar_offset = tenant->rpc_arena_offset;
+        req.arena_len = static_cast<uint32_t>(reg_bytes);
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        LONGS_EQUAL(0, resp.status);
+        uint32_t dag_id = resp.dag_id;
+        CHECK_TRUE(dag_id > 0);
+
+        memset(&req, 0, sizeof(req));
+        req.opcode = VCAV_OP_ALLOC_HANDLE;
+        req.session_id = 1;
+        req.size = 4096;
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        LONGS_EQUAL(0, resp.status);
+        uint32_t in_hid = resp.dag_id;
+        uint32_t in_off = resp.bar_offset;
+
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        LONGS_EQUAL(0, resp.status);
+        uint32_t out_hid = resp.dag_id;
+
+        void *h_virt = nullptr;
+        size_t h_size = 0;
+        LONGS_EQUAL(0, cavalry_proxy_get_handle_buffer(in_hid, cid, 1, &h_virt, &h_size));
+        POINTERS_EQUAL(win_map + idx * gib + in_off, h_virt);
+        UNSIGNED_LONGS_EQUAL(4096, h_size);
+
+        uint32_t ticks = 0, rval = 0;
+        LONGS_EQUAL(0, cavalry_proxy_run_dag_with_handles(
+            dag_id, in_hid, out_hid, cid, 1, &ticks, &rval, nullptr, nullptr, nullptr));
+        memset(&mfd_dag, 0, sizeof(mfd_dag));
+        LONGS_EQUAL(0, cavalry_proxy_get_last_mfd_dag(0, &mfd_dag));
+        UNSIGNED_LONGS_EQUAL(phys_base + idx * gib + in_off, mfd_dag.port_desc[0].port_dram_addr);
+
+        translated_port_start[k] = mfd_dag.port_desc[0].port_dram_addr;
+        translated_port_end[k] = mfd_dag.port_desc[0].port_dram_addr + 4096;
+    }
+
+    /* Two tenants never receive overlapping translated ranges */
+    for (size_t a = 0; a < 4; a++) {
+        for (size_t b = a + 1; b < 4; b++) {
+            CHECK_TRUE(translated_dvi_end[a] <= translated_dvi_start[b] ||
+                       translated_dvi_end[b] <= translated_dvi_start[a]);
+            CHECK_TRUE(translated_port_end[a] <= translated_port_start[b] ||
+                       translated_port_end[b] <= translated_port_start[a]);
+        }
+    }
+
+    munmap(win_map, win_bytes);
+}
+
+/*
+ * Envelope 4: End of slice 7 is exactly the window end (accepted) and one byte more is refused;
+ * guest address plus offset that overflows 64 bits is refused;
+ * guest address outside its own slice is refused for every index 0..7.
+ */
+TEST(CavalryEveSync, test_slice_7_end_overflow_and_out_of_slice_rejected)
+{
+    const uint64_t gib = 1ULL << 30;
+    const uint64_t win_bytes = 8 * gib;
+    const uint64_t phys_base = 0x100000000ULL;
+
+    unsigned char *win_map = static_cast<unsigned char *>(
+        mmap(nullptr, win_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+    CHECK_TRUE(win_map != MAP_FAILED);
+
+    cavalry_proxy_cleanup();
+    LONGS_EQUAL(0, cavalry_proxy_init(-1, win_map, win_bytes, phys_base));
+
+    /* End of slice 7 == window end (8 GiB) is accepted */
+    LONGS_EQUAL(0, cavalry_proxy_register_tenant(
+        77, 7, -1, win_map + 7 * gib, gib, phys_base + 7 * gib, 7 * gib));
+    cavalry_proxy_unregister_tenant(77);
+
+    /* One byte beyond window end at slice 7 is refused */
+    CHECK_TRUE(cavalry_proxy_register_tenant(
+        77, 7, -1, win_map + 7 * gib, gib + 1, phys_base + 7 * gib, 7 * gib) < 0);
+    CHECK_TRUE(cavalry_proxy_register_tenant(
+        77, 7, -1, win_map + 7 * gib, gib, phys_base + 7 * gib, 7 * gib + 1) < 0);
+
+    /* 64-bit addition overflow on slice_offset + shm_size is refused */
+    CHECK_TRUE(cavalry_proxy_register_tenant(
+        77, 7, -1, nullptr, CAVALRY_POOL_BASE + 4096U, phys_base, UINT64_MAX - 1024ULL) < 0);
+
+    /* For every index 0..7: out-of-slice guest address and 64-bit overflow guest address refused */
+    for (uint32_t i = 0; i < 8; i++) {
+        uint32_t cid = 60 + i;
+        uint64_t nonce = 0x3333000000000000ULL + i + 1;
+        struct amba_virt_slice_desc desc;
+        memset(&desc, 0, sizeof(desc));
+
+        cavalry_proxy_set_slice_nonce(i, nonce);
+        LONGS_EQUAL(0, cavalry_proxy_bind_slice(cid, nonce, &desc));
+        struct cavalry_tenant_ctx *tenant = cavalry_proxy_get_tenant(cid);
+        CHECK_TRUE(tenant != nullptr);
+
+        struct amba_virt_cavalry_rpc req, resp;
+        memset(&req, 0, sizeof(req));
+        req.opcode = VCAV_OP_ALLOC_MEM;
+        req.session_id = 1;
+        req.size = 65536;
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        LONGS_EQUAL(0, resp.status);
+        uint32_t valid_off = resp.bar_offset;
+
+        size_t run_bytes = sizeof(struct cavalry_run_dags) + sizeof(struct cavalry_dag_desc);
+        auto *run_req = reinterpret_cast<struct cavalry_run_dags *>(
+            tenant->shm_map + tenant->rpc_arena_offset);
+
+        /* Case A: guest address outside slice (e.g. >= 1 GiB or upper 32 bits set) */
+        memset(run_req, 0, run_bytes);
+        run_req->dag_cnt = 1;
+        run_req->session_id = 1;
+        run_req->dag_desc[0].dvi_dram_addr = (1ULL << 32) | valid_off;
+        run_req->dag_desc[0].dvi_img_size = 4096;
+        memset(&req, 0, sizeof(req));
+        req.opcode = VCAV_OP_RUN_DAGS;
+        req.session_id = 1;
+        req.bar_offset = tenant->rpc_arena_offset;
+        req.arena_len = static_cast<uint32_t>(run_bytes);
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        CHECK_TRUE(resp.status < 0);
+
+        /* Case B: guest address + slice_offset overflows 64 bits */
+        memset(run_req, 0, run_bytes);
+        run_req->dag_cnt = 1;
+        run_req->session_id = 1;
+        run_req->dag_desc[0].dvi_dram_addr = UINT64_MAX - (i * gib) + 4096ULL;
+        run_req->dag_desc[0].dvi_img_size = 4096;
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        CHECK_TRUE(resp.status < 0);
+
+        /* Case C: guest port address outside slice */
+        memset(run_req, 0, run_bytes);
+        run_req->dag_cnt = 1;
+        run_req->session_id = 1;
+        run_req->dag_desc[0].dvi_dram_addr = valid_off;
+        run_req->dag_desc[0].dvi_img_size = 4096;
+        run_req->dag_desc[0].port_cnt = 1;
+        run_req->dag_desc[0].port_desc[0].port_dram_addr = gib;
+        run_req->dag_desc[0].port_desc[0].port_dram_size = 4096;
+        LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, cid));
+        CHECK_TRUE(resp.status < 0);
+    }
+
+    munmap(win_map, win_bytes);
+}
+
+/*
+ * Envelope 4: Restored binding for slices 4 to 7 gets the true 64-bit offset (F10),
+ * 32-bit saturated window_size fails for high slices, and a stale tenant after restart
+ * does not keep another index's view.
+ */
+TEST(CavalryEveSync, test_restore_bindings_slices_4_to_7_and_stale_tenant)
+{
+    const uint64_t gib = 1ULL << 30;
+    const uint64_t win_bytes = 8 * gib;
+    const uint64_t phys_base = 0x100000000ULL;
+
+    unsigned char *win_map = static_cast<unsigned char *>(
+        mmap(nullptr, win_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+    CHECK_TRUE(win_map != MAP_FAILED);
+
+    cavalry_proxy_cleanup();
+    LONGS_EQUAL(0, cavalry_proxy_init(-1, win_map, win_bytes, phys_base));
+
+    /* Register stale tenants on slice 0 (CID 80) and slice 1 (CID 81) */
+    LONGS_EQUAL(0, cavalry_proxy_register_tenant(
+        80, 0, -1, win_map, gib - 4096U, phys_base, 0));
+    LONGS_EQUAL(0, cavalry_proxy_register_tenant(
+        81, 1, -1, win_map + gib, gib - 4096U, phys_base + gib, gib));
+
+    /* Build binding list for slices 4..7 (CID 80 moved from slice 0 to slice 4; CID 81 gone) */
+    struct amba_virt_binding_list list;
+    memset(&list, 0, sizeof(list));
+    list.count = 4;
+    for (uint32_t k = 0; k < 4; k++) {
+        uint32_t idx = 4 + k;
+        list.entries[k].cid = (k == 0) ? 80 : (80 + idx);
+        list.entries[k].slice.index = idx;
+        list.entries[k].slice.usable_size = gib - 4096U;
+        list.entries[k].slice.offset = idx * gib;
+        list.entries[k].slice.phys = phys_base + idx * gib;
+        list.entries[k].slice.slice_size = gib;
+    }
+
+    /* 32-bit saturated window_size (0xffffffffU) must fail for slices 4..7 */
+    CHECK_TRUE(cavalry_proxy_restore_bindings(&list, win_map, 0xffffffffU) < 0);
+
+    /* True 64-bit window_size succeeds and restores exact 64-bit offsets and views */
+    LONGS_EQUAL(0, cavalry_proxy_restore_bindings(&list, win_map, win_bytes));
+
+    /* CID 81 is no longer present */
+    CHECK_TRUE(cavalry_proxy_get_tenant(81) == nullptr);
+
+    /* CID 80 now has slice 4's view and offset, NOT slice 0's */
+    struct cavalry_tenant_ctx *t80 = cavalry_proxy_get_tenant(80);
+    CHECK_TRUE(t80 != nullptr);
+    UNSIGNED_LONGS_EQUAL(4, t80->tenant_idx);
+    UNSIGNED_LONGS_EQUAL(4 * gib, static_cast<uint64_t>(t80->slice_offset));
+    POINTERS_EQUAL(win_map + 4 * gib, t80->shm_map);
+
+    for (uint32_t idx = 5; idx <= 7; idx++) {
+        struct cavalry_tenant_ctx *t = cavalry_proxy_get_tenant(80 + idx);
+        CHECK_TRUE(t != nullptr);
+        UNSIGNED_LONGS_EQUAL(idx, t->tenant_idx);
+        UNSIGNED_LONGS_EQUAL(idx * gib, static_cast<uint64_t>(t->slice_offset));
+        POINTERS_EQUAL(win_map + idx * gib, t->shm_map);
+    }
+
+    munmap(win_map, win_bytes);
+}
+
+/*
+ * Envelope 4: Embedded change qualification contracts — zero length, maximum length,
+ * stale handle, foreign handle, duplicate release, and teardown during use.
+ */
+TEST(CavalryEveSync, test_qualification_contracts_handles_and_bounds)
+{
+    const uint64_t gib = 1ULL << 30;
+    const uint64_t win_bytes = 8 * gib;
+    const uint64_t phys_base = 0x100000000ULL;
+
+    unsigned char *win_map = static_cast<unsigned char *>(
+        mmap(nullptr, win_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+    CHECK_TRUE(win_map != MAP_FAILED);
+
+    cavalry_proxy_cleanup();
+    LONGS_EQUAL(0, cavalry_proxy_init(-1, win_map, win_bytes, phys_base));
+
+    struct amba_virt_slice_desc desc0, desc4;
+    cavalry_proxy_set_slice_nonce(0, 0xAAAA0001ULL);
+    cavalry_proxy_set_slice_nonce(4, 0xAAAA0005ULL);
+    LONGS_EQUAL(0, cavalry_proxy_bind_slice(90, 0xAAAA0001ULL, &desc0));
+    LONGS_EQUAL(0, cavalry_proxy_bind_slice(94, 0xAAAA0005ULL, &desc4));
+
+    struct amba_virt_cavalry_rpc req, resp;
+
+    /* 1. Zero length allocation refused */
+    memset(&req, 0, sizeof(req));
+    req.opcode = VCAV_OP_ALLOC_MEM;
+    req.session_id = 1;
+    req.size = 0;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(-EINVAL, resp.status);
+
+    req.opcode = VCAV_OP_ALLOC_HANDLE;
+    req.size = 0;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(-EINVAL, resp.status);
+
+    /* 2. Maximum length: tenant->cavalry_pool_size accepted, + 4096 refused */
+    const struct cavalry_tenant_ctx *tenant90 = cavalry_proxy_get_tenant(90);
+    CHECK_TRUE(tenant90 != nullptr);
+    req.opcode = VCAV_OP_ALLOC_MEM;
+    req.size = tenant90->cavalry_pool_size + 4096U;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(-ENOMEM, resp.status);
+
+    req.size = tenant90->cavalry_pool_size;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(0, resp.status);
+    uint32_t max_off = resp.bar_offset;
+
+    req.opcode = VCAV_OP_FREE_MEM;
+    req.bar_offset = max_off;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(0, resp.status);
+
+    /* Duplicate release of memory refused */
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(-EINVAL, resp.status);
+
+    /* 3. Handle lifecycle: foreign handle (-EACCES), stale handle, duplicate release */
+    memset(&req, 0, sizeof(req));
+    req.opcode = VCAV_OP_ALLOC_HANDLE;
+    req.session_id = 1;
+    req.size = 4096;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(0, resp.status);
+    uint32_t hid90 = resp.dag_id;
+
+    /* Foreign tenant (CID 94) denied access to CID 90's handle */
+    void *virt = nullptr;
+    size_t sz = 0;
+    LONGS_EQUAL(-EACCES, cavalry_proxy_get_handle_buffer(hid90, 94, 1, &virt, &sz));
+
+    memset(&req, 0, sizeof(req));
+    req.opcode = VCAV_OP_FREE_HANDLE;
+    req.session_id = 1;
+    req.dag_id = hid90;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 94));
+    LONGS_EQUAL(-EACCES, resp.status);
+
+    /* Owner frees handle */
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(0, resp.status);
+
+    /* Duplicate free of handle refused */
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    LONGS_EQUAL(-EINVAL, resp.status);
+
+    /* Stale handle lookup refused */
+    LONGS_EQUAL(-ENOENT, cavalry_proxy_get_handle_buffer(hid90, 90, 1, &virt, &sz));
+
+    /* 4. Teardown during use reclaims resources without affecting other tenant */
+    memset(&req, 0, sizeof(req));
+    req.opcode = VCAV_OP_ALLOC_HANDLE;
+    req.session_id = 2;
+    req.size = 4096;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 90));
+    uint32_t active_hid90 = resp.dag_id;
+    LONGS_EQUAL(0, cavalry_proxy_handle_rpc(&req, &resp, 94));
+    uint32_t active_hid94 = resp.dag_id;
+
+    LONGS_EQUAL(0, cavalry_proxy_unregister_tenant(90));
+    LONGS_EQUAL(-ENODEV, cavalry_proxy_get_handle_buffer(active_hid90, 90, 2, &virt, &sz));
+    LONGS_EQUAL(0, cavalry_proxy_get_handle_buffer(active_hid94, 94, 2, &virt, &sz));
+
+    munmap(win_map, win_bytes);
+}
+
+/*
  * Local variables:
  * mode: C++
  * c-file-style: "BSD"
@@ -411,3 +890,4 @@ TEST(CavalryEveSync, test_restore_binding_keeps_cid)
  * indent-tabs-mode: nil
  * End:
  */
+

@@ -184,9 +184,19 @@ static void test_security_bounds_and_capability_checks(void)
 	ctl_fd = open(CTL_DEV, O_RDWR);
 	assert(ctl_fd >= 0);
 
+	/* 0. Invalid host-bound endpoint_id at allocation time */
 	memset(&alloc, 0, sizeof(alloc));
 	alloc.boot_generation = 1;
 	alloc.vsock_cid = 77;
+	alloc.endpoint_id = 999;
+	ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc);
+	assert(ret < 0 && errno == EINVAL);
+	printf("  Invalid alloc endpoint_id rejected with -EINVAL: PASS\n");
+
+	memset(&alloc, 0, sizeof(alloc));
+	alloc.boot_generation = 1;
+	alloc.vsock_cid = 77;
+	alloc.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
 	ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc);
 	assert(ret == 0);
 
@@ -199,7 +209,7 @@ static void test_security_bounds_and_capability_checks(void)
 	req.capability = 0xDEADBEEF; /* wrong capability */
 	req.epoch = alloc.epoch;
 	req.cookie = 1;
-	req.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
+	req.endpoint_id = AMBA_DMA_ENDPOINT_NONE;
 	req.operation = AMBA_DMA_OP_MEM_TO_DEV;
 	req.offset = 0;
 	req.length = 64;
@@ -240,14 +250,14 @@ static void test_security_bounds_and_capability_checks(void)
 	assert(ret < 0 && errno == EINVAL);
 	printf("  Zero-length transfer rejected with -EINVAL: PASS\n");
 
-	/* 5. Non-existent endpoint */
+	/* 5. Cross-endpoint / invalid endpoint on host-bound lease rejected with -EPERM */
 	req.cookie = 5;
-	req.endpoint_id = 999;
+	req.endpoint_id = AMBA_DMA_ENDPOINT_UART3;
 	req.offset = 4096;
 	req.length = 64;
 	ret = ioctl(lease_fd, AMBA_DMA_IOC_REQUEST, &req);
-	assert(ret < 0 && errno == ENODEV);
-	printf("  Invalid endpoint rejected with -ENODEV: PASS\n");
+	assert(ret < 0 && errno == EPERM);
+	printf("  Mismatched guest endpoint_id rejected with -EPERM: PASS\n");
 
 	close(lease_fd);
 
@@ -279,8 +289,8 @@ static void *dma_runner(void *arg)
 
 static void test_exclusive_endpoint_concurrency(void)
 {
-	int ctl_fd, fd0, fd1;
-	struct amba_dma_lease_alloc alloc0, alloc1;
+	int ctl_fd, fd0, fd1, fd2;
+	struct amba_dma_lease_alloc alloc0, alloc1, alloc2, alloc_dup;
 	struct amba_dma_lease_control ctrl;
 	struct amba_virt_dma_request req1;
 	struct thread_arg arg0;
@@ -288,20 +298,36 @@ static void test_exclusive_endpoint_concurrency(void)
 	char path[64];
 	int ret;
 
-	printf("[TEST] Testing exclusive endpoint policy, concurrency, and 500ms watchdog...\n");
+	printf("[TEST] Testing host-bound endpoint policy, concurrency, and watchdog...\n");
 
 	ctl_fd = open(CTL_DEV, O_RDWR);
 	assert(ctl_fd >= 0);
 
-	/* 1. Allocate Lease 0 and Lease 1 */
+	/* 1. Allocate Lease 0 bound to UART2, Lease 1 bound to UART3, Lease 2 unbound */
 	memset(&alloc0, 0, sizeof(alloc0));
 	alloc0.vsock_cid = 101;
+	alloc0.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
 	ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc0);
 	assert(ret == 0);
 
+	/* Duplicate UART2 binding on another CID must fail with EBUSY */
+	memset(&alloc_dup, 0, sizeof(alloc_dup));
+	alloc_dup.vsock_cid = 199;
+	alloc_dup.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
+	ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc_dup);
+	assert(ret < 0 && errno == EBUSY);
+	printf("  Duplicate host-bound UART2 lease rejected with -EBUSY: PASS\n");
+
 	memset(&alloc1, 0, sizeof(alloc1));
 	alloc1.vsock_cid = 102;
+	alloc1.endpoint_id = AMBA_DMA_ENDPOINT_UART3;
 	ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc1);
+	assert(ret == 0);
+
+	memset(&alloc2, 0, sizeof(alloc2));
+	alloc2.vsock_cid = 103;
+	alloc2.endpoint_id = AMBA_DMA_ENDPOINT_NONE;
+	ret = ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_ALLOC, &alloc2);
 	assert(ret == 0);
 
 	snprintf(path, sizeof(path), LEASE_DEV, alloc0.lease_id);
@@ -312,23 +338,27 @@ static void test_exclusive_endpoint_concurrency(void)
 	fd1 = open(path, O_RDWR);
 	assert(fd1 >= 0);
 
-	/* 2. Thread 0 submits DMA request on Lease 0 -> triggers 500ms watchdog */
+	snprintf(path, sizeof(path), LEASE_DEV, alloc2.lease_id);
+	fd2 = open(path, O_RDWR);
+	assert(fd2 >= 0);
+
+	/* 2. Thread 0 submits DMA request on Lease 0 (UART2) -> triggers watchdog */
 	memset(&arg0, 0, sizeof(arg0));
 	arg0.fd = fd0;
 	arg0.req.capability = alloc0.capability;
 	arg0.req.epoch = alloc0.epoch;
 	arg0.req.cookie = 1001;
-	arg0.req.endpoint_id = AMBA_DMA_ENDPOINT_UART2;
+	arg0.req.endpoint_id = AMBA_DMA_ENDPOINT_NONE;
 	arg0.req.operation = AMBA_DMA_OP_MEM_TO_DEV;
 	arg0.req.offset = 4096;
 	arg0.req.length = 64;
 
 	pthread_create(&th0, NULL, dma_runner, &arg0);
 
-	/* Give Thread 0 100ms to start and acquire endpoint UART2 */
+	/* Give Thread 0 100ms to start */
 	usleep(100000);
 
-	/* 3. Concurrently, Lease 1 requests UART2 -> MUST be rejected with -EBUSY */
+	/* 3. Concurrently, Lease 1 (bound to UART3) tries to specify UART2 -> rejected with -EPERM */
 	memset(&req1, 0, sizeof(req1));
 	req1.capability = alloc1.capability;
 	req1.epoch = alloc1.epoch;
@@ -339,17 +369,27 @@ static void test_exclusive_endpoint_concurrency(void)
 	req1.length = 64;
 
 	ret = ioctl(fd1, AMBA_DMA_IOC_REQUEST, &req1);
-	assert(ret < 0 && errno == EBUSY);
-	printf("  Concurrent request on owned UART2 endpoint rejected with -EBUSY: PASS\n");
+	assert(ret < 0 && errno == EPERM);
+	printf("  Cross-endpoint UART2 request on UART3 lease rejected with -EPERM: PASS\n");
 
-	/* 4. Wait for Thread 0 to finish via 500ms watchdog */
+	/* 4. Unbound Lease 2 attempts DMA -> rejected with -EPERM */
+	req1.capability = alloc2.capability;
+	req1.epoch = alloc2.epoch;
+	req1.cookie = 3001;
+	req1.endpoint_id = AMBA_DMA_ENDPOINT_NONE;
+	ret = ioctl(fd2, AMBA_DMA_IOC_REQUEST, &req1);
+	assert(ret < 0 && errno == EPERM);
+	printf("  Unbound lease DMA request rejected with -EPERM: PASS\n");
+
+	/* 5. Wait for Thread 0 to finish via watchdog */
 	pthread_join(th0, NULL);
-	printf("  Lease 0 watchdog completion: ret=%d (500ms watchdog handled cleanly)\n", arg0.ret);
+	printf("  Lease 0 watchdog completion: ret=%d (watchdog handled cleanly)\n", arg0.ret);
 
 	close(fd0);
 	close(fd1);
+	close(fd2);
 
-	/* Release both leases */
+	/* Release leases */
 	memset(&ctrl, 0, sizeof(ctrl));
 	ctrl.lease_id = alloc0.lease_id;
 	ctrl.epoch = alloc0.epoch;
@@ -362,8 +402,14 @@ static void test_exclusive_endpoint_concurrency(void)
 	ctrl.command = AMBA_DMA_LEASE_CMD_RELEASE;
 	ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_CTRL, &ctrl);
 
+	memset(&ctrl, 0, sizeof(ctrl));
+	ctrl.lease_id = alloc2.lease_id;
+	ctrl.epoch = alloc2.epoch;
+	ctrl.command = AMBA_DMA_LEASE_CMD_RELEASE;
+	ioctl(ctl_fd, AMBA_DMA_IOC_LEASE_CTRL, &ctrl);
+
 	close(ctl_fd);
-	printf("  [PASS] Exclusive endpoint policy and concurrency isolation verified.\n");
+	printf("  [PASS] Host-bound endpoint policy and concurrency isolation verified.\n");
 }
 
 int main(void)

@@ -308,14 +308,14 @@ echo "=== Creating baseline 1 GiB instances ==="
     --edge-app=ubuntu_24_04 \
     --edge-node=n1-655-pro \
     --network-instance=eth0:defaultLocal-n1-655-pro \
-    --adapter=amba_shm:amba_shm \
+    --adapter=amba_shm:amba_shm0 \
     --no-custom-configuration
 
 "$CREATE_INST" ubuntu_24_04.n1-655-devkit \
     --edge-app=ubuntu_24_04 \
     --edge-node=n1-655-devkit \
     --network-instance=eth0:defaultLocal-n1-655-devkit \
-    --adapter=amba_shm:amba_shm \
+    --adapter=amba_shm:amba_shm0 \
     --no-custom-configuration
 
 echo "=== Waiting for baseline instances to boot and reach SSH ==="
@@ -390,14 +390,14 @@ EOF
         --edge-app=ubuntu_24_04 \
         --edge-node=n1-655-pro \
         --network-instance=eth0:defaultLocal-n1-655-pro \
-        --adapter=amba_shm:amba_shm \
+        --adapter=amba_shm:amba_shm0 \
         --no-custom-configuration
 
     "$CREATE_INST" ubuntu_24_04.n1-655-devkit \
         --edge-app=ubuntu_24_04 \
         --edge-node=n1-655-devkit \
         --network-instance=eth0:defaultLocal-n1-655-devkit \
-        --adapter=amba_shm:amba_shm \
+        --adapter=amba_shm:amba_shm0 \
         --no-custom-configuration
 
     # Verify boot and smoke checks

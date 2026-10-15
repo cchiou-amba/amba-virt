@@ -311,6 +311,99 @@ EOF
     fi
 }
 
+package_alpine_image() {
+    local out_dir="$1"
+    local datastore_dir="${LOCAL_DATASTORE_DIR:-${HTTP_DATASTORE_DIR:-${HOME}/public_html}}"
+    local qcow2_img="${datastore_dir}/cloud-images/alpine-3.20-aarch64.qcow2"
+    local kver="6.6.142-0-virt"
+    local part_offset=68157440
+
+    if [ ! -f "${qcow2_img}" ] || ! command -v qemu-img >/dev/null 2>&1 || [ ! -x /usr/sbin/debugfs ]; then
+        return 0
+    fi
+
+    log_step "Baking Alpine 3.20 kernel modules and OpenRC ttyAMBA0 getty into ${qcow2_img}..."
+    local work_dir
+    work_dir="$(mktemp -d "${BUILD_DIR}/alpine-img-work.XXXXXX")"
+    local raw_img="${work_dir}/alpine.raw"
+    local mod_root="${work_dir}/modroot"
+    local mdir="${mod_root}/lib/modules/${kver}"
+
+    qemu-img convert -f qcow2 -O raw "${qcow2_img}" "${raw_img}"
+    mkdir -p "${mdir}/extra"
+
+    printf "cd /lib/modules/%s\ndump modules.order %s/modules.order\ndump modules.builtin %s/modules.builtin\ndump modules.builtin.modinfo %s/modules.builtin.modinfo\nrdump kernel %s\n" \
+        "${kver}" "${mdir}" "${mdir}" "${mdir}" "${mdir}" | /usr/sbin/debugfs "${raw_img}?offset=${part_offset}" >/dev/null 2>&1 || true
+
+    cp -f "${out_dir}"/*.ko "${mdir}/extra/"
+    /sbin/depmod -b "${mod_root}" "${kver}"
+
+    cat <<'EOF' > "${work_dir}/amba-uart.conf"
+amba_virt
+amba_dma
+amba_uart
+amba_cavalry
+iav_virt
+EOF
+
+    cat <<'EOF' > "${work_dir}/inittab"
+# /etc/inittab
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+
+hvc0::respawn:/sbin/getty -n -l /bin/sh 115200 hvc0 vt100
+ttyAMA0::respawn:/sbin/getty -n -l /bin/sh 115200 ttyAMA0 vt100
+ttyAMBA0::respawn:/sbin/getty 115200 ttyAMBA0 vt100
+EOF
+
+    cat <<'EOF' > "${work_dir}/00-bootstrap.start"
+#!/bin/sh
+mount -o remount,rw /
+ip link set eth0 up
+udhcpc -i eth0 -b -s /usr/share/udhcpc/default.script
+/etc/init.d/sshd restart
+modprobe amba_virt 2>/dev/null || true
+modprobe amba_dma 2>/dev/null || true
+modprobe amba_uart 2>/dev/null || true
+modprobe amba_cavalry 2>/dev/null || true
+modprobe iav_virt 2>/dev/null || true
+EOF
+    chmod 0755 "${work_dir}/00-bootstrap.start"
+
+    {
+        echo "mkdir /lib/modules/${kver}/extra"
+        for ko in "${out_dir}"/*.ko; do
+            b="$(basename "${ko}")"
+            echo "rm /lib/modules/${kver}/extra/${b}"
+            echo "write ${ko} /lib/modules/${kver}/extra/${b}"
+        done
+        for idx in modules.dep modules.dep.bin modules.alias modules.alias.bin modules.symbols modules.symbols.bin modules.softdep modules.devname; do
+            if [ -f "${mdir}/${idx}" ]; then
+                echo "rm /lib/modules/${kver}/${idx}"
+                echo "write ${mdir}/${idx} /lib/modules/${kver}/${idx}"
+            fi
+        done
+        echo "rm /etc/modules-load.d/amba-uart.conf"
+        echo "write ${work_dir}/amba-uart.conf /etc/modules-load.d/amba-uart.conf"
+        echo "rm /etc/inittab"
+        echo "write ${work_dir}/inittab /etc/inittab"
+        echo "rm /etc/local.d/00-bootstrap.start"
+        echo "write ${work_dir}/00-bootstrap.start /etc/local.d/00-bootstrap.start"
+        echo "rm /usr/local/bin/amba-virt-client"
+        echo "write ${out_dir}/amba-virt-client /usr/local/bin/amba-virt-client"
+        echo "rm /usr/local/bin/amba-virt-cli"
+        echo "write ${out_dir}/amba-virt-cli /usr/local/bin/amba-virt-cli"
+    } | /usr/sbin/debugfs -w "${raw_img}?offset=${part_offset}" >/dev/null 2>&1
+
+    qemu-img convert -f raw -O qcow2 -c "${raw_img}" "${out_dir}/alpine-3.20-aarch64.qcow2"
+    cp -f "${out_dir}/alpine-3.20-aarch64.qcow2" "${qcow2_img}"
+    rm -rf "${work_dir}"
+    log_step "Updated Alpine QCOW2 image staged at ${qcow2_img} and ${out_dir}/alpine-3.20-aarch64.qcow2"
+}
+
 build_ubuntu() {
     echo "=========================================================="
     echo " Building Ubuntu 24.04 LTS ARM64 Guest Artifacts"
@@ -483,6 +576,10 @@ build_alpine() {
                 make -C /workspace/guest-os/linux/amba-uart KDIR_HVM="${KDIR}" clean modules
                 cp -vf /workspace/guest-os/linux/amba-uart/amba_uart.ko /workspace/build/guest/alpine/
 
+                echo "[*] Compiling amba_dma.ko for Alpine..."
+                make -C /workspace/guest-os/linux/amba-dma KDIR_HVM="${KDIR}" clean modules
+                cp -vf /workspace/guest-os/linux/amba-dma/amba_dma.ko /workspace/build/guest/alpine/
+
                 echo "[*] Compiling amba_cavalry.ko for Alpine..."
                 make -C /workspace/guest-os/linux/amba-cavalry KDIR_HVM="${KDIR}" clean modules
                 cp -vf /workspace/guest-os/linux/amba-cavalry/amba_cavalry.ko /workspace/build/guest/alpine/
@@ -496,6 +593,8 @@ build_alpine() {
                 cp -vf /workspace/guest-os/client/amba-virt-client /workspace/build/guest/alpine/
             '
     fi
+
+    package_alpine_image "${ALPINE_OUT}"
 
     echo ""
     log_step "Alpine Linux artifacts staged in ${ALPINE_OUT}:"
@@ -545,7 +644,7 @@ build_qnx() {
     cp -vf "${ROOT_DIR}/guest-os/qnx/amba-cavalry/amba-cavalry-resmgr" "${QNX_OUT}/"
 
     log_step "Compiling amba-virt-client and amba-virt-cli (QNX client)..."
-    make -C "${ROOT_DIR}/guest-os/client" OS=qnx clean all
+    make -C "${ROOT_DIR}/guest-os/client" OS=qnx clean amba-virt-client amba-virt-cli
     cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-client" "${QNX_OUT}/"
     if [ -f "${ROOT_DIR}/guest-os/client/amba-virt-cli" ]; then
         cp -vf "${ROOT_DIR}/guest-os/client/amba-virt-cli" "${QNX_OUT}/"

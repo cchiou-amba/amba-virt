@@ -103,10 +103,10 @@
     },
     {
       "ztype": "IO_TYPE_OTHER",
-      "phylabel": "amba_shm",
+      "phylabel": "amba_shm0",
       "phyaddrs": {},
-      "logicallabel": "amba_shm",
-      "assigngrp": "amba_shm",
+      "logicallabel": "amba_shm0",
+      "assigngrp": "amba_shm0",
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
         "shmassign": "server",
@@ -187,7 +187,8 @@
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
         "shmassign": "server",
-        "shmsize": "1G"
+        "shmsize": "1G",
+        "camera": "on"
       },
       "usagePolicy": {},
       "cost": 0,
@@ -203,7 +204,8 @@
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
         "shmassign": "server",
-        "shmsize": "1G"
+        "shmsize": "1G",
+        "camera": "on"
       },
       "usagePolicy": {},
       "cost": 0,
@@ -219,8 +221,7 @@
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
         "shmassign": "server",
-        "shmsize": "1G",
-        "camera": "on"
+        "shmsize": "1G"
       },
       "usagePolicy": {},
       "cost": 0,
@@ -236,8 +237,7 @@
       "usage": "ADAPTER_USAGE_UNSPECIFIED",
       "cbattr": {
         "shmassign": "server",
-        "shmsize": "1G",
-        "camera": "on"
+        "shmsize": "1G"
       },
       "usagePolicy": {},
       "cost": 0,

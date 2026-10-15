@@ -444,14 +444,15 @@ int virt_dma_bind_cid_lease_with_cap(uint32_t cid, uint32_t lease_id,
     pthread_mutex_lock(&g_cid_lease_mutex);
     for (i = 0; i < MAX_CID_BINDINGS; i++) {
         if (g_cid_leases[i].cid == cid || g_cid_leases[i].cid == 0) {
+            int was_bound = (g_cid_leases[i].cid != 0);
             g_cid_leases[i].cid = cid;
             g_cid_leases[i].lease_id = lease_id;
             g_cid_leases[i].capability = capability;
             g_cid_leases[i].epoch = epoch;
-            if (g_cid_leases[i].fd >= 0) {
+            if (was_bound && g_cid_leases[i].fd >= 0) {
                 close(g_cid_leases[i].fd);
-                g_cid_leases[i].fd = -1;
             }
+            g_cid_leases[i].fd = -1;
             g_cid_leases[i].last_token_ns = get_time_ns();
             g_cid_leases[i].op_tokens = TOKEN_BUCKET_BURST_OPS;
             g_cid_leases[i].byte_tokens = TOKEN_BUCKET_BURST_BYTES;
@@ -500,14 +501,15 @@ static struct cid_lease_binding *get_cid_binding(uint32_t cid)
                 close(ctl_fd);
                 for (i = 0; i < MAX_CID_BINDINGS; i++) {
                     if (g_cid_leases[i].cid == 0 || g_cid_leases[i].cid == cid) {
+                        int was_bound = (g_cid_leases[i].cid != 0);
                         g_cid_leases[i].cid = cid;
                         g_cid_leases[i].lease_id = alloc.lease_id;
                         g_cid_leases[i].capability = alloc.capability;
                         g_cid_leases[i].epoch = alloc.epoch;
-                        if (g_cid_leases[i].fd >= 0) {
+                        if (was_bound && g_cid_leases[i].fd >= 0) {
                             close(g_cid_leases[i].fd);
-                            g_cid_leases[i].fd = -1;
                         }
+                        g_cid_leases[i].fd = -1;
                         g_cid_leases[i].last_token_ns = get_time_ns();
                         g_cid_leases[i].op_tokens = TOKEN_BUCKET_BURST_OPS;
                         g_cid_leases[i].byte_tokens = TOKEN_BUCKET_BURST_BYTES;

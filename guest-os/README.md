@@ -74,7 +74,23 @@ source ~/qnx/qnx800/qnxsdp-env.sh
 
 ---
 
-## 3. Directory Layout
+## 3. Pinned 6-Guest Slice & Adapter Placement (`0..5`)
+
+On both `n1-655-devkit` and `n1-655-pro`, the six HVM guest instances are created in deterministic `0..5` order so each admission ticket `amba_shm<N>` maps to `/dev/amba_virt_shm<N>` ([../doc/EVE-EdgeApp-Instances.md](../doc/EVE-EdgeApp-Instances.md)):
+
+| Slice Index | Edge-App | Ticket (`amba_shm:<ticket>`) | Extra Adapter | Camera Policy | Console / Guest Drivers |
+|---|---|---|---|---|---|
+| `0` | `ubuntu_24_04` | `amba_shm0` (`/dev/amba_virt_shm0`) | `UART2:UART2` (`0xffe0018000`) | `on` (`1`, primary IAV) | `console1` (`amba_uart.ko` + `amba_dma.ko`, `amba_cavalry.ko`, `iav_virt.ko`) |
+| `1` | `alpine_3_20` | `amba_shm1` (`/dev/amba_virt_shm1`) | `COM3:UART3` (`0xffe0019000`) | `on` (`1`) | `console2` (`amba_uart.ko` + `amba_dma.ko`, `amba_cavalry.ko`, `iav_virt.ko`) |
+| `2` | `debian_13` | `amba_shm2` (`/dev/amba_virt_shm2`) | *(none)* | `on` (`1`) | `amba_virt.ko`, `amba_cavalry.ko`, `iav_virt.ko` |
+| `3` | `fedora_44` | `amba_shm3` (`/dev/amba_virt_shm3`) | *(none)* | `on` (`1`) | `amba_virt.ko`, `amba_cavalry.ko`, `iav_virt.ko` |
+| `4` | `qnx_8_0` | `amba_shm4` (`/dev/amba_virt_shm4`) | `rng-mmio:rng-mmio` | `off` (`0`) | `amba-virt-resmgr`, `amba-cavalry-resmgr` (`SLICE_CLAIM_REQ`, `off=0x100000000`) |
+| `5` | `windows_11_arm64` | `amba_shm5` (`/dev/amba_virt_shm5`) | *(none)* | `off` (`0`) | Host/QEMU `ivshmem-plain` wiring |
+| `6..7` | *(free spare slices)* | `amba_shm6`, `amba_shm7` | — | `off` (`0`) | Spare 1 GiB Cavalry + 64 MiB low pool slices |
+
+---
+
+## 4. Directory Layout
 
 ```text
 guest-os/
@@ -96,6 +112,8 @@ guest-os/
 │   ├── amba-cavalry/           # Cavalry NPU proxy frontend (amba_cavalry.ko)
 │   │   ├── amba_cavalry_hvm.c  # /dev/cavalry frontend kernel driver
 │   │   └── include/            # UAPI cavalry ioctl headers
+│   ├── amba-uart/              # Hardware UART passthrough driver (amba_uart.ko; ACPI AMBA0001)
+│   ├── amba-dma/               # Virtual dmaengine provider (amba_dma.ko; 16 MiB DMA32 bounce lease)
 │   └── amba-iav/               # Virtual /dev/iav frontend (iav_virt.ko); see doc/IavVirtualization.md
 ├── qnx/                         # QNX Neutrino RTOS 8.0 drivers (EL0 microkernel)
 │   ├── amba-virt/              # Core transport resource manager (amba-virt-resmgr)
@@ -108,6 +126,7 @@ guest-os/
 │   └── qnx-build/              # QNX HVM disk image builder
 │       └── build.sh            # Automated QCOW2 cloud image creator
 ├── apps/iav-ref/                # IAV reference applications (make iav-ref): capture, events, stream, pipeline, decode, overlay
+├── alpine/                      # Alpine Linux 3.20 HVM guest build & provisioning guide (alpine/README.md)
 ├── debian/                       # Lean Debian 13 (trixie) HVM image builder (debian-build/); see debian-build/README.md
 ├── fedora/                       # Lean Fedora 44 HVM image builder (fedora-build/); see fedora-build/README.md
 ├── userspace/                   # Imported Ambarella userspace runtimes
@@ -136,7 +155,7 @@ An ioctl the real driver does not have fails with `ENOTTY`. The guest needs the 
 capability (`open` fails with `EPERM` without it); while the host server is away calls fail
 with the transport error (`ETIMEDOUT`, `ENOTCONN`) and the next call reconnects. Frames are
 read zero-copy through the IAV windows (DSP, bitstream; the primary guest also has the decode and overlay
-windows), which a guest has only if its app instance was given the `amba_iav_*` adapters. A fresh guest needs
+windows), which `amba-virt-server` attaches automatically when the guest's admission ticket has camera enabled (`amba_shm0`..`amba_shm3` have `camera=on`; `amba_shm4`..`amba_shm7` have `camera=off`). A fresh guest needs
 `sudo modprobe iav_virt` (the demo service does it at start); a mapped window must be read and written with aligned
 accesses of at most eight bytes (a plain `memcpy` at an unaligned offset destroys the guest VM). The suite that qualifies all this is built into
 `amba_virt_demo` (`--iav-qual`; add `--role primary` or `--role consumer` to say which role
@@ -144,15 +163,18 @@ the run expects). The reference applications (`apps/iav-ref/`, built by `make ia
 on the bare board and in a guest) show the stream, capture, event, pipeline, decode and overlay paths. Details, limits and
 the runbook: [../doc/IavVirtualization.md](../doc/IavVirtualization.md).
 
-## 4. Staged Artifacts & Verification
+## 5. Staged Artifacts & Verification
 
 Compiled binaries are staged into `build/guest/<distro>/`:
 
 ```text
 build/guest/
 ├── ubuntu/
-│   ├── amba_virt.ko            # Ubuntu 24.04 kernel module (6.8.0-139-generic)
+│   ├── amba_virt.ko            # Ubuntu 24.04 kernel module (6.8.0-101-generic)
 │   ├── amba_cavalry.ko         # Ubuntu 24.04 Cavalry proxy module
+│   ├── amba_dma.ko             # Ubuntu 24.04 virtual dmaengine provider
+│   ├── amba_uart.ko            # Ubuntu 24.04 hardware UART2 passthrough driver
+│   ├── iav_virt.ko             # Ubuntu 24.04 virtual /dev/iav frontend
 │   ├── amba-virt-client        # Dynamically linked glibc ARM64 binary
 │   ├── amba-virt-cli           # Diagnostic CLI tool
 │   ├── cavalry_hvm_demo        # AI model test runner
@@ -160,6 +182,9 @@ build/guest/
 ├── alpine/
 │   ├── amba_virt.ko            # Alpine 3.20 kernel module (6.6.142-0-virt)
 │   ├── amba_cavalry.ko         # Alpine 3.20 Cavalry proxy module
+│   ├── amba_dma.ko             # Alpine 3.20 virtual dmaengine provider
+│   ├── amba_uart.ko            # Alpine 3.20 hardware UART3 passthrough driver
+│   ├── iav_virt.ko             # Alpine 3.20 virtual /dev/iav frontend
 │   ├── amba-virt-client        # Statically linked standalone musl ARM64 binary
 │   ├── amba-virt-cli           # Diagnostic CLI tool
 │   ├── cavalry_hvm_demo        # AI model test runner

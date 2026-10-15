@@ -237,12 +237,12 @@ TEST(SliceLease, primary_keeps_index_zero)
     exchange(req, resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=1"));
 
-    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0 amba_shm absent", kUuidA,
+    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0 amba_shm0 absent", kUuidA,
              (unsigned long long)kSliceBytes);
     exchange(req, resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=0"));
 
-    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0 amba_shm absent",
+    snprintf(req, sizeof(req), "RESERVE_SLICE_AT %s %llu 0 amba_shm0 absent",
              "33333333-3333-4333-8333-333333333333",
              (unsigned long long)kSliceBytes);
     exchange(req, resp, sizeof(resp));

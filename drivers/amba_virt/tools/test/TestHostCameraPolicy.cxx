@@ -136,7 +136,7 @@ TEST(CameraPolicy, ticket_and_intent_parsing)
     enum virt_camera_intent in = VIRT_CAMERA_INTENT_ON;
     char longest[VIRT_CAMERA_TICKET_MAX + 2];
 
-    CHECK_TRUE(virt_camera_ticket_ok("amba_shm"));
+    CHECK_TRUE(virt_camera_ticket_ok("amba_shm0"));
     CHECK_TRUE(virt_camera_ticket_ok("a"));
     CHECK_TRUE(virt_camera_ticket_ok("A-b.c_9"));
     CHECK_FALSE(virt_camera_ticket_ok(nullptr));
@@ -206,7 +206,7 @@ TEST(CameraPolicy, decode_and_overlay_only_for_index_zero)
     char uuid[64];
 
     windows_all(1000);
-    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm", "on", resp, sizeof(resp));
+    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm0", "on", resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=0 "));
     CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 dec=8388608 ovl=8388608\n"));
 
@@ -228,7 +228,7 @@ TEST(CameraPolicy, index_zero_without_a_decode_window_gets_overlay_only)
     char resp[256];
 
     virt_camera_policy_set_windows(w, 3, 1000);
-    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm", "on", resp, sizeof(resp));
+    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm0", "on", resp, sizeof(resp));
     CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 ovl=8388608\n"));
     CHECK_FALSE(has(resp, " dec="));
 }
@@ -322,11 +322,11 @@ TEST(CameraPolicy, reserve_keeps_the_existing_size_and_index_errors)
     lease(req, resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "ERR SIZE"));
 
-    reserve("RESERVE_SLICE_AT", kUuidA, 8, "amba_shm", "absent", resp, sizeof(resp));
+    reserve("RESERVE_SLICE_AT", kUuidA, 8, "amba_shm0", "absent", resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "ERR EXHAUSTED"));
-    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm", "absent", resp, sizeof(resp));
+    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm0", "absent", resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=0 "));
-    reserve("RESERVE_SLICE_AT", "22222222-2222-4222-8222-222222222222", 0, "amba_shm", "absent", resp,
+    reserve("RESERVE_SLICE_AT", "22222222-2222-4222-8222-222222222222", 0, "amba_shm0", "absent", resp,
             sizeof(resp));
     CHECK_TRUE(starts_with(resp, "ERR EXHAUSTED"));
 }
@@ -336,7 +336,7 @@ TEST(CameraPolicy, legacy_reserve_never_attaches_the_camera)
     char resp[256], req[256];
 
     windows_all(1000);
-    admin("SET_CAMERA amba_shm on", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 on", resp, sizeof(resp));
     snprintf(req, sizeof(req), "RESERVE_SLICE %s %llu", kUuidA, (unsigned long long)kSliceBytes);
     lease(req, resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=0 "));
@@ -372,11 +372,11 @@ TEST(CameraPolicy, set_camera_arguments_are_validated)
 
     admin("SET_CAMERA", resp, sizeof(resp));
     STRCMP_EQUAL("ERR INVAL\n", resp);
-    admin("SET_CAMERA amba_shm", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0", resp, sizeof(resp));
     STRCMP_EQUAL("ERR INVAL\n", resp);
-    admin("SET_CAMERA amba_shm maybe", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 maybe", resp, sizeof(resp));
     STRCMP_EQUAL("ERR INVAL\n", resp);
-    admin("SET_CAMERA amba_shm on extra", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 on extra", resp, sizeof(resp));
     STRCMP_EQUAL("ERR INVAL\n", resp);
     admin("SET_CAMERA amba/shm on", resp, sizeof(resp));
     STRCMP_EQUAL("ERR INVAL\n", resp);
@@ -481,7 +481,7 @@ TEST(CameraPolicy, a_failed_write_changes_nothing_and_leaves_the_old_file)
     char buf[256], resp[64];
     long len = 0;
 
-    admin("SET_CAMERA amba_shm on", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 on", resp, sizeof(resp));
     STRCMP_EQUAL("OK\n", resp);
 
     /* A directory where the temporary file goes: the write cannot complete. */
@@ -489,17 +489,17 @@ TEST(CameraPolicy, a_failed_write_changes_nothing_and_leaves_the_old_file)
     admin("SET_CAMERA amba_shm1 on", resp, sizeof(resp));
     STRCMP_EQUAL("ERR PERSIST\n", resp);
     read_file(store, buf, sizeof(buf), &len);
-    STRCMP_EQUAL("amba_shm on\n", buf);
+    STRCMP_EQUAL("amba_shm0 on\n", buf);
     admin("GET_CAMERA amba_shm1", resp, sizeof(resp));
     STRCMP_EQUAL("OK COUNT 0\n", resp);
 
     /* A change to an entry that exists is undone as well. */
-    admin("SET_CAMERA amba_shm off", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 off", resp, sizeof(resp));
     STRCMP_EQUAL("ERR PERSIST\n", resp);
-    admin("GET_CAMERA amba_shm", resp, sizeof(resp));
+    admin("GET_CAMERA amba_shm0", resp, sizeof(resp));
     CHECK_TRUE(has(resp, "override=on"));
     read_file(store, buf, sizeof(buf), &len);
-    STRCMP_EQUAL("amba_shm on\n", buf);
+    STRCMP_EQUAL("amba_shm0 on\n", buf);
 }
 
 TEST(CameraPolicy, a_store_in_a_missing_directory_is_a_persist_error)
@@ -507,7 +507,7 @@ TEST(CameraPolicy, a_store_in_a_missing_directory_is_a_persist_error)
     char resp[64];
 
     virt_camera_policy_set_store("/nonexistent-camera-test/sub/camera-tickets");
-    admin("SET_CAMERA amba_shm on", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 on", resp, sizeof(resp));
     STRCMP_EQUAL("ERR PERSIST\n", resp);
     admin("GET_CAMERA", resp, sizeof(resp));
     STRCMP_EQUAL("OK COUNT 0\n", resp);
@@ -523,10 +523,10 @@ TEST(CameraPolicy, a_leftover_temporary_file_is_ignored_and_replaced)
     admin("GET_CAMERA", resp, sizeof(resp));
     STRCMP_EQUAL("OK COUNT 0\n", resp);
 
-    admin("SET_CAMERA amba_shm on", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 on", resp, sizeof(resp));
     STRCMP_EQUAL("OK\n", resp);
     read_file(store, buf, sizeof(buf), &len);
-    STRCMP_EQUAL("amba_shm on\n", buf);
+    STRCMP_EQUAL("amba_shm0 on\n", buf);
     LONGS_EQUAL(-1, access(tmp, F_OK));
 }
 
@@ -535,8 +535,8 @@ TEST(CameraPolicy, inherit_of_the_last_entry_leaves_an_empty_valid_file)
     struct stat st;
     char resp[64];
 
-    admin("SET_CAMERA amba_shm on", resp, sizeof(resp));
-    admin("SET_CAMERA amba_shm inherit", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 on", resp, sizeof(resp));
+    admin("SET_CAMERA amba_shm0 inherit", resp, sizeof(resp));
     STRCMP_EQUAL("OK\n", resp);
     LONGS_EQUAL(0, stat(store, &st));
     LONGS_EQUAL(0, st.st_size);
@@ -573,22 +573,22 @@ struct store_case {
 
 TEST(CameraPolicy, store_parsing_loads_all_of_a_valid_file_and_none_of_a_corrupt_one)
 {
-    static const char kValid[] = "amba_shm on\namba_shm1 off\n";
-    static const char kNoNewline[] = "amba_shm on\namba_shm1 off";
+    static const char kValid[] = "amba_shm0 on\namba_shm1 off\n";
+    static const char kNoNewline[] = "amba_shm0 on\namba_shm1 off";
     static const struct store_case kCases[] = {
         { "valid", kValid, sizeof(kValid) - 1, 1 },
         { "no trailing newline", kNoNewline, sizeof(kNoNewline) - 1, 1 },
         { "empty", "", 0, 1 },
-        { "crlf", "amba_shm on\r\n", 13, 0 },
-        { "duplicate", "amba_shm on\namba_shm off\n", 25, 0 },
-        { "bad mode", "amba_shm maybe\n", 15, 0 },
-        { "inherit is not stored", "amba_shm inherit\n", 17, 0 },
+        { "crlf", "amba_shm0 on\r\n", 14, 0 },
+        { "duplicate", "amba_shm0 on\namba_shm0 off\n", 27, 0 },
+        { "bad mode", "amba_shm0 maybe\n", 16, 0 },
+        { "inherit is not stored", "amba_shm0 inherit\n", 18, 0 },
         { "bad charset", "amba/shm on\n", 12, 0 },
-        { "two spaces", "amba_shm  on\n", 13, 0 },
-        { "three fields", "amba_shm on x\n", 14, 0 },
-        { "no mode", "amba_shm\n", 9, 0 },
-        { "blank line", "amba_shm on\n\namba_shm1 off\n", 26, 0 },
-        { "nul byte", "amba_shm on\n\0amba_shm1 off\n", 26, 0 },
+        { "two spaces", "amba_shm0  on\n", 14, 0 },
+        { "three fields", "amba_shm0 on x\n", 15, 0 },
+        { "no mode", "amba_shm0\n", 10, 0 },
+        { "blank line", "amba_shm0 on\n\namba_shm1 off\n", 27, 0 },
+        { "nul byte", "amba_shm0 on\n\0amba_shm1 off\n", 27, 0 },
     };
     unsigned int i;
 
@@ -602,7 +602,7 @@ TEST(CameraPolicy, store_parsing_loads_all_of_a_valid_file_and_none_of_a_corrupt
         if (kCases[i].valid && kCases[i].len > 0) {
             if (!starts_with(resp, "OK COUNT 2\n"))
                 FAIL(kCases[i].name);
-            CHECK_TRUE(has(resp, "TICKET amba_shm override=on "));
+            CHECK_TRUE(has(resp, "TICKET amba_shm0 override=on "));
         } else {
             if (strcmp(resp, "OK COUNT 0\n") != 0)
                 FAIL(kCases[i].name);
@@ -739,14 +739,19 @@ TEST(CameraPolicy, the_verdict_text_has_its_exact_form_and_a_small_buffer_fails)
 TEST(CameraPolicy, decide_refuses_a_bad_ticket)
 {
     struct virt_camera_verdict v;
+    char conf_buf[512];
+    long conf_len = 0;
 
     windows_all(1000);
     LONGS_EQUAL(-1, virt_camera_policy_decide("bad/ticket", VIRT_CAMERA_INTENT_ON, 1, &v));
     LONGS_EQUAL(0, v.camera);
     LONGS_EQUAL(-1, virt_camera_policy_decide(nullptr, VIRT_CAMERA_INTENT_ON, 1, &v));
-    LONGS_EQUAL(-1, virt_camera_policy_decide("amba_shm", VIRT_CAMERA_INTENT_ON, 1, nullptr));
-    LONGS_EQUAL(0, virt_camera_policy_decide("amba_shm", VIRT_CAMERA_INTENT_ON, 1, &v));
+    LONGS_EQUAL(-1, virt_camera_policy_decide("amba_shm0", VIRT_CAMERA_INTENT_ON, 1, nullptr));
+    LONGS_EQUAL(0, virt_camera_policy_decide("amba_shm0", VIRT_CAMERA_INTENT_ON, 1, &v));
     LONGS_EQUAL(1, v.camera);
+
+    read_file("iav.conf.example", conf_buf, sizeof(conf_buf), &conf_len);
+    CHECK_TRUE(has(conf_buf, "amba_shm0 adapter"));
 }
 
 /*
