@@ -10,7 +10,10 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include <vector>
 
 #include "IavBrokerHarness.hxx"
 
@@ -179,12 +182,250 @@ TEST(IavBrokerDecode, OffsetsOutsideTheWindowAreRefusedAndNeverReachTheDriver)
     CHECK(h.drv.violations().empty());
 }
 
+namespace {
+
+enum Edit { EditApp0Id, EditApp0Short, EditDropApp0, EditDoubleApp0, EditAddApp1, EditAddCom, EditTable, EditDropTable,
+            EditDupTable, EditMergeTables, EditCutTable };
+
+typedef std::vector<uint8_t> Bytes;
+
+/* The offset of the nth segment with the marker (0 = SOI is skipped), or the size when there is none. */
+size_t findSeg(const Bytes &b, unsigned int marker, unsigned int nth)
+{
+    size_t i = 2;
+
+    while (i + 4 <= b.size() && b[i] == 0xFF && b[i + 1] != 0xDA) {
+        if (b[i + 1] == marker && nth-- == 0) {
+            return i;
+        }
+        i += 2 + (((size_t)b[i + 2] << 8) | b[i + 3]);
+    }
+    return b.size();
+}
+
+size_t segLen(const Bytes &b, size_t at)
+{
+    return 2 + (((size_t)b[at + 2] << 8) | b[at + 3]);
+}
+
+/* A header changed in one way. */
+Bytes edit(Bytes b, Edit what, const char *arg)
+{
+    const size_t app0 = findSeg(b, 0xE0, 0);
+    const unsigned int t = (unsigned int)atoi(arg);
+
+    switch (what) {
+    case EditApp0Id:
+        memcpy(&b[app0 + 4], arg, 4);
+        break;
+    case EditApp0Short:
+        b[app0 + 3] = 0x0E;
+        b.erase(b.begin() + (long)app0 + 16, b.begin() + (long)app0 + 18);
+        break;
+    case EditDropApp0:
+        b.erase(b.begin() + (long)app0, b.begin() + (long)(app0 + segLen(b, app0)));
+        break;
+    case EditDoubleApp0: {
+        const Bytes seg(b.begin() + (long)app0, b.begin() + (long)(app0 + segLen(b, app0)));
+
+        b.insert(b.begin() + (long)app0, seg.begin(), seg.end());
+        break;
+    }
+    case EditAddApp1:
+    case EditAddCom: {
+        const uint8_t seg[] = { 0xFF, (uint8_t)(what == EditAddApp1 ? 0xE1 : 0xFE), 0x00, 0x06, 'a', 'b', 'c', 'd' };
+
+        b.insert(b.begin() + (long)app0, seg, seg + sizeof(seg));
+        break;
+    }
+    case EditTable: {
+        const size_t at = findSeg(b, 0xC4, t);
+
+        b[at + 4 + 17] ^= 0x01;     /* a code value of the table */
+        break;
+    }
+    case EditDropTable: {
+        const size_t at = findSeg(b, 0xC4, t);
+
+        b.erase(b.begin() + (long)at, b.begin() + (long)(at + segLen(b, at)));
+        break;
+    }
+    case EditDupTable: {
+        const size_t at = findSeg(b, 0xC4, t);
+        const Bytes seg(b.begin() + (long)at, b.begin() + (long)(at + segLen(b, at)));
+
+        b.insert(b.begin() + (long)at, seg.begin(), seg.end());
+        break;
+    }
+    case EditMergeTables: {
+        const size_t first = findSeg(b, 0xC4, 0);
+        Bytes body;
+
+        for (unsigned int k = 0; k < 4; k++) {
+            const size_t at = findSeg(b, 0xC4, 0);
+
+            body.insert(body.end(), b.begin() + (long)at + 4, b.begin() + (long)(at + segLen(b, at)));
+            b.erase(b.begin() + (long)at, b.begin() + (long)(at + segLen(b, at)));
+        }
+        const uint8_t hdr[] = { 0xFF, 0xC4, (uint8_t)((body.size() + 2) >> 8), (uint8_t)(body.size() + 2) };
+
+        b.insert(b.begin() + (long)first, body.begin(), body.end());
+        b.insert(b.begin() + (long)first, hdr, hdr + sizeof(hdr));
+        break;
+    }
+    case EditCutTable: {
+        const size_t at = findSeg(b, 0xC4, 3);
+        const size_t len = segLen(b, at);
+
+        b[at + 3] = (uint8_t)(len - 2 - 5);       /* the length stops five bytes short of the table's end */
+        b.erase(b.begin() + (long)(at + len - 5), b.begin() + (long)(at + len));
+        break;
+    }
+    }
+    return b;
+}
+
+} // namespace
+
+TEST(IavBrokerDecode, OnlyTheJpegKindTheDecoderTakesReachesTheDsp)
+{
+    IavBrokerHarness h(IAV_PROFILE_CONSUMER, 0, 0, 0, 0, 7);
+    uint64_t hd;
+    struct iav_decoder_info d = decoder(0, (uint32_t)Len);
+    struct iav_decode_jpeg j = jpeg(0, 100000, 0x300000, 0x100000);
+    unsigned long calls;
+    struct Case { const char *what; Bytes bytes; int want; } cases[] = {
+        { "4:2:0 baseline", MockIavDriver::jpegHeader(), 0 },
+        { "4:2:2", MockIavDriver::jpegHeader(0x21), 0 },
+        { "4:4:4", MockIavDriver::jpegHeader(0x11), -EINVAL },
+        { "4:4:0", MockIavDriver::jpegHeader(0x12), -EINVAL },
+        { "4:1:1", MockIavDriver::jpegHeader(0x41), -EINVAL },
+        { "chroma sampled 2x2", MockIavDriver::jpegHeader(0x22, 0x22, 0x11), -EINVAL },
+        { "progressive", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC2), -EINVAL },
+        { "extended sequential", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC1), -EINVAL },
+        { "lossless", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC3), -EINVAL },
+        { "arithmetic", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC9), -EINVAL },
+        { "restart interval", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC0, 64), -EINVAL },
+        { "no quantization table", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC0, 0, false), -EINVAL },
+        { "no Huffman table", MockIavDriver::jpegHeader(0x22, 0x11, 0x11, 0xC0, 0, true, false), -EINVAL },
+        { "AVI1 APP0 (the camera's)", edit(MockIavDriver::jpegHeader(), EditApp0Id, "AVI1"), -EINVAL },
+        { "AVI1 APP0 on 4:2:2", edit(MockIavDriver::jpegHeader(0x21), EditApp0Id, "AVI1"), -EINVAL },
+        { "JFIF APP0 too short", edit(MockIavDriver::jpegHeader(), EditApp0Short, ""), -EINVAL },
+        { "no APP0", edit(MockIavDriver::jpegHeader(), EditDropApp0, ""), 0 },
+        { "two APP0", edit(MockIavDriver::jpegHeader(), EditDoubleApp0, ""), -EINVAL },
+        { "APP1 (Exif)", edit(MockIavDriver::jpegHeader(), EditAddApp1, ""), -EINVAL },
+        { "COM", edit(MockIavDriver::jpegHeader(), EditAddCom, ""), -EINVAL },
+        { "a custom DC luma table", edit(MockIavDriver::jpegHeader(), EditTable, "0"), -EINVAL },
+        { "a custom DC chroma table", edit(MockIavDriver::jpegHeader(), EditTable, "1"), -EINVAL },
+        { "a custom AC luma table", edit(MockIavDriver::jpegHeader(), EditTable, "2"), -EINVAL },
+        { "a custom AC chroma table", edit(MockIavDriver::jpegHeader(), EditTable, "3"), -EINVAL },
+        { "a custom table on 4:2:2", edit(MockIavDriver::jpegHeader(0x21), EditTable, "2"), -EINVAL },
+        { "the AC luma table missing", edit(MockIavDriver::jpegHeader(), EditDropTable, "2"), -EINVAL },
+        { "a table given twice", edit(MockIavDriver::jpegHeader(), EditDupTable, "1"), -EINVAL },
+        { "the four tables in one DHT segment", edit(MockIavDriver::jpegHeader(), EditMergeTables, ""), 0 },
+        { "a table cut short", edit(MockIavDriver::jpegHeader(), EditCutTable, ""), -EINVAL },
+        { "not a JPEG", Bytes(200, 0x55), -EINVAL },
+        { "zeros", Bytes(200, 0x00), -EINVAL },
+        { "SOI only", Bytes{ 0xFF, 0xD8 }, -EINVAL },
+    };
+
+    h.addDecodeWindow();
+    hd = h.mustOpen(7);
+    LONGS_EQUAL(0, h.ioctl(7, hd, IAV_IOC_CREATE_DECODER, &d, sizeof(d)).r.status);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        h.drv.setDecodeContent(cases[i].bytes);
+        calls = h.drv.ioctlCalls();
+        LONGS_EQUAL_TEXT(cases[i].want, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &j, sizeof(j)).r.status, cases[i].what);
+        LONGS_EQUAL_TEXT(cases[i].want == 0 ? calls + 1 : calls, h.drv.ioctlCalls(), cases[i].what);
+    }
+    /* a header cut off inside a segment, a segment longer than the bytes read, a second SOF */
+    {
+        Bytes cut = MockIavDriver::jpegHeader();
+        Bytes twice = MockIavDriver::jpegHeader();
+        size_t at = 0;
+
+        cut.resize(cut.size() - 20);
+        h.drv.setDecodeContent(cut);
+        calls = h.drv.ioctlCalls();
+        LONGS_EQUAL(-EINVAL, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &j, sizeof(j)).r.status);
+        while (twice[at] != 0xFF || twice[at + 1] != 0xC0) {
+            at++;
+        }
+        Bytes seg(twice.begin() + (long)at, twice.begin() + (long)at + 19);
+
+        twice.insert(twice.begin() + (long)at, seg.begin(), seg.end());
+        h.drv.setDecodeContent(twice);
+        LONGS_EQUAL(-EINVAL, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &j, sizeof(j)).r.status);
+        LONGS_EQUAL(calls, h.drv.ioctlCalls());
+    }
+    /* a header that cannot be read is refused, and a size under four bytes cannot be a JPEG */
+    h.drv.setDecodeContent(MockIavDriver::jpegHeader());
+    h.drv.failDecodeRead(true);
+    LONGS_EQUAL(-EIO, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &j, sizeof(j)).r.status);
+    h.drv.failDecodeRead(false);
+    {
+        struct iav_decode_jpeg tiny = jpeg(0, 3, 0x300000, 0x100000);
+
+        LONGS_EQUAL(-EINVAL, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &tiny, sizeof(tiny)).r.status);
+    }
+    CHECK(h.drv.violations().empty());
+}
+
+/* A header with the picture size changed. */
+static Bytes withSize(Bytes b, unsigned int w, unsigned int h)
+{
+    const size_t at = findSeg(b, 0xC0, 0);
+
+    b[at + 5] = (uint8_t)(h >> 8);
+    b[at + 6] = (uint8_t)h;
+    b[at + 7] = (uint8_t)(w >> 8);
+    b[at + 8] = (uint8_t)w;
+    return b;
+}
+
+TEST(IavBrokerDecode, TheRoomForThePictureMustHoldWhatTheHeaderDescribes)
+{
+    IavBrokerHarness h(IAV_PROFILE_CONSUMER, 0, 0, 0, 0, 7);
+    uint64_t hd;
+    struct iav_decoder_info d = decoder(0, (uint32_t)Len);
+    unsigned long calls;
+    struct Case { const char *what; Bytes bytes; uint64_t need; } cases[] = {
+        { "1920x1080 4:2:0", withSize(MockIavDriver::jpegHeader(), 1920, 1080), 1920ull * 1088 * 3 / 2 },
+        { "1920x1080 4:2:2", withSize(MockIavDriver::jpegHeader(0x21), 1920, 1080), 1920ull * 1088 * 2 },
+        { "1280x720 4:2:2", withSize(MockIavDriver::jpegHeader(0x21), 1280, 720), 1280ull * 720 * 2 },
+        { "odd size rounds up to 16", withSize(MockIavDriver::jpegHeader(), 17, 17), 32ull * 32 * 3 / 2 },
+        { "the largest the header can say", withSize(MockIavDriver::jpegHeader(0x21), 16384, 16384),
+          16384ull * 16384 * 2 },
+    };
+
+    h.addDecodeWindow();
+    hd = h.mustOpen(7);
+    LONGS_EQUAL(0, h.ioctl(7, hd, IAV_IOC_CREATE_DECODER, &d, sizeof(d)).r.status);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const uint64_t room = Len - 0x1000;
+        struct iav_decode_jpeg ok = jpeg(0, 1000, 0x1000, (uint32_t)(cases[i].need < room ? cases[i].need : room));
+        struct iav_decode_jpeg shortOne = ok;
+
+        h.drv.setDecodeContent(cases[i].bytes);
+        shortOne.yuv_size = (uint32_t)(cases[i].need - 1);
+        calls = h.drv.ioctlCalls();
+        LONGS_EQUAL_TEXT(-EINVAL, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &shortOne, sizeof(shortOne)).r.status, cases[i].what);
+        LONGS_EQUAL_TEXT(calls, h.drv.ioctlCalls(), cases[i].what);
+        if (cases[i].need <= room) {
+            LONGS_EQUAL_TEXT(0, h.ioctl(7, hd, IAV_IOC_DECODE_JPEG, &ok, sizeof(ok)).r.status, cases[i].what);
+            LONGS_EQUAL_TEXT(calls + 1, h.drv.ioctlCalls(), cases[i].what);
+        }
+    }
+    /* decode-only is the case that names an output room; the other kind names none */
+    CHECK(h.drv.violations().empty());
+}
+
 TEST(IavBrokerDecode, TheLastByteOfTheWindowIsAllowed)
 {
     IavBrokerHarness h(IAV_PROFILE_CONSUMER, 0, 0, 0, 0, 7);
     uint64_t hd;
     struct iav_decoder_info all = decoder(0, (uint32_t)Len), tail = decoder(Len - 1, 1);
-    struct iav_decode_jpeg end = jpeg(Len - 100, 100, Len - 100, 100);
+    struct iav_decode_jpeg end = jpeg(Len - 1000, 1000, Len - 6000, 5000);
 
     h.addDecodeWindow();
     hd = h.mustOpen(7);
@@ -256,8 +497,9 @@ TEST(IavBrokerDecode, TheDecodeWindowCanBeMappedForReadingAndWriting)
     hd = h.mustOpen(7);
     r = h.map(7, hd, MockIavDriver::DecBase, Len, PROT_READ | PROT_WRITE);
     LONGS_EQUAL(0, r.r.status);
-    /* Not past the partition, not without PROT_READ. */
-    LONGS_EQUAL(-EINVAL, h.map(7, hd, MockIavDriver::DecBase, Len + 4096, PROT_READ | PROT_WRITE).r.status);
+    /* Up to twice the partition (the driver's ring rule), not past it, not without PROT_READ. */
+    LONGS_EQUAL(0, h.map(7, hd, MockIavDriver::DecBase, 2 * Len, PROT_READ | PROT_WRITE).r.status);
+    LONGS_EQUAL(-EINVAL, h.map(7, hd, MockIavDriver::DecBase, 2 * Len + 4096, PROT_READ | PROT_WRITE).r.status);
     LONGS_EQUAL(-EPERM, h.map(7, hd, MockIavDriver::DecBase, Len, PROT_WRITE).r.status);
     LONGS_EQUAL(-EFAULT, h.map(7, hd, MockIavDriver::DecBase + 4096, 4096, PROT_READ).r.status);
 }
@@ -391,7 +633,8 @@ TEST(IavBrokerOverlay, OnlyThePrimaryGuestMayMapTheOverlayWindow)
     primary = h.mustOpen(7);
     other = h.mustOpen(8);
     LONGS_EQUAL(0, h.map(7, primary, MockIavDriver::OvlBase, OLen, PROT_READ | PROT_WRITE).r.status);
-    LONGS_EQUAL(-EINVAL, h.map(7, primary, MockIavDriver::OvlBase, OLen + 4096, PROT_READ | PROT_WRITE).r.status);
+    LONGS_EQUAL(0, h.map(7, primary, MockIavDriver::OvlBase, 2 * OLen, PROT_READ | PROT_WRITE).r.status);
+    LONGS_EQUAL(-EINVAL, h.map(7, primary, MockIavDriver::OvlBase, 2 * OLen + 4096, PROT_READ | PROT_WRITE).r.status);
     LONGS_EQUAL(-EPERM, h.map(8, other, MockIavDriver::OvlBase, OLen, PROT_READ | PROT_WRITE).r.status);
     LONGS_EQUAL(-EPERM, h.map(8, other, MockIavDriver::OvlBase, OLen, PROT_READ).r.status);
 }

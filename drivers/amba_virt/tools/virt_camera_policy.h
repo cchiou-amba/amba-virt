@@ -67,20 +67,53 @@ int virt_camera_ticket_ok(const char *ticket);
 int virt_camera_intent_parse(const char *s, enum virt_camera_intent *out);
 
 /*
- * The verdict for one reserve. index is the Cavalry slice index just leased: only index 0 may get the
- * decode and overlay windows. Records intent as the ticket's last seen intent. Returns 0, or -1 for a
- * bad ticket (the verdict is then camera 0).
+ * The verdict for one reserve. primary is the role the ticket holds (virt_iav_role_of): only the primary
+ * guest gets the decode and overlay windows. Records intent as the ticket's last seen intent. Returns 0, or
+ * -1 for a bad ticket (the verdict is then camera 0).
  */
-int virt_camera_policy_decide(const char *ticket, enum virt_camera_intent intent, uint32_t index,
+int virt_camera_policy_decide(const char *ticket, enum virt_camera_intent intent, int primary,
 			      struct virt_camera_verdict *v);
 
 /* " camera=0" or " camera=1 dsp=<n> bsb=<n>[ dec=<n>][ ovl=<n>]" appended to buf. Returns the bytes written or -1. */
 int virt_camera_verdict_format(const struct virt_camera_verdict *v, char *buf, size_t len);
 
 /*
- * SET_CAMERA <ticket> <on|off|inherit>, GET_CAMERA [<ticket>] and CAMERA_STATUS. Always builds a
- * reply. Returns 0.
+ * SET_CAMERA <ticket> <on|off|inherit>, GET_CAMERA [<ticket>], CAMERA_STATUS, SET_ROLE, GET_ROLE and
+ * IAV_STATUS. Always builds a reply. Returns 0.
  */
 int virt_camera_policy_admin(const char *req, char *resp, size_t resp_len);
+
+/*
+ * ---- IAV roles, keyed by ticket ----
+ *
+ * The role of a guest is the role of the admission ticket it holds, not of the slice index or the start order: the
+ * ticket survives instance deletion and re-creation in any order, and ZEDEDA lets one instance hold a ticket at a
+ * time. The table is persisted in VIRT_IAV_ROLE_STORE and changed only by amba-virt-ctl (SET_ROLE). Lines are
+ * "<ticket> <primary|consumer>", at most one primary, at most VIRT_CAMERA_MAX_ENTRIES lines and
+ * VIRT_CAMERA_STORE_MAX_BYTES bytes, written atomically with mode 0600.
+ *
+ * A ticket's role: its line if it has one; otherwise consumer if another line names a primary; otherwise
+ * primary for VIRT_IAV_DEFAULT_PRIMARY and consumer for every other ticket. A store that does not parse makes
+ * every ticket a consumer (fail closed) until SET_ROLE writes a valid one. The role is read at each reserve, and
+ * a guest acts as the primary only while both its reserve and the current table say primary, so a demotion
+ * takes effect at once and a promotion at the guest's next start (when its windows are attached).
+ */
+#define VIRT_IAV_ROLE_STORE		"/persist/etc/amba-virt/iav-roles"
+#define VIRT_IAV_DEFAULT_PRIMARY	"amba_shm0"
+
+enum virt_iav_role {
+	VIRT_IAV_ROLE_CONSUMER = 0,
+	VIRT_IAV_ROLE_PRIMARY = 1,
+};
+
+void virt_iav_role_set_store(const char *path);
+/* Read the role store. A missing file is the default table; a corrupt one is logged and fails closed. Returns 0. */
+int virt_iav_role_load(void);
+/* The role of ticket now. A ticket that is not valid is a consumer. */
+enum virt_iav_role virt_iav_role_of(const char *ticket);
+const char *virt_iav_role_name(enum virt_iav_role role);
+
+/* The broker's status line for IAV_STATUS, and the pinning state for CAMERA_STATUS. NULL: none. */
+void virt_camera_policy_set_iav_status(int (*fn)(char *buf, size_t len));
 
 #endif /* VIRT_CAMERA_POLICY_H */

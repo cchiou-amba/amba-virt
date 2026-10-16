@@ -14,10 +14,16 @@ CXXFLAGS ?= -O2 -Wall -Wextra -Werror -std=c++11 -DAMBA_AMYOC_BUILD -DAMBA_SOC_N
 	-I$(IAV) -I$(IAV)/uapi -I$(IAV)/uapi/specific -include stdint.h
 LDFLAGS ?= -static
 
-APPS := IavRefStream IavRefCapture IavRefEvents IavRefPipeline IavRefDecode IavRefOverlay
+APPS := IavRefStream IavRefCapture IavRefEvents IavRefPipeline IavRefDecode IavRefOverlay IavRefScale IavRefImage IavRefArena IavRefAperture IavRefBlur IavRefYuvRemap IavRefWarp IavRefPreproc IavRefWinNc
 BINS := $(addprefix $(OUT)/,$(APPS))
 
 all: $(BINS)
+
+# IavRefPreproc links the demo's ResizeLetterbox640 and stb_image (the software path it is compared with).
+DEMO := ../amba-virt-demo
+$(OUT)/IavRefPreproc: IavRefPreproc.cxx IavRefCommon.hxx $(DEMO)/YoloGeometry.cxx $(DEMO)/YoloGeometry.hxx
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS) -I$(DEMO) $(LDFLAGS) -o $@ IavRefPreproc.cxx $(DEMO)/YoloGeometry.cxx
 
 $(OUT)/%: %.cxx IavRefCommon.hxx
 	@mkdir -p $(OUT)

@@ -14,6 +14,7 @@
 
 #define _GNU_SOURCE
 #include "iav_low_pool.h"
+#include "iav_new_parts.h"
 #include "iav_broker_server.h"
 #include "virt_low_lease.h"
 
@@ -695,14 +696,39 @@ static int step_sensor_check(void)
 
 /* ---- step 11: apply the resource and vout scripts ---------------------- */
 
+/*
+ * The camera apply library. Always the image's; only the qualification build, run by hand from the development
+ * tree (doc/AmbaVirtServer.md 14.3), may name a candidate library to try a change of the apply step.
+ */
+static const char *g_apply_lib = VIRT_CAMERA_APPLY_LIB;
+
+void virt_camera_pipeline_set_apply_lib(const char *path)
+{
+    g_apply_lib = path ? path : VIRT_CAMERA_APPLY_LIB;
+}
+
+/*
+ * Qualification build only (amba-virt-server-qual --iav-serve -X): free the server's IAV partitions when the
+ * pipeline is shut down, so a development run leaves the driver as an image without them found it. The image's
+ * server never calls this: the partitions are server-owned for the life of the driver (a restart reuses them).
+ */
+static bool g_free_new_parts;
+
+void virt_camera_pipeline_set_free_new_parts(int on)
+{
+    g_free_new_parts = on != 0;
+}
+
 static int step_apply(const struct virt_camera_conf *c)
 {
     amba_virt_camera_apply_fn apply = NULL;
-    void *lib = dlopen(VIRT_CAMERA_APPLY_LIB, RTLD_NOW | RTLD_LOCAL);
+    void *lib = dlopen(g_apply_lib, RTLD_NOW | RTLD_LOCAL);
     int rc;
 
+    if (g_apply_lib != (const char *)VIRT_CAMERA_APPLY_LIB)
+        PLOG("camera apply library: %s", g_apply_lib);
     if (!lib) {
-        PLOG("dlopen %s failed: %s", VIRT_CAMERA_APPLY_LIB, dlerror());
+        PLOG("dlopen %s failed: %s", g_apply_lib, dlerror());
         return -ENOENT;
     }
     *(void **)(&apply) = dlsym(lib, AMBA_VIRT_CAMERA_APPLY_SYMBOL);
@@ -978,6 +1004,12 @@ int virt_camera_pipeline_run(const struct virt_camera_conf *conf)
      */
     STEP(4, "pin the guest low pool", iav_low_pool_pin_dev());
     STEP(4, "publish the guest slices", publish_guest_slices());
+    /*
+     * The partitions the aux apertures carry beyond the driver's own (plan_iav_usb_yolo Envelope F): BLUR,
+     * ARB_BLUR and YUV_REMAP, allocated (or found again) before the resource script, whose apply sets the
+     * canvas blur only when BLUR is there. A partition that cannot be had leaves its calls refused.
+     */
+    STEP(4, "allocate the server's IAV partitions", iav_new_parts_ensure_dev());
     STEP(5, "start dsp_monitor_service", start_monitor(&g_p.conf));
     STEP(6, "load the microcode", load_microcode(g_p.conf.firmware_dir));
     STEP(7, "enter idle", enter_idle());
@@ -1017,6 +1049,11 @@ void virt_camera_pipeline_shutdown(void)
         int rc = enter_idle();
 
         PLOG("shutdown: enter idle: %d", rc);
+    }
+    if (g_free_new_parts) {
+        int rc = iav_new_parts_free_dev();
+
+        PLOG("shutdown: freed %d of the server's IAV partitions (qualification build)", rc);
     }
 
     PLOG("shutdown: stopping the 3A service");

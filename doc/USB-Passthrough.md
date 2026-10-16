@@ -116,7 +116,17 @@ them for the running kernel, along with `amba_virt_usb.ko` and the demo. Each ca
 name. The second is a metadata node. The demo picks the lowest-numbered
 node whose `VIDIOC_QUERYCAP` reports `V4L2_CAP_VIDEO_CAPTURE`. The demo's USB Webcam tab feeds
 `/dev/video0` MJPEG (`1280x720` default, `1920x1080` selectable) through
-the existing software JPEG decode and letterbox resize into YOLOX-S.
+a JPEG decode and letterbox resize into YOLOX-S. The decode runs on the IAV
+DSP through the virtual `/dev/iav` when the server admits the frame, and on
+the CPU otherwise (`doc/IavVirtualization.md`, section 9). Measured on
+`n1-655-pro` (fixed exposure, 60 s per run):
+
+| Fixed exposure, 60 s | fps | Decode p50 / p99 (ms) | Total p50 / p99 (ms) | Guest CPU (2 vCPUs) | Demo, share of one core |
+|---|---|---|---|---|---|
+| 1280x720, IAV hardware | 30.0 | 8.1 / 19.4 | 16.8 / 28.0 | 12.0 % | 18.0 % |
+| 1280x720, CPU | 31.0 | 16.0 / 20.5 | 22.7 / 28.4 | 35.0 % | 63.3 % |
+| 1920x1080, IAV hardware | 30.0 | 11.9 / 23.6 | 22.3 / 33.4 | 14.5 % | 19.4 % |
+| 1920x1080, CPU | 23.5 | 35.6 / 36.6 | 42.2 / 45.6 | 50.1 % | 94.2 % |
 
 When the adapter is assigned, Pillar suppresses the emulated `qemu-xhci`
 controller on that domain. The cloud-init ISO remains a CD, and on that

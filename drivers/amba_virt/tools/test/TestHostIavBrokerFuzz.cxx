@@ -67,6 +67,8 @@ const unsigned long Cmds[] = {
     IAV_IOC_QUERY_INFO,           IAV_IOC_QUERY_MEMBLOCK,       IAV_IOC_QUERY_DESC,
     IAV_IOC_SET_POLL_EVENT_CFG,   IAV_IOC_CLEAR_POLL_EVENT_CFG, IAV_IOC_WAIT_NEXT_IDSP_FRAME,
     IAV_IOC_ENTER_IDLE,           IAV_IOC_GDMA_COPY,            IAV_IOC_SET_IMG_SCALE,
+    IAV_IOC_SET_CHAN_CONFIG,      IAV_IOC_SET_SYSTEM_RESOURCE,  IAV_IOC_ENABLE_PREVIEW,
+    IAV_IOC_DECODE_JPEG,          IAV_IOC_ALLOC_MEM_PART,       IAV_IOC_APPLY_VIDEO_PROC,
 };
 
 const uint32_t Cids[] = {1, 2, 3, 4, 0, 0xffffffffu};
@@ -78,7 +80,32 @@ std::vector<uint8_t> baseRequest(Rng &rng, const std::vector<uint64_t> &handles)
     uint8_t arg[AMBA_VIRT_MAX_MSG];
 
     memset(arg, 0, sizeof(arg));
-    switch (rng.below(7)) {
+    switch (rng.below(9)) {
+    case 5: { /* a negotiation with random fields, valid sizes favoured */
+        struct amba_virt_iav_hello hl;
+
+        hl.revision = rng.below(2) ? AMBA_VIRT_IAV_REVISION : (uint32_t)rng.extreme();
+        hl.page_size = rng.below(2) ? 4096u << rng.below(5) : (uint32_t)rng.extreme();
+        hl.features = rng.below(2) ? rng.next() : ~0ull;
+        hl.max_window_id = (uint32_t)(rng.below(2) ? rng.below(8) : rng.extreme());
+        hl.table_rows = (uint32_t)rng.next();
+        hl.table_hash = rng.next();
+        return IavBrokerHarness::build(AMBA_VIRT_IAV_OP_HELLO, 0, 0, 0, 0, &hl, sizeof(hl));
+    }
+    case 6: { /* a private-slice ioctl: an admission request and then an ioctl argument */
+        struct amba_virt_iav_slice_req sr;
+        unsigned long cmd = Cmds[rng.below(sizeof(Cmds) / sizeof(Cmds[0]))];
+        std::vector<uint8_t> a(sizeof(sr) + rng.below(64));
+
+        sr.claimed_slice = rng.below(9);
+        sr.partition_id = rng.below(2) ? 193 : (uint32_t)rng.extreme();
+        sr.offset = rng.below(2) ? 4096 * rng.below(32) : rng.extreme();
+        sr.length = rng.below(2) ? 4096 : rng.extreme();
+        sr.phys = rng.below(4) ? 0 : rng.extreme();
+        memcpy(&a[0], &sr, sizeof(sr));
+        return IavBrokerHarness::build(AMBA_VIRT_IAV_OP_SLICE, handle, (uint32_t)cmd, rng.next(), 0, &a[0],
+                                       (uint32_t)a.size());
+    }
     case 0:
         return IavBrokerHarness::build(AMBA_VIRT_IAV_OP_OPEN, 0, 0, 0, 0, NULL, 0);
     case 1:

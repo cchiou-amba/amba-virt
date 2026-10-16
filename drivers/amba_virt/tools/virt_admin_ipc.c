@@ -381,7 +381,10 @@ static void handle_client(int client_fd)
 		virt_low_lease_admin(req_buf, resp_buf, sizeof(resp_buf));
 	} else if (strcmp(cmd, "SET_CAMERA") == 0 ||
 		   strcmp(cmd, "GET_CAMERA") == 0 ||
-		   strcmp(cmd, "CAMERA_STATUS") == 0) {
+		   strcmp(cmd, "CAMERA_STATUS") == 0 ||
+		   strcmp(cmd, "SET_ROLE") == 0 ||
+		   strcmp(cmd, "GET_ROLE") == 0 ||
+		   strcmp(cmd, "IAV_STATUS") == 0) {
 		virt_camera_policy_admin(req_buf, resp_buf, sizeof(resp_buf));
 	} else if (strcmp(cmd, "POOLS") == 0) {
 		virt_admin_format_pools(resp_buf, sizeof(resp_buf));

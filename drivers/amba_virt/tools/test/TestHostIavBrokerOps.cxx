@@ -93,16 +93,19 @@ TEST(IavBrokerOps, MapAuthorizesTheBaseOfAWindow)
     LONGS_EQUAL(AMBA_VIRT_IAV_WIN_BSB, m.window);
 }
 
-TEST(IavBrokerOps, MapAllowsTheBitstreamRingTwiceButNoMore)
+TEST(IavBrokerOps, MapAllowsEveryWindowTwiceButNoMore)
 {
     struct amba_virt_iav_map m = mapOut(h->map(7, hd, MockIavDriver::BsbBase,
                                                2 * MockIavDriver::BsbLen, PROT_READ));
 
     CHECK(m.length == 2 * MockIavDriver::BsbLen);
     refused(h->map(7, hd, MockIavDriver::BsbBase, 2 * MockIavDriver::BsbLen + 4096, PROT_READ), EINVAL);
-    /* A partition that is not a ring cannot be mapped twice. */
-    refused(h->map(7, hd, MockIavDriver::DspBase, 2 * MockIavDriver::DspLen, PROT_READ), EINVAL);
-    refused(h->map(7, hd, MockIavDriver::DspBase, MockIavDriver::DspLen + 4096, PROT_READ), EINVAL);
+    /* The ring rule of the real driver holds for every partition (G8): twice, and not a page more. */
+    m = mapOut(h->map(7, hd, MockIavDriver::DspBase, 2 * MockIavDriver::DspLen, PROT_READ));
+    CHECK(m.length == 2 * MockIavDriver::DspLen);
+    m = mapOut(h->map(7, hd, MockIavDriver::DspBase, MockIavDriver::DspLen + 4096, PROT_READ));
+    CHECK(m.length == MockIavDriver::DspLen + 4096);
+    refused(h->map(7, hd, MockIavDriver::DspBase, 2 * MockIavDriver::DspLen + 4096, PROT_READ), EINVAL);
 }
 
 TEST(IavBrokerOps, MapRefusesWhatIsNotAWindowBase)

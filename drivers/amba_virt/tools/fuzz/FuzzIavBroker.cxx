@@ -12,6 +12,7 @@
  * Copyright (C) 2026, Ambarella International LLC.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -26,6 +27,39 @@
         }                                                                             \
     } while (0)
 
+/*
+ * The arena (plan_iav_usb_yolo, Envelope E): guest 1 holds slice 4 of the pinned pool, no other guest holds a slice.
+ * The mock driver records a violation for any pool buffer outside guest 1's arena, and the arena accounting must be
+ * balanced at the end. An input whose first byte is 0xa5 starts with guest 1 negotiating the arena, so the fuzzer
+ * reaches OP_ARENA without having to build a HELLO first.
+ */
+static int g_begins, g_ends;
+
+static int fuzzSliceOf(void *ctx, uint32_t cid, uint32_t *window)
+{
+    (void)ctx;
+    if (cid != 1 || window == NULL) {
+        return -ENOENT;
+    }
+    *window = 4;
+    return 0;
+}
+
+static int fuzzArenaBegin(void *ctx, uint32_t index)
+{
+    (void)ctx;
+    (void)index;
+    g_begins++;
+    return 0;
+}
+
+static void fuzzArenaEnd(void *ctx, uint32_t index)
+{
+    (void)ctx;
+    (void)index;
+    g_ends++;
+}
+
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     static const uint32_t cids[] = {1, 2, 3, 0, 0xffffffffu};
@@ -33,6 +67,45 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     std::vector<uint64_t> handles;
     size_t pos = 0;
     int messages = 0;
+    struct virt_iav_guest_pool pool;
+
+    h.addDecodeWindow();
+    memset(&pool, 0, sizeof(pool));
+    pool.partition_id = MockIavDriver::PoolPid;
+    pool.parent_base = MockIavDriver::PoolBase;
+    pool.parent_bytes = MockIavDriver::PoolLen;
+    pool.slice_count = 8;
+    pool.slice_bytes = MockIavDriver::SliceBytes;
+    iav_broker_set_guest_pool(&h.b, &pool);
+    h.b.ops.slice_of = fuzzSliceOf;
+    h.b.ops.arena_begin = fuzzArenaBegin;
+    h.b.ops.arena_end = fuzzArenaEnd;
+    h.drv.allowArena(4 * MockIavDriver::SliceBytes, MockIavDriver::SliceBytes - 4096);
+    /* the aux aperture (Envelope F): guest 1 has the standard one; the mock judges every table against it */
+    h.drv.setStandardAperture(1);
+    h.drv.setBlurPartitions(0x100000, 0);
+    iav_broker_set_aux_sources(&h.b, MockIavDriver::StandardAux, MockIavDriver::AuxCount);
+    g_begins = g_ends = 0;
+    if (size > 0 && data[0] == 0xa5) {
+        struct amba_virt_iav_hello hl;
+        std::vector<uint8_t> v;
+
+        memset(&hl, 0, sizeof(hl));
+        hl.revision = AMBA_VIRT_IAV_REVISION;
+        hl.page_size = 4096;
+        hl.features = AMBA_VIRT_IAV_F_EXT_INFO | AMBA_VIRT_IAV_F_SIZE_OVERRIDE | AMBA_VIRT_IAV_F_ARENA |
+                      AMBA_VIRT_IAV_F_APERTURE | AMBA_VIRT_IAV_F_INLINE;
+        hl.max_window_id = 3;
+        v = IavBrokerHarness::build(AMBA_VIRT_IAV_OP_HELLO, 0, 0, 0, 0, &hl, sizeof(hl));
+        {
+            uint64_t g = h.send(1, &v[0], v.size()).r.value;
+
+            FUZZ_CHECK(g & AMBA_VIRT_IAV_F_ARENA);
+            FUZZ_CHECK(g & AMBA_VIRT_IAV_F_APERTURE);
+            FUZZ_CHECK(g & AMBA_VIRT_IAV_F_INLINE);
+        }
+        pos = 1;
+    }
 
     while (pos + 3 <= size && messages < 64) {
         uint32_t cid = cids[data[pos] % (sizeof(cids) / sizeof(cids[0]))];
@@ -77,6 +150,31 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (r.r.status == 0 && r.r.rc == 0 && r.r.handle != 0 && handles.size() < 32) {
             handles.push_back(r.r.handle);
         }
+        /* an authorized map of an aperture entry stays inside guest 1's aperture, within twice its entry */
+        if (req.size() >= sizeof(struct amba_virt_iav_req) && r.r.status == 0) {
+            struct amba_virt_iav_req q;
+
+            memcpy(&q, &req[0], sizeof(q));
+            if (q.op == AMBA_VIRT_IAV_OP_MAP && r.out.size() == sizeof(struct amba_virt_iav_map)) {
+                struct amba_virt_iav_map m;
+
+                memcpy(&m, &r.out[0], sizeof(m));
+                if (m.window >= AMBA_VIRT_IAV_ENT_ID_AUX) {
+                    bool known = false;
+
+                    FUZZ_CHECK(cid == 1);
+                    for (unsigned int k = 0; k < MockIavDriver::AuxCount; k++) {
+                        const struct iav_broker_aux_entry &e = MockIavDriver::StandardAux[k];
+
+                        if (m.window == AMBA_VIRT_IAV_ENT_ID_AUX + e.pid) {
+                            known = true;
+                            FUZZ_CHECK(m.window_offset == e.offset && m.length <= 2 * e.len && q.arg_value == e.base);
+                        }
+                    }
+                    FUZZ_CHECK(known);
+                }
+            }
+        }
         FUZZ_CHECK(h.drv.violations().empty());
         for (size_t c = 0; c < sizeof(cids) / sizeof(cids[0]); c++) {
             FUZZ_CHECK(iav_broker_cid_sessions(&h.b, cids[c]) <= 6);
@@ -90,6 +188,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
     FUZZ_CHECK(iav_broker_session_count(&h.b) == 0);
     FUZZ_CHECK(h.drv.openFds() == 0);
+    FUZZ_CHECK(g_begins == g_ends);
     return 0;
 }
 

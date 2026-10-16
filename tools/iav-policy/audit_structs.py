@@ -87,10 +87,12 @@ def main():
         only = sys.argv[sys.argv.index("--ioctl") + 1:]
     structs = parse_structs(open(pre).read())
     for line in open(table):
-        m = re.match(r"IAV_IOCTL\((\w+), (\w+), (\w+), (\w+), (.*?), ([\w|]+), ([\w|0]+)\)", line)
+        m = re.match(r"IAV_IOCTL\((\w+), (\w+), (\w+), (\w+), (.*?), ([\w|]+), ([\w|0]+)(?:, (.*))?\)\s*$", line)
         if not m:
             continue
         name, size = m.group(1), m.group(5)
+        if m.group(8) and m.group(8) != "0":
+            size = m.group(8)  # the handler copies the wire-size type, so that is the struct to audit
         if only and name not in only:
             continue
         sm = re.search(r"struct (\w+)", size)

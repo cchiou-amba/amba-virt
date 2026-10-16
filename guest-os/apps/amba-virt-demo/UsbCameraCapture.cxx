@@ -24,6 +24,9 @@ UsbCameraCapture::UsbCameraCapture()
       _resolution(Resolution720p),
       _bufferCount(0),
       _streaming(false),
+      _exposureFixed(false),
+      _savedAutoMode(V4L2_EXPOSURE_APERTURE_PRIORITY),
+      _savedGain(-1),
       _width(0),
       _height(0),
       _fps(0)
@@ -243,6 +246,7 @@ void UsbCameraCapture::releaseDevice(bool transition)
         close(_fd);
         _fd = -1;
     }
+    _exposureFixed = false;     /* the device is gone or released; closeCamera() restored it first when it could */
     _bufferCount = 0;
 
     if (transition && (_linkState == LinkOpening || _linkState == LinkStreaming))
@@ -251,7 +255,111 @@ void UsbCameraCapture::releaseDevice(bool transition)
 
 void UsbCameraCapture::closeCamera()
 {
+    if (_exposureFixed)
+        restoreAutoExposure();
     releaseDevice(true);
+}
+
+int UsbCameraCapture::clampValue(int value, int minimum, int maximum)
+{
+    if (value < minimum)
+        return minimum;
+    if (value > maximum)
+        return maximum;
+    return value;
+}
+
+int UsbCameraCapture::controlGet(uint32_t id, int *value)
+{
+    struct v4l2_control ctl{};
+    if (_fd < 0)
+        return -ENODEV;
+    ctl.id = id;
+    if (ioctl(_fd, VIDIOC_G_CTRL, &ctl) < 0)
+        return -errno;
+    *value = ctl.value;
+    return 0;
+}
+
+int UsbCameraCapture::controlSet(uint32_t id, int value)
+{
+    struct v4l2_control ctl{};
+    if (_fd < 0)
+        return -ENODEV;
+    ctl.id = id;
+    ctl.value = value;
+    if (ioctl(_fd, VIDIOC_S_CTRL, &ctl) < 0)
+        return -errno;
+    return 0;
+}
+
+int UsbCameraCapture::controlRange(uint32_t id, int *minimum, int *maximum)
+{
+    struct v4l2_queryctrl q{};
+    if (_fd < 0)
+        return -ENODEV;
+    q.id = id;
+    if (ioctl(_fd, VIDIOC_QUERYCTRL, &q) < 0)
+        return -errno;
+    if (q.flags & V4L2_CTRL_FLAG_DISABLED)
+        return -ENOTSUP;
+    *minimum = q.minimum;
+    *maximum = q.maximum;
+    return 0;
+}
+
+int UsbCameraCapture::setFixedExposure(int exposureAbs, int gain, ExposureState *state)
+{
+    int lo = 0, hi = 0, rc;
+
+    if (_fd < 0 || !_streaming)
+        return -ENODEV;
+    if (!_exposureFixed) {
+        int mode = 0, g = 0;
+        if (controlGet(V4L2_CID_EXPOSURE_AUTO, &mode) == 0)
+            _savedAutoMode = mode;
+        _savedGain = controlGet(V4L2_CID_GAIN, &g) == 0 ? g : -1;
+    }
+    /* the exposure control refuses writes (EACCES) while the camera is in auto exposure, so the mode comes first */
+    rc = controlSet(V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
+    if (rc < 0)
+        return rc;
+    _exposureFixed = true;
+    if (controlRange(V4L2_CID_EXPOSURE_ABSOLUTE, &lo, &hi) == 0) {
+        int top = hi < kFixedExposureMax ? hi : kFixedExposureMax;
+        rc = controlSet(V4L2_CID_EXPOSURE_ABSOLUTE, clampValue(exposureAbs, lo, top));
+        if (rc < 0)
+            return rc;
+    }
+    if (controlRange(V4L2_CID_GAIN, &lo, &hi) == 0) {
+        rc = controlSet(V4L2_CID_GAIN, clampValue(gain, lo, hi));
+        if (rc < 0)
+            return rc;
+    }
+    if (state) {
+        int mode = 0;
+        state->fixed = controlGet(V4L2_CID_EXPOSURE_AUTO, &mode) == 0 && mode == V4L2_EXPOSURE_MANUAL;
+        if (controlGet(V4L2_CID_EXPOSURE_ABSOLUTE, &state->exposureAbs) < 0)
+            state->exposureAbs = -1;
+        if (controlGet(V4L2_CID_GAIN, &state->gain) < 0)
+            state->gain = -1;
+    }
+    return 0;
+}
+
+int UsbCameraCapture::restoreAutoExposure()
+{
+    int rc = 0;
+
+    if (!_exposureFixed)
+        return 0;
+    if (_fd >= 0) {
+        rc = controlSet(V4L2_CID_EXPOSURE_AUTO, _savedAutoMode);
+        if (_savedGain >= 0)
+            controlSet(V4L2_CID_GAIN, _savedGain);
+    }
+    _exposureFixed = false;
+    return rc;
 }
 
 int UsbCameraCapture::startStreaming(const char *path, const Format &fmt)
@@ -394,7 +502,7 @@ int UsbCameraCapture::openUvc(int resolution)
     return 0;
 }
 
-int UsbCameraCapture::readJpeg(uint8_t *dst, size_t dstCap, size_t *outLen)
+int UsbCameraCapture::readJpeg(uint8_t *dst, size_t dstCap, size_t *outLen, uint32_t *sequence)
 {
     if (!dst || !outLen || dstCap == 0)
         return -EINVAL;
@@ -448,6 +556,8 @@ int UsbCameraCapture::readJpeg(uint8_t *dst, size_t dstCap, size_t *outLen)
     } else {
         memcpy(dst, _bufferStart[buf.index], used);
         *outLen = used;
+        if (sequence)
+            *sequence = buf.sequence;
     }
 
     if (ioctl(_fd, VIDIOC_QBUF, &buf) < 0) {

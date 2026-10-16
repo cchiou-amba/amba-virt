@@ -15,6 +15,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <string>
+
 #include "CppUTest/TestHarness.h"
 
 extern "C" {
@@ -89,11 +91,14 @@ TEST_GROUP(CameraPolicy)
     char store[96];
     char tmp[112];
     char leases[96];
+    char roles[96];
 
     void fresh()
     {
         virt_camera_policy_reset();
         virt_camera_policy_set_store(store);
+        virt_iav_role_set_store(roles);
+        unlink(roles);
         virt_slice_lease_reset();
         virt_slice_lease_set_store(leases);
         virt_slice_lease_set_geometry(1, 8, kSliceBytes);
@@ -106,6 +111,7 @@ TEST_GROUP(CameraPolicy)
         snprintf(store, sizeof(store), "%s/camera-tickets", dir);
         snprintf(tmp, sizeof(tmp), "%s.tmp", store);
         snprintf(leases, sizeof(leases), "%s/leases", dir);
+        snprintf(roles, sizeof(roles), "%s/iav-roles", dir);
         fresh();
     }
 
@@ -115,6 +121,7 @@ TEST_GROUP(CameraPolicy)
         unlink(tmp);
         unlink(store);
         unlink(leases);
+        unlink(roles);
         rmdir(dir);
         virt_camera_policy_reset();
         virt_slice_lease_reset();
@@ -188,9 +195,9 @@ TEST(CameraPolicy, verdict_matrix_is_ready_and_override_or_intent)
                 reserve("RESERVE_SLICE_MIN", kUuidA, 1, "amba_shm3", kIntent[in], resp, sizeof(resp));
                 CHECK_TRUE(starts_with(resp, "OK index=1 "));
                 if (expect) {
-                    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216\n"));
+                    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 role=consumer\n"));
                 } else {
-                    CHECK_TRUE(has(resp, " camera=0\n"));
+                    CHECK_TRUE(has(resp, " camera=0 role=consumer\n"));
                 }
                 cases++;
             }
@@ -199,7 +206,7 @@ TEST(CameraPolicy, verdict_matrix_is_ready_and_override_or_intent)
     LONGS_EQUAL(18, cases);
 }
 
-TEST(CameraPolicy, decode_and_overlay_only_for_index_zero)
+TEST(CameraPolicy, decode_and_overlay_only_for_the_primary_ticket)
 {
     char resp[256];
     unsigned int i;
@@ -208,19 +215,19 @@ TEST(CameraPolicy, decode_and_overlay_only_for_index_zero)
     windows_all(1000);
     reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm0", "on", resp, sizeof(resp));
     CHECK_TRUE(starts_with(resp, "OK index=0 "));
-    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 dec=8388608 ovl=8388608\n"));
+    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 dec=8388608 ovl=8388608 role=primary\n"));
 
     for (i = 1; i <= 7; i++) {
         snprintf(uuid, sizeof(uuid), "00000000-0000-4000-8000-00000000000%u", i);
         reserve("RESERVE_SLICE_MIN", uuid, 1, "amba_shm1", "on", resp, sizeof(resp));
         CHECK_TRUE(starts_with(resp, "OK index="));
-        CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216\n"));
+        CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 role=consumer\n"));
         CHECK_FALSE(has(resp, " dec="));
         CHECK_FALSE(has(resp, " ovl="));
     }
 }
 
-TEST(CameraPolicy, index_zero_without_a_decode_window_gets_overlay_only)
+TEST(CameraPolicy, the_primary_without_a_decode_window_gets_overlay_only)
 {
     struct virt_camera_window w[3] = {
         { AMBA_VIRT_IAV_WIN_DSP, kDsp }, { AMBA_VIRT_IAV_WIN_BSB, kBsb }, { AMBA_VIRT_IAV_WIN_OVL, kOvl },
@@ -229,7 +236,7 @@ TEST(CameraPolicy, index_zero_without_a_decode_window_gets_overlay_only)
 
     virt_camera_policy_set_windows(w, 3, 1000);
     reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm0", "on", resp, sizeof(resp));
-    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 ovl=8388608\n"));
+    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 ovl=8388608 role=primary\n"));
     CHECK_FALSE(has(resp, " dec="));
 }
 
@@ -244,9 +251,9 @@ TEST(CameraPolicy, windows_are_ready_only_with_dsp_and_bsb)
 
     virt_camera_policy_set_windows(dsp_only, 1, 777);
     admin("CAMERA_STATUS", resp, sizeof(resp));
-    STRCMP_EQUAL("OK windows=none dsp=1073741824 bsb=0 dec=0 ovl=0 ready_ms=0\n", resp);
+    STRCMP_EQUAL("OK windows=none dsp=1073741824 bsb=0 dec=0 ovl=0 ready_ms=0 pinning=unknown\n", resp);
     reserve("RESERVE_SLICE_MIN", kUuidA, 1, "amba_shm1", "on", resp, sizeof(resp));
-    CHECK_TRUE(has(resp, " camera=0\n"));
+    CHECK_TRUE(has(resp, " camera=0 role=consumer\n"));
 
     virt_camera_policy_set_windows(bsb_only, 1, 777);
     admin("CAMERA_STATUS", resp, sizeof(resp));
@@ -258,7 +265,7 @@ TEST(CameraPolicy, windows_are_ready_only_with_dsp_and_bsb)
 
     virt_camera_policy_set_windows(nullptr, 0, 777);
     admin("CAMERA_STATUS", resp, sizeof(resp));
-    STRCMP_EQUAL("OK windows=none dsp=0 bsb=0 dec=0 ovl=0 ready_ms=0\n", resp);
+    STRCMP_EQUAL("OK windows=none dsp=0 bsb=0 dec=0 ovl=0 ready_ms=0 pinning=unknown\n", resp);
 }
 
 TEST(CameraPolicy, status_reports_windows_and_the_ready_time)
@@ -268,8 +275,8 @@ TEST(CameraPolicy, status_reports_windows_and_the_ready_time)
 
     windows_all(12345);
     admin("CAMERA_STATUS", resp, sizeof(resp));
-    STRCMP_EQUAL("OK windows=ready dsp=1073741824 bsb=16777216 dec=8388608 ovl=8388608 ready_ms=12345\n",
-                 resp);
+    STRCMP_EQUAL("OK windows=ready dsp=1073741824 bsb=16777216 dec=8388608 ovl=8388608 ready_ms=12345 "
+                 "pinning=unknown\n", resp);
     admin("CAMERA_STATUS extra", resp, sizeof(resp));
     STRCMP_EQUAL("ERR INVAL\n", resp);
 
@@ -354,7 +361,7 @@ TEST(CameraPolicy, a_repeat_reserve_recomputes_the_verdict_and_keeps_index_and_e
 
     admin("SET_CAMERA amba_shm1 off", req, sizeof(req));
     reserve("RESERVE_SLICE_MIN", kUuidA, 1, "amba_shm1", "on", second, sizeof(second));
-    CHECK_TRUE(has(second, " camera=0\n"));
+    CHECK_TRUE(has(second, " camera=0 role=consumer\n"));
 
     admin("SET_CAMERA amba_shm1 inherit", req, sizeof(req));
     reserve("RESERVE_SLICE_MIN", kUuidA, 1, "amba_shm1", "on", third, sizeof(third));
@@ -752,6 +759,245 @@ TEST(CameraPolicy, decide_refuses_a_bad_ticket)
 
     read_file("iav.conf.example", conf_buf, sizeof(conf_buf), &conf_len);
     CHECK_TRUE(has(conf_buf, "amba_shm0 adapter"));
+}
+
+/* ---- IAV roles keyed by ticket (G19) ---- */
+
+static void role_is(const char *ticket, enum virt_iav_role want)
+{
+    LONGS_EQUAL_TEXT(want, virt_iav_role_of(ticket), ticket);
+}
+
+TEST(CameraPolicy, roles_default_to_amba_shm0_primary_and_everyone_else_consumer)
+{
+    char resp[1024];
+    char t[16];
+    unsigned int i;
+
+    role_is("amba_shm0", VIRT_IAV_ROLE_PRIMARY);
+    for (i = 1; i < 8; i++) {
+        snprintf(t, sizeof(t), "amba_shm%u", i);
+        role_is(t, VIRT_IAV_ROLE_CONSUMER);
+    }
+    role_is("other", VIRT_IAV_ROLE_CONSUMER);
+    role_is("", VIRT_IAV_ROLE_CONSUMER);
+    role_is(nullptr, VIRT_IAV_ROLE_CONSUMER);
+    role_is("amba/shm0", VIRT_IAV_ROLE_CONSUMER);
+    admin("GET_ROLE", resp, sizeof(resp));
+    STRCMP_EQUAL("OK COUNT 1 store=missing\nROLE amba_shm0 role=primary source=default\n", resp);
+    LONGS_EQUAL(-1, access(roles, F_OK));
+}
+
+TEST(CameraPolicy, set_role_keeps_at_most_one_primary_and_persists)
+{
+    char resp[1024], file[256];
+    long len = 0;
+
+    admin("SET_ROLE amba_shm3 primary", resp, sizeof(resp));
+    STRCMP_EQUAL("OK\n", resp);
+    role_is("amba_shm3", VIRT_IAV_ROLE_PRIMARY);
+    role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+    read_file(roles, file, sizeof(file), &len);
+    STRCMP_EQUAL("amba_shm3 primary\n", file);
+
+    admin("SET_ROLE amba_shm5 primary", resp, sizeof(resp));
+    STRCMP_EQUAL("OK\n", resp);
+    role_is("amba_shm5", VIRT_IAV_ROLE_PRIMARY);
+    role_is("amba_shm3", VIRT_IAV_ROLE_CONSUMER);
+    role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+    read_file(roles, file, sizeof(file), &len);
+    STRCMP_EQUAL("amba_shm5 primary\n", file);
+
+    /* The table survives a restart of the server. */
+    virt_camera_policy_reset();
+    virt_iav_role_set_store(roles);
+    role_is("amba_shm5", VIRT_IAV_ROLE_CONSUMER);
+    LONGS_EQUAL(0, virt_iav_role_load());
+    role_is("amba_shm5", VIRT_IAV_ROLE_PRIMARY);
+    role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+
+    admin("SET_ROLE amba_shm5 inherit", resp, sizeof(resp));
+    STRCMP_EQUAL("OK\n", resp);
+    role_is("amba_shm5", VIRT_IAV_ROLE_CONSUMER);
+    role_is("amba_shm0", VIRT_IAV_ROLE_PRIMARY);
+    read_file(roles, file, sizeof(file), &len);
+    LONGS_EQUAL(0, len);
+
+    /* Demoting the default primary leaves no primary at all. */
+    admin("SET_ROLE amba_shm0 consumer", resp, sizeof(resp));
+    STRCMP_EQUAL("OK\n", resp);
+    role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+    admin("GET_ROLE amba_shm0", resp, sizeof(resp));
+    STRCMP_EQUAL("OK COUNT 1 store=valid\nROLE amba_shm0 role=consumer source=store\n", resp);
+}
+
+TEST(CameraPolicy, set_role_arguments_are_validated)
+{
+    static const char *const kBad[] = {
+        "SET_ROLE", "SET_ROLE amba_shm0", "SET_ROLE amba_shm0 owner", "SET_ROLE amba_shm0 PRIMARY",
+        "SET_ROLE amba/shm0 primary", "SET_ROLE amba_shm0 primary extra",
+        "SET_ROLE aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa primary",
+        "GET_ROLE a b", "GET_ROLE bad/ticket", "IAV_STATUS extra",
+    };
+    char resp[256];
+    unsigned int i;
+
+    for (i = 0; i < sizeof(kBad) / sizeof(kBad[0]); i++) {
+        admin(kBad[i], resp, sizeof(resp));
+        STRCMP_EQUAL_TEXT("ERR INVAL\n", resp, kBad[i]);
+    }
+    LONGS_EQUAL(-1, access(roles, F_OK));
+    role_is("amba_shm0", VIRT_IAV_ROLE_PRIMARY);
+    /* No broker registered: IAV_STATUS says so. */
+    admin("IAV_STATUS", resp, sizeof(resp));
+    STRCMP_EQUAL("ERR NO_BROKER\n", resp);
+}
+
+TEST(CameraPolicy, a_corrupt_role_store_fails_closed_until_set_role_repairs_it)
+{
+    static const char *const kCorrupt[] = {
+        "amba_shm1 primary\namba_shm2 primary\n",    /* two primaries */
+        "amba_shm1 consumer\namba_shm1 primary\n",   /* duplicate ticket */
+        "amba_shm1 owner\n",                         /* unknown role */
+        "amba/shm1 primary\n",                       /* bad ticket */
+        "amba_shm1  primary\n",                      /* two spaces */
+        "amba_shm1 primary \n",                      /* trailing space */
+        "amba_shm1\n",                               /* no role */
+        "\n",                                        /* empty line */
+    };
+    char resp[1024];
+    unsigned int i;
+
+    for (i = 0; i < sizeof(kCorrupt) / sizeof(kCorrupt[0]); i++) {
+        fresh();
+        write_file(roles, kCorrupt[i], strlen(kCorrupt[i]));
+        LONGS_EQUAL(0, virt_iav_role_load());
+        role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+        role_is("amba_shm1", VIRT_IAV_ROLE_CONSUMER);
+        role_is("amba_shm2", VIRT_IAV_ROLE_CONSUMER);
+        admin("GET_ROLE amba_shm0", resp, sizeof(resp));
+        STRCMP_EQUAL_TEXT("OK COUNT 1 store=invalid\nROLE amba_shm0 role=consumer source=invalid-store\n", resp,
+                          kCorrupt[i]);
+    }
+    {
+        /* a NUL inside, more than 4096 bytes, more than 64 lines */
+        char big[5000];
+        std::string many;
+
+        fresh();
+        write_file(roles, "amba_shm1 primary\0x\n", 20);
+        virt_iav_role_load();
+        role_is("amba_shm1", VIRT_IAV_ROLE_CONSUMER);
+        fresh();
+        memset(big, 'a', sizeof(big));
+        write_file(roles, big, sizeof(big));
+        virt_iav_role_load();
+        role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+        fresh();
+        for (i = 0; i < 65; i++)
+            many += "t" + std::to_string(i) + " consumer\n";
+        write_file(roles, many.data(), many.size());
+        virt_iav_role_load();
+        role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+    }
+    admin("SET_ROLE amba_shm2 primary", resp, sizeof(resp));
+    STRCMP_EQUAL("OK\n", resp);
+    role_is("amba_shm2", VIRT_IAV_ROLE_PRIMARY);
+    role_is("amba_shm0", VIRT_IAV_ROLE_CONSUMER);
+    admin("GET_ROLE amba_shm2", resp, sizeof(resp));
+    STRCMP_EQUAL("OK COUNT 1 store=valid\nROLE amba_shm2 role=primary source=store\n", resp);
+}
+
+TEST(CameraPolicy, a_role_store_that_cannot_be_written_changes_nothing)
+{
+    char resp[256];
+
+    virt_iav_role_set_store("/proc/amba-virt-no-such-dir/iav-roles");
+    admin("SET_ROLE amba_shm4 primary", resp, sizeof(resp));
+    STRCMP_EQUAL("ERR PERSIST\n", resp);
+    role_is("amba_shm4", VIRT_IAV_ROLE_CONSUMER);
+    role_is("amba_shm0", VIRT_IAV_ROLE_PRIMARY);
+}
+
+TEST(CameraPolicy, the_grant_carries_the_role_of_the_ticket_not_of_the_index)
+{
+    char resp[256], ticket[64];
+    int primary = -1;
+
+    windows_all(1000);
+    admin("SET_ROLE amba_shm3 primary", resp, sizeof(resp));
+    STRCMP_EQUAL("OK\n", resp);
+    /* amba_shm3 takes index 1, but it is the primary: decode and overlay come with it. */
+    reserve("RESERVE_SLICE_MIN", kUuidA, 1, "amba_shm3", "on", resp, sizeof(resp));
+    CHECK_TRUE(starts_with(resp, "OK index=1 "));
+    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 dec=8388608 ovl=8388608 role=primary\n"));
+    LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(1, ticket, sizeof(ticket), &primary));
+    STRCMP_EQUAL("amba_shm3", ticket);
+    LONGS_EQUAL(1, primary);
+    /* amba_shm0 at index 0 is now a consumer: no decode or overlay. */
+    reserve("RESERVE_SLICE_AT", "22222222-2222-4222-8222-222222222222", 0, "amba_shm0", "on", resp,
+            sizeof(resp));
+    CHECK_TRUE(starts_with(resp, "OK index=0 "));
+    CHECK_TRUE(has(resp, " camera=1 dsp=1073741824 bsb=16777216 role=consumer\n"));
+    LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(0, ticket, sizeof(ticket), &primary));
+    STRCMP_EQUAL("amba_shm0", ticket);
+    LONGS_EQUAL(0, primary);
+    LONGS_EQUAL(1u, virt_slice_lease_ticket_count("amba_shm3"));
+    LONGS_EQUAL(0u, virt_slice_lease_ticket_count("amba_shm7"));
+    LONGS_EQUAL(0u, virt_slice_lease_ticket_count(""));
+    LONGS_EQUAL(-1, virt_slice_lease_ticket_of_index(5, ticket, sizeof(ticket), &primary));
+
+    /* A role change reaches a running guest's lease at its next reserve (its next start). */
+    admin("SET_ROLE amba_shm3 inherit", resp, sizeof(resp));
+    reserve("RESERVE_SLICE_MIN", kUuidA, 1, "amba_shm3", "on", resp, sizeof(resp));
+    CHECK_TRUE(has(resp, " role=consumer\n"));
+    CHECK_FALSE(has(resp, " dec="));
+    LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(1, ticket, sizeof(ticket), &primary));
+    LONGS_EQUAL(0, primary);
+}
+
+TEST(CameraPolicy, the_lease_store_keeps_ticket_and_role_and_reads_older_lines)
+{
+    char resp[256], ticket[64], file[1024];
+    int primary = -1;
+    long len = 0;
+    const char *old_and_bad =
+        "33333333-3333-4333-8333-333333333333 2 7 1073741824\n"                      /* an older server's line */
+        "44444444-4444-4444-8444-444444444444 3 8 1073741824 amba/x primary\n"       /* bad ticket */
+        "55555555-5555-4555-8555-555555555555 4 9 1073741824 amba_shm4 owner\n"      /* bad role */
+        "66666666-6666-4666-8666-666666666666 5 10 1073741824 amba_shm5\n"           /* five fields */
+        "77777777-7777-4777-8777-777777777777 6 11 1073741824 amba_shm6 consumer\n";
+
+    reserve("RESERVE_SLICE_AT", kUuidA, 0, "amba_shm0", "absent", resp, sizeof(resp));
+    CHECK_TRUE(has(resp, " role=primary\n"));
+    read_file(leases, file, sizeof(file), &len);
+    CHECK_TRUE(has(file, " 0 1 1073741824 amba_shm0 primary\n"));
+
+    write_file(leases, old_and_bad, strlen(old_and_bad));
+    virt_slice_lease_reset();
+    virt_slice_lease_set_store(leases);
+    virt_slice_lease_set_geometry(1, 8, kSliceBytes);
+    LONGS_EQUAL(0, virt_slice_lease_load());
+    LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(2, ticket, sizeof(ticket), &primary));
+    STRCMP_EQUAL("", ticket);
+    /* A lease whose ticket or role does not parse is kept (its index stays taken) with no ticket. */
+    for (unsigned int idx = 3; idx <= 5; idx++) {
+        primary = -1;
+        LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(idx, ticket, sizeof(ticket), &primary));
+        STRCMP_EQUAL("", ticket);
+        LONGS_EQUAL(0, primary);
+        LONGS_EQUAL(1, virt_slice_lease_index_used(idx));
+    }
+    LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(6, ticket, sizeof(ticket), &primary));
+    STRCMP_EQUAL("amba_shm6", ticket);
+    LONGS_EQUAL(0, primary);
+
+    /* The ticketless lease gets its ticket from the next reserve of its owner. */
+    reserve("RESERVE_SLICE_MIN", "33333333-3333-4333-8333-333333333333", 1, "amba_shm2", "absent", resp,
+            sizeof(resp));
+    CHECK_TRUE(starts_with(resp, "OK index=2 "));
+    LONGS_EQUAL(0, virt_slice_lease_ticket_of_index(2, ticket, sizeof(ticket), &primary));
+    STRCMP_EQUAL("amba_shm2", ticket);
 }
 
 /*

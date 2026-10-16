@@ -43,6 +43,20 @@ public:
         EventGiveUp = 4
     };
 
+    /*
+     * Fixed exposure, exposure_time_absolute in 100 us units. Measured on the AVerMedia 07ca:313a (plan_iav_usb_yolo
+     * Envelope I): 100 (10 ms) delivers 30 frames per second, 120 to 250 deliver 25 and 300 or more deliver 20, so the
+     * fixed mode is held to 100 and the image is brightened with gain instead.
+     */
+    static const int kFixedExposureMax = 100;
+    static const int kFixedExposureDefault = 100;
+
+    struct ExposureState {
+        bool fixed;             /* auto_exposure is manual (1), not aperture priority (3) */
+        int exposureAbs;        /* exposure_time_absolute as read back, 100 us units; -1 when unreadable */
+        int gain;               /* gain as read back; -1 when unreadable */
+    };
+
     struct Format {
         uint32_t width;
         uint32_t height;
@@ -69,12 +83,27 @@ public:
 
     int openUvc(int resolution);
     void closeCamera();
-    int readJpeg(uint8_t *dst, size_t dstCap, size_t *outLen);
+    /* sequence, when given, receives the V4L2 frame sequence number (gaps are frames the camera or driver dropped). */
+    int readJpeg(uint8_t *dst, size_t dstCap, size_t *outLen, uint32_t *sequence = nullptr);
+
+    /*
+     * Exposure control. setFixedExposure() sets auto_exposure=1 (manual), then exposure_time_absolute (clamped to the
+     * control's range and to kFixedExposureMax) and gain (clamped to the control's range) and reads them back into
+     * state. It remembers the gain and mode it replaced. restoreAutoExposure() puts them back (auto_exposure=3).
+     * closeCamera() restores them too, so a fixed exposure never outlives the capture. 0, or a negative errno.
+     */
+    int setFixedExposure(int exposureAbs, int gain, ExposureState *state);
+    int restoreAutoExposure();
+    bool fixedExposureApplied() const { return _exposureFixed; }
+    static int clampValue(int value, int minimum, int maximum);
     bool isOpen() const;
     int linkState() const;
     int resolution() const;
 
 private:
+    int controlGet(uint32_t id, int *value);
+    int controlSet(uint32_t id, int value);
+    int controlRange(uint32_t id, int *minimum, int *maximum);
     int startStreaming(const char *path, const Format &fmt);
     void releaseDevice(bool transition);
 
@@ -83,6 +112,9 @@ private:
     int _resolution;
     int _bufferCount;
     bool _streaming;
+    bool _exposureFixed;
+    int _savedAutoMode;
+    int _savedGain;
     uint32_t _width;
     uint32_t _height;
     uint32_t _fps;

@@ -28,7 +28,7 @@ IAV_QUAL_DIR := $(ROOT_DIR)/drivers/amba_virt/iav_qual
 IAV_QUAL_SRCS := $(addprefix $(IAV_QUAL_DIR)/,IavQualConfig.cxx IavQualResults.cxx IavQualContext.cxx \
 	IavQualOutput.cxx IavQualMain.cxx RealBackend.cxx) \
 	$(filter-out $(IAV_QUAL_DIR)/TestIavWindow.cxx,$(wildcard $(IAV_QUAL_DIR)/TestIav*.cxx))
-IAV_QUAL_FLAGS := -DIAVQUAL_NO_LOOPBACK -std=c++17 -I$(IAV_QUAL_DIR) \
+IAV_QUAL_FLAGS := -DIAVQUAL_NO_LOOPBACK -std=c++17 -I$(IAV_QUAL_DIR) -I$(ROOT_DIR)/guest-os/apps/iav-ref \
 	-I$(ROOT_DIR)/build/pristine-dsp_v6/include \
 	-I$(ROOT_DIR)/build/pristine-dsp_v6/include/uapi \
 	-I$(ROOT_DIR)/build/pristine-dsp_v6/include/uapi/specific
@@ -85,7 +85,8 @@ all: $(TARGETS)
 CXX := $(CROSS_COMPILE)g++
 CXXFLAGS := $(CFLAGS) -std=c++17
 
-DEMO_CXX_SRCS := AmbaVirtDemo.cxx HttpServer.cxx StreamBroadcaster.cxx YoloGeometry.cxx YoloPostprocess.cxx UsbCameraCapture.cxx
+DEMO_CXX_SRCS := AmbaVirtDemo.cxx HttpServer.cxx StreamBroadcaster.cxx YoloGeometry.cxx YoloPostprocess.cxx UsbCameraCapture.cxx \
+	UsbJpeg.cxx UsbIavDecoder.cxx UsbWebcamControl.cxx
 
 amba_virt_demo: $(DEMO_CXX_SRCS) $(COMMON_SRCS) $(IAV_QUAL_SRCS)
 	$(CC) $(CFLAGS) $(IAV_QUAL_FLAGS) -o $@ $^ $(CPPUTEST_LIBS) $(LDFLAGS) -lstdc++
@@ -123,8 +124,12 @@ TEST_CXX_SRCS := test/test_main.cxx \
 	test/TestPhysicalSceneAlignment.cxx \
 	test/TestNanopbWireRobustness.cxx \
 	test/TestUsbCameraCapture.cxx \
+	test/TestUsbJpeg.cxx \
+	test/TestUsbWebcamControl.cxx \
 	YoloGeometry.cxx \
 	UsbCameraCapture.cxx \
+	UsbJpeg.cxx \
+	UsbWebcamControl.cxx \
 	YoloPostprocess.cxx \
 	HttpServer.cxx \
 	StreamBroadcaster.cxx

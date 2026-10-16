@@ -272,6 +272,59 @@ if "plat_cmd_get_statistics" in FUNCS:
     p0, l0, _ = FUNCS["imgproc_get_statistics_entry"]
     FUNCS["imgproc_get_statistics_entry"] = (p0, l0, "{ plat_cmd_get_statistics(); }")
 
+# ---- wire size: the handler copies another type than the header names ------
+# The rows whose handler copies a different type than the ioctl header names. Found mechanically below; the set
+# is pinned here so a driver merge that adds, removes or changes one fails the build instead of shifting what the
+# broker and the guest module carry.
+EXPECTED_WIRE = {
+    "IAV_IOC_ALLOC_MEM_PART": "struct iav_alloc_mem_part",
+    "IAV_IOC_ALLOC_ANON_MEM_PART": "struct iav_alloc_mem_part",
+    "IAV_IOC_ALLOC_ANON_MEM_PART_FD": "struct iav_alloc_mem_part_fd",
+    "IAV_IOC_REGISTER_ANON_MEM_PART": "struct iav_anon_mem_part",
+    "IAV_IOC_UNREGISTER_ANON_MEM_PART": "struct iav_anon_mem_part",
+    "IAV_IOC_RELEASE_RAW_BUF": "struct iav_rawbufdesc",
+    "IAV_IOC_EFM_SET_EXT_POOL": "struct iav_efm_ext_pool",
+    "IAV_IOC_EFM_RELEASE_ALL_FRAMES": "struct iav_efm_release_all_frame",
+    "IAV_IOC_WAIT_RAW_ENCODE": "u32",
+    "IAV_IOC_APPLY_CANVAS_FRAME_SYNC_PROC": "struct iav_apply_canvas_frame_sync",
+    "IAV_IOC_APPLY_FRAME_SYNC_PROC": "struct iav_apply_frame_sync",
+    "IAV_IOC_APPLY_IDSP_ENC_SYNC_PROC": "struct iav_apply_idsp_enc_sync",
+    "IAV_IOC_APPLY_IDSP_SYNC_PROC": "struct iav_apply_frame_sync_flag",
+    "IAV_IOC_APPLY_MULTI_REGION_DPTZ_CTRL": "struct iav_apply_flag",
+    "IAV_IOC_APPLY_VIDEO_PROC": "struct iav_apply_flag[IAV_VIDEO_PROC_NUM]",
+    "IAV_IOC_APPLY_WARP_CTRL": "struct iav_apply_flag",
+    "IAV_IOC_APPLY_WARP_CTRL_IDSP_FRAME_SYNC": "struct iav_apply_frame_sync_flag",
+    "IAV_IOC_ENABLE_PREVIEW": "struct iav_preview_params",
+    "IAV_IOC_ENTER_IDLE": "struct iav_idle_params",
+    "IAV_IOC_FLUSH_FRAMEDESC": "struct iav_flush_framedesc",
+    "IAV_IOC_SET_BLUR_COLOR": "struct iav_blur_color",
+    "IAV_IOC_SET_VIN_IDSP_DELAY_INFO": "struct iav_vin_idsp_delay_info",
+}
+CFU_VAR = re.compile(r"copy_from_user\s*\(\s*&?\s*(\w+)\s*,\s*[\w()\s*]+?,\s*sizeof\s*\(\s*(?:struct\s+)?(\w+)\s*\)\s*\)")
+
+
+def handler_copy_type(hname):
+    """The declared type of the variable the handler's first copy_from_user fills, or None."""
+    if hname not in FUNCS:
+        return None
+    body = FUNCS[hname][2]
+    m = CFU_VAR.search(body)
+    if not m:
+        return None
+    var = m.group(1)
+    d = re.search(r"\b(struct\s+\w+|u8|u16|u32|u64|int|unsigned\s+int)\s+%s\b\s*(\[\s*(\w+)\s*\])?\s*(?:=|;)" % re.escape(var), body)
+    if not d:
+        return None
+    t = " ".join(d.group(1).split())
+    return "%s[%s]" % (t, d.group(3)) if d.group(2) else t
+
+
+def header_type_name(typ, sname):
+    if sname:
+        return "struct " + sname if sname in TAGS else sname
+    return " ".join(typ.replace("*", "").split())
+
+
 # ---- dispatch extraction ---------------------------------------------------
 DISPATCH = [
     ("V enc", "iav_encode_ioctl"),
@@ -319,6 +372,7 @@ GLOBAL_STATE_CHANGING = re.compile(r"(ENTER_IDLE|ENABLE_PREVIEW|START_ENCODE|STO
 DEBUG_RISK = re.compile(r"(DSP_LOG|DEBUG|DRV_DSP_INFO|SETUP_IDSP_DEBUG|SET_REG|VIN_SET_DEVINFO|GDMA|COPY)")
 
 entries = []
+wire_found = {}
 out = []
 counts = {"PLAIN": 0, "OFFSET/FD": 0, "PHYS": 0, "POINTER": 0, "UNTRACED": 0}
 policy_counts = {}
@@ -455,21 +509,37 @@ for r in rows:
     if direction == "R" and kind == "IAV_ARG_PTR" and sinfo["cfu"]:
         direction = "RW"
     dirs = {"R": "IAV_DIR_R", "W": "IAV_DIR_W", "RW": "IAV_DIR_RW", "-": "IAV_DIR_NONE"}.get(direction, "IAV_DIR_NONE")
-    entries.append((name, magic_enum, kind, dirs, size, "|".join(cflags), "|".join(fl) if fl else "0"))
+    wire = "0"
+    if kind == "IAV_ARG_PTR":
+        copied = handler_copy_type(h)
+        named = header_type_name(typ, struct_name_from(typ))
+        # A handler that first reads a scalar head of a named struct (CFG_WARP_CTRL reads a u64, then the struct)
+        # is not a mismatch: only a struct copied where the header names something else, or a wider scalar where
+        # the header names a scalar, is.
+        scalar_copy = copied is not None and not copied.startswith("struct ")
+        if (copied and copied != named and copied != (("struct " + sname) if sname else None) and
+                not (scalar_copy and named.startswith("struct "))):
+            wire_found[name] = copied
+            wire = "sizeof(%s)" % copied
+    entries.append((name, magic_enum, kind, dirs, size, "|".join(cflags), "|".join(fl) if fl else "0", wire))
     out.append((r["magic"], name, direction, argkind, sorted(sinfo["files"])[0] if sinfo["files"] else "?",
                 gcls + (" | " + "; ".join(detail) if detail else ""), cu, state, block + " | " + scope,
                 qual, restricted))
 
 if untraced:
     raise SystemExit("unresolved ioctls: %s" % ", ".join(untraced))
+if wire_found != EXPECTED_WIRE:
+    raise SystemExit("wire-size rows changed: found %r, expected %r" % (sorted(wire_found.items()),
+                                                                         sorted(EXPECTED_WIRE.items())))
 entries.sort()
 with open(OUT_INC, "w") as f:
     f.write("/*\n * Generated by tools/iav-policy/gen_iav_ioctl_table.py from the IAV driver sources. Do not edit.\n")
     f.write(" * Built for N1-655 (AMBA_SOC_N1_655). %d ioctls. Every row is\n" % len(entries))
-    f.write(" * IAV_IOCTL(name, magic, arg kind, direction, argument size, class, flags).\n *\n")
+    f.write(" * IAV_IOCTL(name, magic, arg kind, direction, argument size, class, flags, wire size).\n")
+    f.write(" * The wire size is what the handler copies when the header names another type, else 0.\n *\n")
     f.write(" * Copyright (C) 2026, Ambarella International LLC.\n */\n\n")
     for e in entries:
-        f.write("IAV_IOCTL(%s, %s, %s, %s, %s, %s, %s)\n" % e)
+        f.write("IAV_IOCTL(%s, %s, %s, %s, %s, %s, %s, %s)\n" % e)
 print("rows", len(entries), counts)
 if OUT:
     with open(OUT, "w") as f:

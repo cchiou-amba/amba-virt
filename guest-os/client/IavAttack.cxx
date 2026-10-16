@@ -50,7 +50,7 @@ struct Entry
     bool allowed;
 };
 
-#define IAV_IOCTL(name, magic, kind, dir, size, cls, flags) {name, #name, kind, dir, (size), false},
+#define IAV_IOCTL(name, magic, kind, dir, size, cls, flags, wire) {name, #name, kind, dir, (size), false},
 Entry g_table[] = {
 #include "iav_ioctl_table.inc"
 };

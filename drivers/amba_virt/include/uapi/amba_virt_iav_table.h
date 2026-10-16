@@ -43,4 +43,29 @@ enum iav_dir {
 #define IAV_F_BLOCKING		0x04u	/* the handler waits */
 #define IAV_F_LEADING_ID	0x08u	/* the first u32 of the argument is a vsrc or vout id */
 
+/*
+ * The last column of a row is the wire size: the bytes the handler really copies when that differs from the
+ * type its ioctl header names (the header names a scalar, the handler copies a struct), else 0. With
+ * AMBA_VIRT_IAV_F_SIZE_OVERRIDE in effect the module and the broker both carry the wire size.
+ */
+#define IAV_WIRE_SIZE(size, wire)	((wire) ? (wire) : (size))
+
+/*
+ * The table hash a module and a broker exchange in OP_HELLO: FNV-1a 64 over each row's cmd, kind, dir, size
+ * and wire size as little-endian u32 values, in table order. It tells a module and a broker built from
+ * different IAV headers apart; a difference is reported, the per-call size check still decides.
+ */
+#define IAV_TABLE_HASH_INIT	0xcbf29ce484222325ull
+
+static inline unsigned long long iav_table_hash_u32(unsigned long long h, unsigned int v)
+{
+	unsigned int i;
+
+	for (i = 0; i < 4; i++) {
+		h ^= (v >> (8 * i)) & 0xffu;
+		h *= 0x100000001b3ull;
+	}
+	return h;
+}
+
 #endif /* _UAPI_AMBA_VIRT_IAV_TABLE_H */

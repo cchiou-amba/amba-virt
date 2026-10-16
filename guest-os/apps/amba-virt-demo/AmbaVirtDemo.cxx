@@ -32,6 +32,8 @@
 #include <signal.h>
 #include <poll.h>
 #include <atomic>
+#include <algorithm>
+#include <dirent.h>
 #include <vector>
 #include <string>
 #include <thread>
@@ -55,6 +57,9 @@ extern "C" {
 #include "DashboardHtml.hxx"
 #include "IavQualMain.hxx"
 #include "UsbCameraCapture.hxx"
+#include "UsbIavDecoder.hxx"
+#include "UsbJpeg.hxx"
+#include "UsbWebcamControl.hxx"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -107,6 +112,12 @@ static std::atomic<float> g_live_nms_thresh{0.45f};
 static struct stream_broadcaster g_broadcaster;
 static struct stream_broadcaster g_usb_broadcaster;
 static std::atomic<int> g_usb_resolution{UsbCameraCapture::Resolution720p};
+static std::atomic<int> g_usb_backend{UsbWebcamControl::BackendHardware};
+static std::atomic<int> g_usb_exposure_mode{UsbWebcamControl::ExposureAuto};
+static std::atomic<int> g_usb_exposure_abs{UsbCameraCapture::kFixedExposureDefault};
+static std::atomic<int> g_usb_gain{200};
+/* --usb-jpeg-dir: replay the JPEG files of a directory as the webcam's frames (a test input for the hardware branch). */
+static const char *g_usb_jpeg_dir = nullptr;
 static JpegSidecarHandle g_jpeg_handles[2];
 static uint32_t g_live_dag_id = 0;
 static uint32_t g_live_in_handle = 0;
@@ -581,55 +592,336 @@ static void HandleUsbResolution(int client_fd, const struct http_request *req)
     close(client_fd);
 }
 
+static void HandleUsbBackend(int client_fd, const struct http_request *req)
+{
+    int backend = UsbWebcamControl::BackendHardware;
+    char resp_buf[256];
+    int rlen;
+
+    if (UsbWebcamControl::parseBackend(req->body, req->body_len, &backend) < 0) {
+        rlen = http_format_422_unprocessable(resp_buf, sizeof(resp_buf), "Unsupported USB backend");
+    } else {
+        char ok_json[96];
+
+        g_usb_backend.store(backend);
+        snprintf(ok_json, sizeof(ok_json), "{\"status\":\"ok\",\"backend\":\"%s\"}",
+                 backend == UsbWebcamControl::BackendHardware ? "hw" : "cpu");
+        rlen = http_format_200_json(resp_buf, sizeof(resp_buf), ok_json);
+    }
+    http_send_all(client_fd, resp_buf, rlen);
+    close(client_fd);
+}
+
+static void HandleUsbExposure(int client_fd, const struct http_request *req)
+{
+    UsbWebcamControl::Exposure e{};
+    char resp_buf[256];
+    int rlen;
+
+    if (UsbWebcamControl::parseExposure(req->body, req->body_len, &e) < 0) {
+        rlen = http_format_422_unprocessable(resp_buf, sizeof(resp_buf), "Unsupported USB exposure");
+    } else {
+        char ok_json[128];
+
+        if (e.exposureAbs >= 0)
+            g_usb_exposure_abs.store(e.exposureAbs);
+        if (e.gain >= 0)
+            g_usb_gain.store(e.gain);
+        g_usb_exposure_mode.store(e.mode);
+        snprintf(ok_json, sizeof(ok_json), "{\"status\":\"ok\",\"mode\":\"%s\",\"exposure\":%d,\"gain\":%d}",
+                 e.mode == UsbWebcamControl::ExposureFixed ? "fixed" : "auto",
+                 g_usb_exposure_abs.load(), g_usb_gain.load());
+        rlen = http_format_200_json(resp_buf, sizeof(resp_buf), ok_json);
+    }
+    http_send_all(client_fd, resp_buf, rlen);
+    close(client_fd);
+}
+
+/* The JPEG files of --usb-jpeg-dir, in name order, replayed cyclically at 30 frames per second. */
+class UsbFileFrames {
+public:
+    bool load(const char *dir)
+    {
+        std::vector<std::string> names;
+        DIR *d = opendir(dir);
+        struct dirent *e;
+
+        if (!d)
+            return false;
+        while ((e = readdir(d)) != nullptr) {
+            size_t l = strlen(e->d_name);
+
+            if (l > 4 && strcmp(e->d_name + l - 4, ".jpg") == 0)
+                names.push_back(std::string(dir) + "/" + e->d_name);
+        }
+        closedir(d);
+        std::sort(names.begin(), names.end());
+        for (size_t i = 0; i < names.size(); i++) {
+            FILE *f = fopen(names[i].c_str(), "rb");
+            std::vector<uint8_t> b;
+            uint8_t buf[65536];
+            size_t n;
+
+            if (!f)
+                return false;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+                b.insert(b.end(), buf, buf + n);
+            fclose(f);
+            if (!b.empty())
+                _files.push_back(b);
+        }
+        return !_files.empty();
+    }
+
+    size_t next(uint8_t *dst, size_t cap)
+    {
+        const std::vector<uint8_t> &b = _files[_i++ % _files.size()];
+
+        if (b.size() > cap)
+            return 0;
+        memcpy(dst, b.data(), b.size());
+        return b.size();
+    }
+
+private:
+    std::vector<std::vector<uint8_t> > _files;
+    size_t _i = 0;
+};
+
+static double MonotonicSeconds()
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static double ElapsedMs(const struct timespec &a, const struct timespec &b)
+{
+    return (b.tv_sec - a.tv_sec) * 1000.0 + (b.tv_nsec - a.tv_nsec) / 1000000.0;
+}
+
 static void *UsbWebcamWorkerThread(void *arg)
 {
     auto *rt = static_cast<YoloRuntime *>(arg);
     UsbCameraCapture camera;
+    UsbIavDecoder hw;
+    UsbFileFrames files;
+    const bool file_mode = g_usb_jpeg_dir != nullptr;
     std::vector<uint8_t> jpeg(2 * 1024 * 1024);
     std::vector<uint8_t> planar(3 * 640 * 640, 114);
     int open_resolution = -1;
     uint64_t seq = 0;
     double last_frame_s = 0.0;
+    double next_file_s = 0.0;
+
+    /* hardware path state */
+    int last_backend = -1;
+    bool hw_disabled = false;
+    const char *hw_disabled_reason = "";
+    std::vector<uint8_t> hw_frame;
+    uint64_t frames_hw = 0, frames_cpu = 0, frames_fallback = 0;
+
+    /* camera delivery state: sequence numbers count what the camera produced */
+    bool have_seq = false;
+    uint32_t last_cam_seq = 0, win_cam_seq = 0;
+    double win_start_s = 0.0, cam_fps = 0.0;
+    uint64_t cam_dropped = 0;
+
+    /* exposure state */
+    int applied_mode = UsbWebcamControl::ExposureAuto, applied_abs = -1, applied_gain = -1;
+    UsbCameraCapture::ExposureState exp_state{false, -1, -1};
+
+    if (file_mode && !files.load(g_usb_jpeg_dir)) {
+        fprintf(stderr, "usb: no JPEG files in %s\n", g_usb_jpeg_dir);
+        return nullptr;
+    }
 
     while (g_running.load()) {
-        if (stream_broadcaster_wait_active(&g_usb_broadcaster, 100) < 0)
+        if (stream_broadcaster_wait_active(&g_usb_broadcaster, 100) < 0) {
+            /* nobody is watching: leave decode mode and give the camera its automatic exposure back */
+            if (hw.isOpen())
+                hw.close();
+            if (camera.fixedExposureApplied())
+                camera.restoreAutoExposure();
+            applied_mode = UsbWebcamControl::ExposureAuto;
+            last_frame_s = 0.0;
+            have_seq = false;
+            cam_fps = 0.0;
             continue;
+        }
 
-        int want = g_usb_resolution.load();
-        if (!camera.isOpen() || open_resolution != want) {
-            camera.closeCamera();
-            if (camera.openUvc(want) < 0) {
+        struct timespec t_cap0, t_cap1;
+        clock_gettime(CLOCK_MONOTONIC, &t_cap0);
+        size_t jpeg_len = 0;
+        uint32_t cam_seq = 0;
+
+        if (file_mode) {
+            double now = MonotonicSeconds();
+
+            if (next_file_s == 0.0 || next_file_s < now - 0.5)
+                next_file_s = now;
+            if (next_file_s > now)
+                usleep(static_cast<useconds_t>((next_file_s - now) * 1e6));
+            next_file_s += 1.0 / 30.0;
+            jpeg_len = files.next(jpeg.data(), jpeg.size());
+            if (jpeg_len == 0)
+                continue;
+        } else {
+            int want = g_usb_resolution.load();
+            if (!camera.isOpen() || open_resolution != want) {
+                camera.closeCamera();
+                if (camera.openUvc(want) < 0) {
+                    open_resolution = -1;
+                    usleep(200000);
+                    continue;
+                }
+                open_resolution = want;
+                have_seq = false;
+                applied_mode = UsbWebcamControl::ExposureAuto;
+            }
+
+            int want_mode = g_usb_exposure_mode.load();
+            int want_abs = g_usb_exposure_abs.load();
+            int want_gain = g_usb_gain.load();
+            if (want_mode == UsbWebcamControl::ExposureFixed) {
+                if (applied_mode != want_mode || applied_abs != want_abs || applied_gain != want_gain) {
+                    int erc = camera.setFixedExposure(want_abs, want_gain, &exp_state);
+                    if (erc < 0)
+                        fprintf(stderr, "usb: fixed exposure refused: %s\n", strerror(-erc));
+                    applied_mode = want_mode;
+                    applied_abs = want_abs;
+                    applied_gain = want_gain;
+                }
+            } else if (camera.fixedExposureApplied()) {
+                camera.restoreAutoExposure();
+                applied_mode = want_mode;
+            }
+
+            int rd = camera.readJpeg(jpeg.data(), jpeg.size(), &jpeg_len, &cam_seq);
+            if (rd == -EAGAIN || rd == -EINTR)
+                continue;
+            if (rd < 0) {
+                camera.closeCamera();
                 open_resolution = -1;
-                usleep(200000);
+                usleep(100000);
                 continue;
             }
-            open_resolution = want;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t_cap1);
+
+        if (!file_mode) {
+            double now = MonotonicSeconds();
+
+            if (!have_seq) {
+                have_seq = true;
+                win_cam_seq = cam_seq;
+                win_start_s = now;
+            } else if (cam_seq > last_cam_seq + 1) {
+                cam_dropped += cam_seq - last_cam_seq - 1;
+            }
+            last_cam_seq = cam_seq;
+            if (now - win_start_s >= 1.0) {
+                cam_fps = (cam_seq - win_cam_seq) / (now - win_start_s);
+                win_cam_seq = cam_seq;
+                win_start_s = now;
+            }
         }
 
-        size_t jpeg_len = 0;
-        int rd = camera.readJpeg(jpeg.data(), jpeg.size(), &jpeg_len);
-        if (rd == -EAGAIN || rd == -EINTR)
-            continue;
-        if (rd < 0) {
-            camera.closeCamera();
-            open_resolution = -1;
-            usleep(100000);
-            continue;
+        /* which path: the selected backend, and for the hardware backend only frames the decoder can take */
+        const int backend = g_usb_backend.load();
+        if (backend != last_backend) {
+            if (backend == UsbWebcamControl::BackendSoftware && hw.isOpen())
+                hw.close();
+            hw_disabled = false;
+            last_backend = backend;
         }
 
-        struct timespec t_start, t_inf_done, t_end;
+        /* the hardware path is offered the frame normalized to what the decoder takes, and only if the admission rule takes that */
+        UsbJpeg::Info jinfo{};
+        bool admissible = false;
+        if (backend != UsbWebcamControl::BackendSoftware && !hw_disabled) {
+            if (UsbJpeg::normalize(jpeg.data(), jpeg_len, &hw_frame))
+                admissible = UsbJpeg::inspect(hw_frame.data(), hw_frame.size(), &jinfo);
+            else
+                jinfo.kind = UsbJpeg::KindMalformed;
+        }
+        bool use_hw = false;
+        const char *reason = "";
+        if (backend == UsbWebcamControl::BackendSoftware) {
+            reason = "selected";
+        } else if (hw_disabled) {
+            reason = hw_disabled_reason;
+        } else if (!admissible) {
+            reason = UsbJpeg::kindReason(jinfo.kind);
+        } else if (!UsbJpeg::aspectIs16x9(jinfo.width, jinfo.height)) {
+            reason = "frame is not 16:9";
+        } else if (UsbJpeg::decodedBytes(jinfo.width, jinfo.height, jinfo.sub422) > UsbIavDecoder::kYuvRoom) {
+            reason = "picture larger than the decode window";
+        } else {
+            if (!hw.isOpen() || hw.width() != jinfo.width || hw.height() != jinfo.height) {
+                int orc = hw.open(jinfo.width, jinfo.height);
+                if (orc < 0) {
+                    hw_disabled = true;
+                    hw_disabled_reason = (orc == -ENODEV) ? "IAV not available" : "IAV decode mode refused";
+                    reason = hw_disabled_reason;
+                }
+            }
+            if (hw.isOpen())
+                use_hw = true;
+        }
+
+        struct timespec t_start, t_pre_done, t_inf_done, t_end;
         clock_gettime(CLOCK_MONOTONIC, &t_start);
 
-        int img_w = 0;
-        int img_h = 0;
-        uint8_t *rgb = DecodeJpegRgb(jpeg.data(), jpeg_len, &img_w, &img_h);
-        if (!rgb)
-            continue;
-        if (ResizeLetterbox640(rgb, img_w, img_h, planar.data()) < 0) {
-            stbi_image_free(rgb);
-            continue;
+        double copy_ms = 0.0, decode_ms = 0.0, scale_ms = 0.0, convert_ms = 0.0;
+        int img_w = static_cast<int>(jinfo.width);
+        int img_h = static_cast<int>(jinfo.height);
+
+        if (use_hw) {
+            UsbIavDecoder::Times t{};
+
+            UsbIavDecoder::padFill(planar.data());
+            int hrc = hw.run(hw_frame.data(), hw_frame.size(), planar.data(), &t);
+            if (hrc == 0) {
+                copy_ms = t.copyMs;
+                decode_ms = t.decodeMs;
+                scale_ms = t.scaleMs;
+                convert_ms = t.convertMs;
+            } else {
+                /*
+                 * A failed decode (in the board test a timeout) leaves the decoder session stalled, and later good frames
+                 * time out in it too. So the first failure ends the hardware path: this frame and the following go to the
+                 * CPU until the backend is selected again, which starts a new decoder session. Nothing is retried.
+                 */
+                use_hw = false;
+                reason = "IAV decode failed";
+                hw_disabled = true;
+                hw_disabled_reason = "IAV decode failed (CPU until the backend is selected again)";
+                hw.close();
+            }
         }
-        stbi_image_free(rgb);
+        if (!use_hw) {
+            struct timespec t_a, t_b, t_c;
+
+            clock_gettime(CLOCK_MONOTONIC, &t_a);
+            int w = 0, h = 0;
+            uint8_t *rgb = DecodeJpegRgb(jpeg.data(), jpeg_len, &w, &h);
+            if (!rgb)
+                continue;
+            clock_gettime(CLOCK_MONOTONIC, &t_b);
+            if (ResizeLetterbox640(rgb, w, h, planar.data()) < 0) {
+                stbi_image_free(rgb);
+                continue;
+            }
+            stbi_image_free(rgb);
+            clock_gettime(CLOCK_MONOTONIC, &t_c);
+            decode_ms = ElapsedMs(t_a, t_b);
+            scale_ms = ElapsedMs(t_b, t_c);
+            img_w = w;
+            img_h = h;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t_pre_done);
 
         std::vector<uint8_t> out_tensor_copy(rt->net_out.out_desc[0].size);
         pthread_mutex_lock(&rt->lock);
@@ -659,10 +951,11 @@ static void *UsbWebcamWorkerThread(void *arg)
             det_cnt = 0;
 
         clock_gettime(CLOCK_MONOTONIC, &t_end);
-        double total_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0 +
-                          (t_end.tv_nsec - t_start.tv_nsec) / 1000000.0;
-        double visorc_ms = (t_inf_done.tv_sec - t_start.tv_sec) * 1000.0 +
-                           (t_inf_done.tv_nsec - t_start.tv_nsec) / 1000000.0;
+        double total_ms = ElapsedMs(t_start, t_end);
+        double visorc_ms = ElapsedMs(t_start, t_inf_done);
+        double npu_ms = ElapsedMs(t_pre_done, t_inf_done);
+        double post_ms = ElapsedMs(t_inf_done, t_end);
+        double capture_ms = ElapsedMs(t_cap0, t_cap1);
         double now_s = t_end.tv_sec + t_end.tv_nsec / 1e9;
         double fps = 0.0;
         if (last_frame_s > 0.0) {
@@ -672,14 +965,45 @@ static void *UsbWebcamWorkerThread(void *arg)
         }
         last_frame_s = now_s;
         seq++;
+        if (use_hw)
+            frames_hw++;
+        else
+            frames_cpu++;
+        if (!use_hw && backend == UsbWebcamControl::BackendHardware)
+            frames_fallback++;
 
+        char label[96];
+        if (use_hw)
+            snprintf(label, sizeof(label), "IAV HW");
+        else if (backend == UsbWebcamControl::BackendSoftware)
+            snprintf(label, sizeof(label), "CPU (selected)");
+        else
+            snprintf(label, sizeof(label), "CPU (%s)", reason);
+
+        const bool exp_fixed = !file_mode && camera.fixedExposureApplied();
         char json_buf[4096];
         int jlen = snprintf(json_buf, sizeof(json_buf),
-                            "{\"seq\":%llu,\"drop_count\":0,"
+                            "{\"seq\":%llu,\"drop_count\":%llu,"
                             "\"visorc_ms\":%.2f,\"rpc_ms\":%.2f,\"post_ms\":%.2f,\"total_ms\":%.2f,\"fps\":%.2f,"
+                            "\"backend\":\"%s\",\"path\":\"%s\",\"path_label\":\"%s\",\"path_reason\":\"%s\","
+                            "\"source\":\"%s\",\"width\":%d,\"height\":%d,"
+                            "\"capture_ms\":%.2f,\"copy_ms\":%.2f,\"decode_ms\":%.2f,\"scale_ms\":%.2f,"
+                            "\"convert_ms\":%.2f,\"npu_ms\":%.2f,"
+                            "\"cam_fps\":%.2f,\"cam_seq\":%u,\"cam_dropped\":%llu,"
+                            "\"frames_hw\":%llu,\"frames_cpu\":%llu,\"frames_fallback\":%llu,"
+                            "\"exposure\":\"%s\",\"exposure_abs\":%d,\"gain\":%d,"
                             "\"det_count\":%d,\"detections\":[",
-                            static_cast<unsigned long long>(seq),
-                            visorc_ms, visorc_ms, total_ms - visorc_ms, total_ms, fps, det_cnt);
+                            static_cast<unsigned long long>(seq), static_cast<unsigned long long>(cam_dropped),
+                            visorc_ms, visorc_ms, post_ms, total_ms, fps,
+                            backend == UsbWebcamControl::BackendHardware ? "hw" : "cpu",
+                            use_hw ? "hw" : "cpu", label, use_hw ? "" : reason,
+                            file_mode ? "files" : "camera", img_w, img_h,
+                            capture_ms, copy_ms, decode_ms, scale_ms, convert_ms, npu_ms,
+                            cam_fps, cam_seq, static_cast<unsigned long long>(cam_dropped),
+                            static_cast<unsigned long long>(frames_hw), static_cast<unsigned long long>(frames_cpu),
+                            static_cast<unsigned long long>(frames_fallback),
+                            exp_fixed ? "fixed" : "auto", exp_fixed ? exp_state.exposureAbs : -1,
+                            exp_fixed ? exp_state.gain : -1, det_cnt);
         for (int d = 0; d < det_cnt && jlen < static_cast<int>(sizeof(json_buf)) - 160; d++) {
             const char *cname = (norm_dets[d].class_id >= 0 && norm_dets[d].class_id < 80)
                                     ? COCO_CLASSES[norm_dets[d].class_id] : "unknown";
@@ -713,6 +1037,7 @@ static void *UsbWebcamWorkerThread(void *arg)
         stream_broadcaster_publish(&g_usb_broadcaster, packet.data(), total_frame_bytes, &out_seq);
     }
 
+    hw.close();
     camera.closeCamera();
     return nullptr;
 }
@@ -789,7 +1114,7 @@ static void HandleClientConnection(int client_fd, YoloRuntime *rt)
                  "  \"usb_webcam\": %s\n"
                  "}\n",
                  rt->os_pretty_name, rt->os_kernel, rt->os_machine,
-                 UsbCameraCapture::findUvcCaptureNode(usb_node, sizeof(usb_node)) == 0
+                 (g_usb_jpeg_dir || UsbCameraCapture::findUvcCaptureNode(usb_node, sizeof(usb_node)) == 0)
                      ? "true" : "false");
         char resp_buf[2048];
         int rlen = http_format_200_json(resp_buf, sizeof(resp_buf), json_buf);
@@ -819,6 +1144,10 @@ static void HandleClientConnection(int client_fd, YoloRuntime *rt)
         HandleBroadcasterStream(client_fd, &g_usb_broadcaster);
     } else if (req.method == HTTP_METHOD_POST && strcmp(req.uri, "/usb/resolution") == 0) {
         HandleUsbResolution(client_fd, &req);
+    } else if (req.method == HTTP_METHOD_POST && strcmp(req.uri, "/usb/backend") == 0) {
+        HandleUsbBackend(client_fd, &req);
+    } else if (req.method == HTTP_METHOD_POST && strcmp(req.uri, "/usb/exposure") == 0) {
+        HandleUsbExposure(client_fd, &req);
     } else if (req.route == HTTP_ROUTE_INFER) {
         HandleStaticInfer(client_fd, &req, rt);
     } else if (req.route == HTTP_ROUTE_OPTIONS) {
@@ -887,24 +1216,27 @@ int main(int argc, char **argv)
         {"bind",  required_argument, nullptr, 'b'},
         {"conf",  required_argument, nullptr, 'c'},
         {"nms",   required_argument, nullptr, 'n'},
+        {"usb-jpeg-dir", required_argument, nullptr, 'j'},
         {"help",  no_argument,       nullptr, 'h'},
         {nullptr, 0,                 nullptr, 0}
     };
 
     int opt = 0;
-    while ((opt = getopt_long(argc, argv, "m:b:c:n:h", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:b:c:n:j:h", long_options, nullptr)) != -1) {
         switch (opt) {
         case 'm': model_path = optarg; break;
         case 'b': bind_addr = optarg; break;
         case 'c': conf_thresh = strtof(optarg, nullptr); break;
         case 'n': nms_thresh = strtof(optarg, nullptr); break;
+        case 'j': g_usb_jpeg_dir = optarg; break;
         case 'h':
         default:
             printf("Usage: %s [options]\n"
                    "  -m, --model <path>  Path to YOLOX model binary (default: %s)\n"
                    "  -b, --bind <ip:port> HTTP bind address (default: %s)\n"
                    "  -c, --conf <val>    Confidence threshold (default: %.2f)\n"
-                   "  -n, --nms <val>     NMS IoU threshold (default: %.2f)\n",
+                   "  -n, --nms <val>     NMS IoU threshold (default: %.2f)\n"
+                   "  -j, --usb-jpeg-dir <dir> Test input: replay the .jpg files of <dir> as the USB webcam frames\n",
                    argv[0], DEFAULT_MODEL_PATH, DEFAULT_HTTP_BIND, conf_thresh, nms_thresh);
             return (opt == 'h') ? 0 : 1;
         }

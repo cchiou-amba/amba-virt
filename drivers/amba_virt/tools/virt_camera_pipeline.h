@@ -21,6 +21,14 @@
 
 typedef void (*virt_camera_encode_stop_fn)(void);
 
+/*
+ * The camera apply library to dlopen instead of VIRT_CAMERA_APPLY_LIB (NULL: the image's). Used only by the
+ * qualification build run from the development tree; the image never calls it.
+ */
+void virt_camera_pipeline_set_apply_lib(const char *path);
+/* Qualification build only: free the server's IAV partitions at shutdown (amba-virt-server-qual --iav-serve -X). */
+void virt_camera_pipeline_set_free_new_parts(int on);
+
 /* Called by the shutdown to stop encode and the IAV tap. Optional. */
 void virt_camera_pipeline_set_encode_stop(virt_camera_encode_stop_fn fn);
 

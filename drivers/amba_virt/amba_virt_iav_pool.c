@@ -52,6 +52,14 @@ static int pool_mmap(struct file *filp, struct vm_area_struct *vma)
 #else
 	vma->vm_flags |= VM_IO | VM_DONTEXPAND | VM_DONTDUMP;
 #endif
+	/* The slice is no-map memory: Normal-NC at stage 2, as for the IAV windows (amba_virt_iav_win.c). */
+#ifdef VM_ALLOW_ANY_UNCACHED
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_ALLOW_ANY_UNCACHED);
+#else
+	vma->vm_flags |= VM_ALLOW_ANY_UNCACHED;
+#endif
+#endif
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 	ret = remap_pfn_range(vma, vma->vm_start,
 			      PHYS_PFN(g_slices[node->index].phys),

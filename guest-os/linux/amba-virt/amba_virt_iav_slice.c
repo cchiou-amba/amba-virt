@@ -21,7 +21,8 @@ static int slice_rpc(const uint8_t *payload, size_t payload_len,
 	uint8_t *buf;
 	struct amba_virt_msg *msg;
 	struct amba_virt_msg *rmsg;
-	u32 rlen = 0;
+	/* the capacity of the answer buffer: amba_virt_rpc_seq refuses a zero capacity with -EMSGSIZE before sending */
+	u32 rlen = AMBA_VIRT_MAX_MSG;
 	int ret;
 
 	if (payload_len > AMBA_VIRT_MAX_MSG - sizeof(*msg))

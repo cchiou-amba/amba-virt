@@ -30,10 +30,15 @@ struct lease_slot {
 	uint32_t index;
 	uint64_t epoch;
 	uint64_t bytes;
+	char ticket[VIRT_CAMERA_TICKET_MAX + 1];	/* empty: reserved without a ticket */
+	int primary;					/* the IAV role the ticket held at the last reserve */
 };
 
 static struct lease_slot g_slots[LEASE_MAX];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+/* The aux aperture of a lease (Envelope F of plan_iav_usb_yolo), when the server runs one; called with g_lock held. */
+static int (*g_aux_attach)(uint32_t index, uint64_t epoch, int primary, uint64_t *size);
+static void (*g_aux_detach)(uint32_t index);
 static int g_matched;
 static uint32_t g_count;
 static uint64_t g_slice_bytes;
@@ -112,9 +117,12 @@ static int save_locked(void)
 	for (i = 0; i < LEASE_MAX; i++) {
 		if (!g_slots[i].in_use)
 			continue;
-		if (fprintf(fp, "%s %u %llu %llu\n", g_slots[i].uuid, g_slots[i].index,
+		/* The ticket and role are trailing fields: a server that reads four fields ignores them. */
+		if (fprintf(fp, "%s %u %llu %llu %s %s\n", g_slots[i].uuid, g_slots[i].index,
 			    (unsigned long long)g_slots[i].epoch,
-			    (unsigned long long)g_slots[i].bytes) < 0) {
+			    (unsigned long long)g_slots[i].bytes,
+			    g_slots[i].ticket[0] ? g_slots[i].ticket : "-",
+			    g_slots[i].primary ? "primary" : "consumer") < 0) {
 			fclose(fp);
 			unlink(tmp);
 			return -1;
@@ -131,6 +139,15 @@ static int save_locked(void)
 		return -1;
 	}
 	return 0;
+}
+
+/* ticket was checked by virt_camera_ticket_ok: at most VIRT_CAMERA_TICKET_MAX characters. */
+static void copy_ticket(char dst[VIRT_CAMERA_TICKET_MAX + 1], const char *ticket)
+{
+	size_t n = strnlen(ticket, VIRT_CAMERA_TICKET_MAX);
+
+	memcpy(dst, ticket, n);
+	dst[n] = '\0';
 }
 
 static void clear_slot(struct lease_slot *slot)
@@ -276,6 +293,8 @@ static int release_locked(const char *uuid, uint64_t epoch, char *resp, size_t r
 			snprintf(resp, resp_len, "ERR PERSIST\n");
 			return 0;
 		}
+		if (g_aux_detach)
+			g_aux_detach(saved.index);
 	}
 	snprintf(resp, resp_len, "OK\n");
 	return 0;
@@ -307,6 +326,8 @@ void virt_slice_lease_reset(void)
 	g_slice_bytes = 0;
 	g_next_epoch = 1;
 	snprintf(g_store, sizeof(g_store), "%s", VIRT_SLICE_LEASE_STORE);
+	g_aux_attach = NULL;
+	g_aux_detach = NULL;
 	pthread_mutex_unlock(&g_lock);
 }
 
@@ -361,16 +382,29 @@ int virt_slice_lease_load(void)
 	}
 	while (fgets(line, sizeof(line), fp)) {
 		char uuid[64];
+		char ticket[64];
+		char role[64];
 		unsigned int index = 0;
 		unsigned long long epoch = 0;
 		unsigned long long bytes = 0;
 		struct lease_slot *slot;
 		uint32_t i;
+		int fields;
 
 		if (line[0] == '#' || line[0] == '\n')
 			continue;
-		if (sscanf(line, "%63s %u %llu %llu", uuid, &index, &epoch, &bytes) != 4)
+		ticket[0] = role[0] = '\0';
+		fields = sscanf(line, "%63s %u %llu %llu %63s %63s", uuid, &index, &epoch, &bytes, ticket, role);
+		if (fields < 4)
 			continue;
+		/*
+		 * The lease itself is kept whatever follows its four fields: dropping it would free an index a guest
+		 * may still map. A lease written by an older server, or whose ticket or role does not parse, keeps no
+		 * ticket, and the legacy role rule applies to it.
+		 */
+		if (fields != 6 || strcmp(ticket, "-") == 0 || !virt_camera_ticket_ok(ticket) ||
+		    (strcmp(role, "primary") != 0 && strcmp(role, "consumer") != 0))
+			fields = 4;
 		if (!uuid_ok(uuid) || epoch == 0 || bytes == 0)
 			continue;
 		if (!g_matched || index >= g_count || bytes != g_slice_bytes)
@@ -391,6 +425,10 @@ int virt_slice_lease_load(void)
 		slot->index = index;
 		slot->epoch = (uint64_t)epoch;
 		slot->bytes = (uint64_t)bytes;
+		if (fields == 6 && strcmp(ticket, "-") != 0) {
+			copy_ticket(slot->ticket, ticket);
+			slot->primary = strcmp(role, "primary") == 0;
+		}
 		slot->in_use = 1;
 		if (epoch >= g_next_epoch) {
 			if (epoch == UINT64_MAX)
@@ -422,10 +460,45 @@ static void append_camera_locked(const char *uuid, const char *ticket, enum virt
 	if (!slot)
 		return;
 	memset(&v, 0, sizeof(v));
-	if (ticket && virt_camera_policy_decide(ticket, intent, slot->index, &v) != 0)
-		memset(&v, 0, sizeof(v));
+	if (ticket) {
+		struct lease_slot saved = *slot;
+		int primary = virt_iav_role_of(ticket) == VIRT_IAV_ROLE_PRIMARY;
+
+		/*
+		 * Every reserve, idempotent ones included, records the ticket and the role it holds now, so the role
+		 * follows the ticket from the guest's next start. The record is persisted before the grant is sent.
+		 */
+		copy_ticket(slot->ticket, ticket);
+		slot->primary = primary;
+		if (save_locked() != 0) {
+			*slot = saved;
+			snprintf(resp, resp_len, "ERR PERSIST\n");
+			return;
+		}
+		if (virt_camera_policy_decide(ticket, intent, primary, &v) != 0)
+			memset(&v, 0, sizeof(v));
+	}
 	if (virt_camera_verdict_format(&v, suffix, sizeof(suffix)) < 0)
 		return;
+	if (ticket) {
+		size_t sl = strlen(suffix);
+		uint64_t aux = 0;
+
+		/*
+		 * The aux aperture goes with the camera, to the primary only; for anyone else the node of this index is
+		 * cleared of what a previous holder had. A failure leaves the guest without an aperture, nothing more.
+		 */
+		if (g_aux_attach &&
+		    g_aux_attach(slot->index, slot->epoch, v.camera && slot->primary, &aux) == 0 && aux && v.camera) {
+			if (snprintf(suffix + sl, sizeof(suffix) - sl, " aux=%llu", (unsigned long long)aux) >=
+			    (int)(sizeof(suffix) - sl))
+				return;
+			sl = strlen(suffix);
+		}
+		if (snprintf(suffix + sl, sizeof(suffix) - sl, " role=%s", slot->primary ? "primary" : "consumer") >=
+		    (int)(sizeof(suffix) - sl))
+			return;
+	}
 	n = strlen(resp);
 	if (n && resp[n - 1] == '\n')
 		n--;
@@ -518,4 +591,60 @@ int virt_slice_lease_index_used(uint32_t index)
 	}
 	pthread_mutex_unlock(&g_lock);
 	return used;
+}
+
+int virt_slice_lease_ticket_of_index(uint32_t index, char *ticket, size_t ticket_len, int *primary)
+{
+	unsigned int i;
+	int rc = -1;
+
+	pthread_mutex_lock(&g_lock);
+	for (i = 0; i < LEASE_MAX; i++) {
+		if (g_slots[i].in_use && g_slots[i].index == index) {
+			if (ticket && ticket_len)
+				snprintf(ticket, ticket_len, "%s", g_slots[i].ticket);
+			if (primary)
+				*primary = g_slots[i].primary;
+			rc = 0;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_lock);
+	return rc;
+}
+
+unsigned int virt_slice_lease_ticket_count(const char *ticket)
+{
+	unsigned int i, n = 0;
+
+	if (!ticket || !ticket[0])
+		return 0;
+	pthread_mutex_lock(&g_lock);
+	for (i = 0; i < LEASE_MAX; i++)
+		n += (g_slots[i].in_use && strcmp(g_slots[i].ticket, ticket) == 0) ? 1u : 0u;
+	pthread_mutex_unlock(&g_lock);
+	return n;
+}
+
+void virt_slice_lease_set_aux_hooks(int (*attach)(uint32_t index, uint64_t epoch, int primary, uint64_t *size),
+				    void (*detach)(uint32_t index))
+{
+	pthread_mutex_lock(&g_lock);
+	g_aux_attach = attach;
+	g_aux_detach = detach;
+	pthread_mutex_unlock(&g_lock);
+}
+
+void virt_slice_lease_foreach(void (*cb)(uint32_t index, uint64_t epoch, int primary, int ticketed, void *ctx),
+			      void *ctx)
+{
+	unsigned int i;
+
+	if (!cb)
+		return;
+	pthread_mutex_lock(&g_lock);
+	for (i = 0; i < LEASE_MAX; i++)
+		if (g_slots[i].in_use)
+			cb(g_slots[i].index, g_slots[i].epoch, g_slots[i].primary, g_slots[i].ticket[0] != '\0', ctx);
+	pthread_mutex_unlock(&g_lock);
 }

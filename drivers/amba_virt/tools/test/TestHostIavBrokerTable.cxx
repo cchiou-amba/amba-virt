@@ -15,6 +15,8 @@
 
 #include "IavBrokerHarness.hxx"
 
+#include <ambas_imgproc_ioctl_arch.h>
+
 #include "CppUTest/TestHarness.h"
 
 namespace {
@@ -241,9 +243,11 @@ const unsigned long NeverAllowed[] = {
     IAV_IOC_ENABLE_DRAM_TEST,     IAV_IOC_CUSTOM_CMDS,          IAV_IOC_RESET,
     IAV_IOC_GET_DEBUG_CONFIG,     IAV_IOC_SET_DEBUG_CONFIG,     IAV_IOC_SET_DSP_LOG,
     IAV_IOC_ALLOC_MEM_PART,       IAV_IOC_ALLOC_ANON_MEM_PART,  IAV_IOC_REGISTER_ANON_MEM_PART,
-    IAV_IOC_FEED_CANVAS_BUF,      IAV_IOC_FEED_PYRAMID_BUF,     IAV_IOC_FEED_RAW_BUF,
-    IAV_IOC_SET_MEM_LAYOUT_RESOURCE, IAV_IOC_SET_RAW_ENCODE,    IAV_IOC_GDMA_COPY,
-    IAV_IOC_SET_IMG_SCALE,        IAV_IOC_VIN_SET_DEVINFO,      IAV_IOC_EFM_SET_EXT_POOL,
+    IAV_IOC_SET_MEM_LAYOUT_RESOURCE, IAV_IOC_SET_RAW_ENCODE,    IAV_IOC_VIN_SET_DEVINFO,
+    IAV_IOC_EFM_SET_EXT_POOL,     IAV_IOC_SET_RAW_ENC_CFG,      IAV_IOC_SET_ISP_NN_CFG,
+    IAV_IOC_SET_VIN_IDSP_CFG,     IAV_IOC_EFM_REQUEST_FRAME,    IAV_IOC_EFM_HANDSHAKE_FRAME,
+    IAV_IOC_WAIT_RAW_ENCODE,      IAV_IOC_IMG_GET_STATISTICS,   IAV_IOC_IMG_GET_LATEST_STATISTICS,
+    IAV_IOC_FREE_MEM_PART,        IAV_IOC_ALLOC_ANON_MEM_PART_FD, IAV_IOC_UNREGISTER_ANON_MEM_PART,
 };
 
 /* Not PLAIN by the table, but their "offset" fields are not memory offsets (the field comments were read). */
@@ -274,6 +278,60 @@ bool decodeChecked(unsigned int cmd)
     return false;
 }
 
+/*
+ * The image calls of inventory class W (version 6 of the allow-list, plan_iav_usb_yolo Envelope D). Their argument
+ * classes name offsets or addresses; each was read in its handler, and TestHostIavBrokerImage.cxx tests each check.
+ * ImageZeroRefused are those whose all-zero argument their own check refuses (no window named, partition 0).
+ */
+const unsigned long ImageServed[] = {
+    IAV_IOC_SET_IMG_SCALE,       IAV_IOC_WAIT_IMG_SCALE,          IAV_IOC_GET_VIDEO_PROC,
+    IAV_IOC_GET_VIN_IDSP_CFG,    IAV_IOC_WAIT_SKIP_IDSP_CFG,      IAV_IOC_GET_WARP_CTRL,
+    IAV_IOC_SET_BLUR_INSERT,     IAV_IOC_GET_BLUR_INSERT,         IAV_IOC_GET_YUV_REMAP_INSERT,
+    IAV_IOC_GET_FRAME_SYNC_PROC, IAV_IOC_CFG_CANVAS_FRAME_SYNC_PROC, IAV_IOC_GET_CANVAS_FRAME_SYNC_PROC,
+    IAV_IOC_GET_STREAM_CONFIG,   IAV_IOC_QUERY_MEM_LAYOUT_INFO,   IAV_IOC_GDMA_COPY,
+    IAV_IOC_SYNC_CACHE_MEM_PART, IAV_IOC_GET_ISP_NN_CFG,          IAV_IOC_EFM_GET_POOL_INFO,
+    IAV_IOC_EFM_RELEASE_ALL_FRAMES, IAV_IOC_FEED_CANVAS_BUF,      IAV_IOC_RELEASE_CANVAS_BUF,
+    IAV_IOC_FEED_PYRAMID_BUF,    IAV_IOC_RELEASE_PYRAMID_BUF,     IAV_IOC_FEED_RAW_BUF,
+    IAV_IOC_RELEASE_RAW_BUF,
+};
+const unsigned long ImageZeroRefused[] = {
+    IAV_IOC_SET_IMG_SCALE, IAV_IOC_GDMA_COPY, IAV_IOC_SYNC_CACHE_MEM_PART,
+    /* Envelope F: with no aperture the all-zero call names the WARP or CE_GO_MAP entry it does not have */
+    IAV_IOC_CFG_WARP_CTRL, IAV_IOC_CE_GO_MAP_REQUEST_BUFFER, IAV_IOC_CE_GO_MAP_HANDSHAKE_BUFFER,
+};
+
+/*
+ * The calls the aux aperture unlocks (version 7, plan_iav_usb_yolo Envelope F), each tested in
+ * TestHostIavBrokerAperture.cxx. IMG_GET_MISC_INFO carries user pointers inline and is framed differently (it is
+ * refused to a guest that did not negotiate the inline marshal); its framing is tested there too.
+ */
+const unsigned long ApertureServed[] = {
+    IAV_IOC_CFG_VIDEO_PROC, IAV_IOC_CFG_WARP_CTRL, IAV_IOC_SET_STREAM_CONFIG, IAV_IOC_CFG_FRAME_SYNC_PROC,
+    IAV_IOC_SET_YUV_REMAP_INSERT, IAV_IOC_CE_GO_MAP_REQUEST_BUFFER, IAV_IOC_CE_GO_MAP_HANDSHAKE_BUFFER,
+    IAV_IOC_IMG_GET_MISC_INFO,
+};
+
+bool listed(const unsigned long *list, size_t n, unsigned int cmd)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (list[i] == cmd) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool imageServed(unsigned int cmd)
+{
+    return listed(ImageServed, sizeof(ImageServed) / sizeof(ImageServed[0]), cmd) ||
+           listed(ApertureServed, sizeof(ApertureServed) / sizeof(ApertureServed[0]), cmd);
+}
+
+bool imageZeroRefused(unsigned int cmd)
+{
+    return listed(ImageZeroRefused, sizeof(ImageZeroRefused) / sizeof(ImageZeroRefused[0]), cmd);
+}
+
 bool notMemoryOffset(unsigned int cmd)
 {
     for (size_t i = 0; i < sizeof(NotMemoryOffsets) / sizeof(NotMemoryOffsets[0]); i++) {
@@ -302,8 +360,10 @@ TEST(IavBrokerPrimary, ThePrimarySetIsMuchLargerThanTheConsumerSet)
         primary += inProfile(e, IAV_PROFILE_PRIMARY);
     }
     LONGS_EQUAL(15, consumer);
-    /* An exact count: a change to the set is a decision, and this line is where it is recorded. */
-    LONGS_EQUAL(128, primary);
+    /* An exact count: a change to the set is a decision, and this line is where it is recorded.
+     * 128 before plan_iav_usb_yolo; Envelope D adds the 25 image calls of inventory class W; Envelope F the 8 calls
+     * the aux aperture and the inline marshal unlock (inventory classes N and M). */
+    LONGS_EQUAL(161, primary);
 }
 
 TEST(IavBrokerPrimary, NoProfileAllowsTheHazardousIoctls)
@@ -328,6 +388,14 @@ TEST(IavBrokerPrimary, ThePrimarySetHasNoAddressPointerFdOrDebugIoctl)
          * they are allowed with a check function, and TestHostIavBrokerDecode.cxx tests each. */
         if (decodeChecked(e->cmd)) {
             CHECK_TEXT(e->check != NULL, e->name);
+            continue;
+        }
+        if (imageServed(e->cmd)) {
+            /* a call that names memory has a check; the rest name none or only report stored offsets */
+            if (e->cls & (IAV_CLS_PHYS | IAV_CLS_POINTER)) {
+                CHECK_TEXT(e->check != NULL || e->post != NULL || e->cmd == IAV_IOC_QUERY_MEM_LAYOUT_INFO, e->name);
+            }
+            CHECK_TEXT(e->size <= AMBA_VIRT_IAV_MAX_ARG, e->name);
             continue;
         }
         CHECK_TEXT(e->cls == IAV_CLS_PLAIN || notMemoryOffset(e->cmd), e->name);
@@ -389,6 +457,9 @@ TEST(IavBrokerPrimary, EveryPrimaryIoctlWorksForThePrimaryAndTheWrongLengthIsRef
     size_t n = 0;
 
     memset(arg, 0, sizeof(arg));
+    /* The all-zero resource and channel 0 configuration must be the driver's current state, or the pinning
+     * checks refuse them (TestHostIavBrokerWire.cxx tests those). */
+    h.drv.setChanMap(0);
     for (size_t i = 0; i < iav_policy_count(); i++) {
         const struct iav_policy_entry *e = iav_policy_at(i);
         IavBrokerHarness::Result r;
@@ -397,7 +468,12 @@ TEST(IavBrokerPrimary, EveryPrimaryIoctlWorksForThePrimaryAndTheWrongLengthIsRef
             continue;
         }
         n++;
-        if (decodeChecked(e->cmd)) {
+        if (e->flags & IAV_F_INLINE) {
+            /* not negotiated here: refused before anything else, whatever its length */
+            LONGS_EQUAL_TEXT(-EPERM, h.ioctl(7, hd, e->cmd, arg, (uint32_t)e->size).r.status, e->name);
+            continue;
+        }
+        if (decodeChecked(e->cmd) || imageZeroRefused(e->cmd)) {
             /* A zero argument is refused by the call's own check; the valid shapes are tested in
              * TestHostIavBrokerDecode.cxx. The wrong length is still refused at the framing. */
             if (e->kind == IAV_ARG_PTR && (e->dir & IAV_DIR_W)) {
@@ -414,7 +490,7 @@ TEST(IavBrokerPrimary, EveryPrimaryIoctlWorksForThePrimaryAndTheWrongLengthIsRef
             LONGS_EQUAL_TEXT(-EMSGSIZE, h.ioctl(7, hd, e->cmd, arg, (uint32_t)e->size + 1).r.status, e->name);
         }
     }
-    LONGS_EQUAL(128, n);
+    LONGS_EQUAL(161, n);
     CHECK(h.drv.violations().empty());
 }
 

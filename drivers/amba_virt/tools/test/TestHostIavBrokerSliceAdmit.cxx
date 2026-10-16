@@ -96,7 +96,8 @@ TEST(IavBrokerSliceAdmit, admitted_buffer_reaches_the_driver_once)
     IavBrokerHarness::Result r = submit(in);
 
     LONGS_EQUAL(0, r.r.status);
-    UNSIGNED_LONGS_EQUAL(kBase + 4096, r.r.value);
+    /* D5: no host physical address goes back to the guest. */
+    UNSIGNED_LONGS_EQUAL(0, r.r.value);
     UNSIGNED_LONGS_EQUAL(ioctls + 1, h->drv.ioctlCalls());
 }
 

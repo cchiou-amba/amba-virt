@@ -293,6 +293,83 @@ private:
     size_t _len;
 };
 
+/* Statistics of the luma of a rectangle of one fresh canvas frame (plan_iav_usb_yolo Envelope F, the aperture checks). */
+struct RegionStats
+{
+    unsigned long long pts;
+    unsigned int width, height;	/* of the canvas */
+    double mean, var;		/* of the rectangle */
+    unsigned long long hash;	/* of the rectangle's rows */
+};
+
+/*
+ * Read canvas frames for settleMs and measure [x, y, w, h) of the last one (the queue holds frames made since the last
+ * reader; the last is fresh). The canvas is read from the DSP partition mapping as IavRefCapture does. Returns 0, or -1.
+ */
+inline int canvasRegion(Device &dev, const Mapping &dsp, unsigned int canvas, unsigned int x, unsigned int y,
+                        unsigned int w, unsigned int h, long settleMs, RegionStats *st)
+{
+    const long long end = nowNs() + (long long)settleMs * 1000000LL;
+    struct iav_querydesc q;
+    bool have = false;
+    long tries = 0;
+
+    do {
+        memset(&q, 0, sizeof(q));
+        q.qid = IAV_DESC_CANVAS;
+        q.arg.canvas.canvas_id = canvas;
+        q.arg.canvas.non_block_flag = 0;
+        if (dev.call(IAV_IOC_QUERY_DESC, &q, "IAV_IOC_QUERY_DESC", true) != 0) {
+            if (errno == EAGAIN && ++tries < 200) {
+                continue;
+            }
+            fprintf(stderr, "IAV_IOC_QUERY_DESC canvas %u: %s\n", canvas, strerror(errno));
+            return -1;
+        }
+        have = true;
+    } while (nowNs() < end);
+    if (!have) {
+        return -1;
+    }
+    const struct iav_yuv_cap &c = q.arg.canvas.yuv;
+    if (c.pitch == 0 || x + w > c.width || y + h > c.height ||
+        c.y_addr_offset + (unsigned long long)c.pitch * c.height > dsp.length()) {
+        fprintf(stderr, "region %u,%u %ux%u outside canvas %u (%ux%u)\n", x, y, w, h, canvas, c.width, c.height);
+        return -1;
+    }
+    {
+        static unsigned char row[8192];
+        double sum = 0, sq = 0;
+        unsigned long long hsh = 1469598103934665603ULL;
+
+        if (w > sizeof(row)) {
+            return -1;
+        }
+        for (unsigned int r = 0; r < h; r++) {
+            windowCopy(row, dsp.bytes() + c.y_addr_offset + (unsigned long long)(y + r) * c.pitch + x, w);
+            for (unsigned int i = 0; i < w; i++) {
+                sum += row[i];
+                sq += (double)row[i] * row[i];
+                hsh ^= row[i];
+                hsh *= 1099511628211ULL;
+            }
+        }
+        st->pts = c.mono_pts;
+        st->width = c.width;
+        st->height = c.height;
+        st->mean = sum / ((double)w * h);
+        st->var = sq / ((double)w * h) - st->mean * st->mean;
+        st->hash = hsh;
+    }
+    return 0;
+}
+
+/* One call's outcome as a row: its return code and errno (the comparison unit of the native and guest runs). */
+inline void callRow(const char *kind, long long seq, const char *name, int rc, int err)
+{
+    Row(kind).add("seq", seq).add("case", name).add("rc", (long long)rc).add("errno", (long long)(rc < 0 ? err : 0)).print();
+}
+
 /* A positive integer option value, or the default. */
 inline long argValue(int argc, char **argv, const char *name, long def)
 {
@@ -302,6 +379,16 @@ inline long argValue(int argc, char **argv, const char *name, long def)
         }
     }
     return def;
+}
+
+inline bool argFlag(int argc, char **argv, const char *name)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 inline const char *argString(int argc, char **argv, const char *name, const char *def)

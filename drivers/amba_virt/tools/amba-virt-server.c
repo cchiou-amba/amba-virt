@@ -1526,6 +1526,7 @@ static void redirect_output(const char *path)
 static int g_iav_qual;
 static int g_iav_qual_ran;
 static int g_iav_serve;
+static int g_iav_serve_tap;	/* --iav-serve -T: run the production frame tap, as the image does */
 
 /*
  * Configure stream 1 as MJPEG 1920x1080 from canvas 0 and start it, exactly as
@@ -1711,11 +1712,11 @@ static int server_run(int ready_fd)
 	}
 
 #ifdef AMBA_VIRT_IAV_QUAL
-	if (g_iav_serve) {
+	if (g_iav_serve && !g_iav_serve_tap) {
 		/*
 		 * The tap and a guest cannot both query frame descriptors of the shared bitstream
 		 * buffer (the driver allows one user), so a candidate server for guests runs without the
-		 * tap, with the stream started as the qualification runs start it.
+		 * tap, with the stream started as the qualification runs start it. -T keeps the tap.
 		 */
 		server_qual_start_stream();
 	} else
@@ -1742,6 +1743,7 @@ static int server_run(int ready_fd)
 
 	virt_acl_init();
 	virt_camera_policy_load();
+	virt_iav_role_load();
 	virt_dma_broker_init();
 	virt_admin_ipc_start(NULL);
 
@@ -1867,8 +1869,30 @@ int main(int argc, char **argv)
 		 * This branch runs before option parsing: honor -P <slice> (else the settings file) and
 		 * -C <camera.conf> (the pipeline configuration to bring up, for trying another resource script).
 		 */
-		for (ai = 2; ai + 1 < argc; ai += 2) {
-			if (strcmp(argv[ai], "-P") == 0) {
+		for (ai = 2; ai < argc; ai += 2) {
+			if (strcmp(argv[ai], "-T") == 0) {
+				/* the production frame tap instead of the bare stream: guests then cannot read frame descriptors */
+				g_iav_serve_tap = 1;
+				ai--;
+				continue;
+			}
+			if (strcmp(argv[ai], "-X") == 0) {
+				/*
+				 * free the server's IAV partitions (BLUR, ARB_BLUR, YUV_REMAP) at the pipeline shutdown, so the
+				 * production worker resumes on a driver as an image without them left it (development tree only)
+				 */
+				virt_camera_pipeline_set_free_new_parts(1);
+				ai--;
+				continue;
+			}
+			if (ai + 1 >= argc) {
+				fprintf(stderr, "--iav-serve: option '%s' needs a value\n", argv[ai]);
+				return 1;
+			}
+			if (strcmp(argv[ai], "-L") == 0) {
+				/* a candidate camera apply library (development tree only) */
+				virt_camera_pipeline_set_apply_lib(argv[ai + 1]);
+			} else if (strcmp(argv[ai], "-P") == 0) {
 				char *end = NULL;
 				unsigned long v = strtoul(argv[ai + 1], &end, 10);
 
@@ -1881,7 +1905,7 @@ int main(int argc, char **argv)
 			} else if (strcmp(argv[ai], "-C") == 0) {
 				g_camera_conf_path = argv[ai + 1];
 			} else {
-				fprintf(stderr, "--iav-serve: unknown option '%s' (-P <slice>, -C <camera.conf>)\n", argv[ai]);
+				fprintf(stderr, "--iav-serve: unknown option '%s' (-P <slice>, -C <camera.conf>, -L <apply library>, -T, -X)\n", argv[ai]);
 				return 1;
 			}
 		}

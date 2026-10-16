@@ -35,6 +35,22 @@ struct entry {
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct entry g_entries[VIRT_CAMERA_MAX_ENTRIES];
+
+/* The IAV role table (see virt_camera_policy.h). */
+struct role_line {
+	int in_use;
+	char ticket[VIRT_CAMERA_TICKET_MAX + 1];
+	enum virt_iav_role role;
+};
+
+#define ROLES_MISSING	0	/* no store: the default table */
+#define ROLES_VALID	1
+#define ROLES_INVALID	2	/* the store did not parse: every ticket is a consumer */
+
+static struct role_line g_roles[VIRT_CAMERA_MAX_ENTRIES];
+static int g_roles_state = ROLES_MISSING;
+static char g_role_store[256] = VIRT_IAV_ROLE_STORE;
+static int (*g_iav_status)(char *buf, size_t len);
 static char g_store[256] = VIRT_CAMERA_STORE;
 static int g_present[AMBA_VIRT_IAV_MAX_WINDOWS];
 static uint64_t g_size[AMBA_VIRT_IAV_MAX_WINDOWS];
@@ -137,6 +153,10 @@ void virt_camera_policy_reset(void)
 	g_windows_ready = 0;
 	g_ready_ms = 0;
 	snprintf(g_store, sizeof(g_store), "%s", VIRT_CAMERA_STORE);
+	memset(g_roles, 0, sizeof(g_roles));
+	g_roles_state = ROLES_MISSING;
+	snprintf(g_role_store, sizeof(g_role_store), "%s", VIRT_IAV_ROLE_STORE);
+	g_iav_status = NULL;
 	pthread_mutex_unlock(&g_lock);
 }
 
@@ -247,36 +267,24 @@ int virt_camera_policy_load(void)
 	return 0;
 }
 
-/* Write the overrides atomically: a temporary file in the same directory, fsync, rename. */
-static int save_locked(void)
+/* Write a store atomically: a temporary file in the same directory, mode 0600, fsync, rename. */
+static int write_atomic(const char *path, const char *buf, size_t len)
 {
 	char dir[256], tmp[288];
-	char buf[VIRT_CAMERA_STORE_MAX_BYTES];
-	size_t len = 0;
 	const char *slash;
-	unsigned int i;
+	size_t i;
 	int fd;
 
-	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
-		int w;
-
-		if (!g_entries[i].in_use || g_entries[i].override == OV_INHERIT)
-			continue;
-		w = snprintf(buf + len, sizeof(buf) - len, "%s %s\n", g_entries[i].ticket,
-			     g_entries[i].override == OV_ON ? "on" : "off");
-		if (w < 0 || (size_t)w >= sizeof(buf) - len)
+	slash = strrchr(path, '/');
+	if (slash && slash != path) {
+		if ((size_t)(slash - path) >= sizeof(dir))
 			return -1;
-		len += (size_t)w;
-	}
-
-	slash = strrchr(g_store, '/');
-	if (slash && slash != g_store) {
-		memcpy(dir, g_store, (size_t)(slash - g_store));
-		dir[slash - g_store] = '\0';
+		memcpy(dir, path, (size_t)(slash - path));
+		dir[slash - path] = '\0';
 		if (mkdir(dir, 0755) < 0 && errno != EEXIST)
 			return -1;
 	}
-	snprintf(tmp, sizeof(tmp), "%s.tmp", g_store);
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
 	if (fd < 0)
 		return -1;
@@ -295,7 +303,7 @@ static int save_locked(void)
 			unlink(tmp);
 			return -1;
 		}
-		i += (unsigned int)w;
+		i += (size_t)w;
 	}
 	if (fsync(fd) != 0) {
 		close(fd);
@@ -303,11 +311,32 @@ static int save_locked(void)
 		return -1;
 	}
 	close(fd);
-	if (rename(tmp, g_store) < 0) {
+	if (rename(tmp, path) < 0) {
 		unlink(tmp);
 		return -1;
 	}
 	return 0;
+}
+
+/* Write the overrides atomically. */
+static int save_locked(void)
+{
+	char buf[VIRT_CAMERA_STORE_MAX_BYTES];
+	size_t len = 0;
+	unsigned int i;
+
+	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+		int w;
+
+		if (!g_entries[i].in_use || g_entries[i].override == OV_INHERIT)
+			continue;
+		w = snprintf(buf + len, sizeof(buf) - len, "%s %s\n", g_entries[i].ticket,
+			     g_entries[i].override == OV_ON ? "on" : "off");
+		if (w < 0 || (size_t)w >= sizeof(buf) - len)
+			return -1;
+		len += (size_t)w;
+	}
+	return write_atomic(g_store, buf, len);
 }
 
 void virt_camera_policy_set_windows(const struct virt_camera_window *w, unsigned int n, uint64_t ready_ms)
@@ -333,7 +362,7 @@ static int camera_on(int ov, enum virt_camera_intent intent)
 	return (ov == OV_INHERIT) ? (intent == VIRT_CAMERA_INTENT_ON) : (ov == OV_ON);
 }
 
-int virt_camera_policy_decide(const char *ticket, enum virt_camera_intent intent, uint32_t index,
+int virt_camera_policy_decide(const char *ticket, enum virt_camera_intent intent, int primary,
 			      struct virt_camera_verdict *v)
 {
 	struct entry *e;
@@ -362,7 +391,7 @@ int virt_camera_policy_decide(const char *ticket, enum virt_camera_intent intent
 	if (v->camera) {
 		v->dsp = g_size[AMBA_VIRT_IAV_WIN_DSP];
 		v->bsb = g_size[AMBA_VIRT_IAV_WIN_BSB];
-		if (index == 0) {
+		if (primary) {
 			if (g_present[AMBA_VIRT_IAV_WIN_DEC])
 				v->dec = g_size[AMBA_VIRT_IAV_WIN_DEC];
 			if (g_present[AMBA_VIRT_IAV_WIN_OVL])
@@ -448,6 +477,296 @@ static void get_locked(const char *ticket, char *resp, size_t resp_len)
 	snprintf(resp, resp_len, "OK COUNT %u\n%s%s", count, body, truncated ? "TRUNCATED\n" : "");
 }
 
+/* ---- IAV roles ---- */
+
+const char *virt_iav_role_name(enum virt_iav_role role)
+{
+	return role == VIRT_IAV_ROLE_PRIMARY ? "primary" : "consumer";
+}
+
+void virt_iav_role_set_store(const char *path)
+{
+	pthread_mutex_lock(&g_lock);
+	if (path && path[0] && strlen(path) < sizeof(g_role_store) - 8)
+		snprintf(g_role_store, sizeof(g_role_store), "%s", path);
+	pthread_mutex_unlock(&g_lock);
+}
+
+void virt_camera_policy_set_iav_status(int (*fn)(char *buf, size_t len))
+{
+	pthread_mutex_lock(&g_lock);
+	g_iav_status = fn;
+	pthread_mutex_unlock(&g_lock);
+}
+
+static struct role_line *role_find(const char *ticket)
+{
+	unsigned int i;
+
+	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+		if (g_roles[i].in_use && strcmp(g_roles[i].ticket, ticket) == 0)
+			return &g_roles[i];
+	}
+	return NULL;
+}
+
+static int role_primary_line_locked(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+		if (g_roles[i].in_use && g_roles[i].role == VIRT_IAV_ROLE_PRIMARY)
+			return 1;
+	}
+	return 0;
+}
+
+/* The resolution rule of virt_camera_policy.h. Called with g_lock held. */
+static enum virt_iav_role role_of_locked(const char *ticket, int *from_store)
+{
+	struct role_line *l;
+
+	*from_store = 0;
+	if (!virt_camera_ticket_ok(ticket) || g_roles_state == ROLES_INVALID)
+		return VIRT_IAV_ROLE_CONSUMER;
+	l = role_find(ticket);
+	if (l) {
+		*from_store = 1;
+		return l->role;
+	}
+	if (role_primary_line_locked())
+		return VIRT_IAV_ROLE_CONSUMER;
+	return strcmp(ticket, VIRT_IAV_DEFAULT_PRIMARY) == 0 ? VIRT_IAV_ROLE_PRIMARY : VIRT_IAV_ROLE_CONSUMER;
+}
+
+enum virt_iav_role virt_iav_role_of(const char *ticket)
+{
+	enum virt_iav_role r;
+	int from_store;
+
+	pthread_mutex_lock(&g_lock);
+	r = role_of_locked(ticket, &from_store);
+	pthread_mutex_unlock(&g_lock);
+	return r;
+}
+
+/* "<ticket> <primary|consumer>": 0 and the outputs, or -1. line is len bytes, not NUL terminated. */
+static int role_parse_line(const char *line, size_t len, char *ticket, enum virt_iav_role *role)
+{
+	const char *sp = memchr(line, ' ', len);
+	size_t tl, rl;
+
+	if (!sp)
+		return -1;
+	tl = (size_t)(sp - line);
+	rl = len - tl - 1;
+	if (tl < 1 || tl > VIRT_CAMERA_TICKET_MAX || memchr(sp + 1, ' ', rl))
+		return -1;
+	memcpy(ticket, line, tl);
+	ticket[tl] = '\0';
+	if (!virt_camera_ticket_ok(ticket))
+		return -1;
+	if (rl == 7 && memcmp(sp + 1, "primary", 7) == 0)
+		*role = VIRT_IAV_ROLE_PRIMARY;
+	else if (rl == 8 && memcmp(sp + 1, "consumer", 8) == 0)
+		*role = VIRT_IAV_ROLE_CONSUMER;
+	else
+		return -1;
+	return 0;
+}
+
+/* Parse the whole store or none of it. Returns ROLES_*. Called with g_lock held. */
+static int role_load_locked(void)
+{
+	char buf[VIRT_CAMERA_STORE_MAX_BYTES + 1];
+	struct role_line lines[VIRT_CAMERA_MAX_ENTRIES];
+	size_t n, pos = 0;
+	unsigned int count = 0, primaries = 0, i;
+	FILE *fp;
+
+	memset(g_roles, 0, sizeof(g_roles));
+	fp = fopen(g_role_store, "r");
+	if (!fp)
+		return errno == ENOENT ? ROLES_MISSING : ROLES_INVALID;
+	n = fread(buf, 1, sizeof(buf), fp);
+	fclose(fp);
+	if (n > VIRT_CAMERA_STORE_MAX_BYTES || memchr(buf, '\0', n))
+		return ROLES_INVALID;
+	memset(lines, 0, sizeof(lines));
+	while (pos < n) {
+		const char *nl = memchr(buf + pos, '\n', n - pos);
+		size_t len = nl ? (size_t)(nl - (buf + pos)) : n - pos;
+
+		if (count >= VIRT_CAMERA_MAX_ENTRIES)
+			return ROLES_INVALID;
+		if (role_parse_line(buf + pos, len, lines[count].ticket, &lines[count].role) != 0)
+			return ROLES_INVALID;
+		for (i = 0; i < count; i++) {
+			if (strcmp(lines[i].ticket, lines[count].ticket) == 0)
+				return ROLES_INVALID;
+		}
+		primaries += lines[count].role == VIRT_IAV_ROLE_PRIMARY ? 1u : 0u;
+		lines[count].in_use = 1;
+		count++;
+		pos += len + (nl ? 1 : 0);
+	}
+	if (primaries > 1)
+		return ROLES_INVALID;
+	memcpy(g_roles, lines, sizeof(lines));
+	return ROLES_VALID;
+}
+
+int virt_iav_role_load(void)
+{
+	pthread_mutex_lock(&g_lock);
+	g_roles_state = role_load_locked();
+	if (g_roles_state == ROLES_INVALID) {
+		memset(g_roles, 0, sizeof(g_roles));
+		fprintf(stderr, "amba-virt-server: IAV roles %s is not valid; every ticket is a consumer until "
+			"amba-virt-ctl set-role writes a valid one\n", g_role_store);
+	}
+	pthread_mutex_unlock(&g_lock);
+	return 0;
+}
+
+static int role_save_locked(void)
+{
+	char buf[VIRT_CAMERA_STORE_MAX_BYTES];
+	size_t len = 0;
+	unsigned int i;
+
+	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+		int w;
+
+		if (!g_roles[i].in_use)
+			continue;
+		w = snprintf(buf + len, sizeof(buf) - len, "%s %s\n", g_roles[i].ticket,
+			     virt_iav_role_name(g_roles[i].role));
+		if (w < 0 || (size_t)w >= sizeof(buf) - len)
+			return -1;
+		len += (size_t)w;
+	}
+	return write_atomic(g_role_store, buf, len);
+}
+
+/* SET_ROLE <ticket> <primary|consumer|inherit>. The table is changed in memory only if the store is written. */
+static void role_set(const char *ticket, const char *what, char *resp, size_t resp_len)
+{
+	struct role_line saved[VIRT_CAMERA_MAX_ENTRIES];
+	struct role_line *l;
+	int saved_state;
+	unsigned int i;
+
+	pthread_mutex_lock(&g_lock);
+	memcpy(saved, g_roles, sizeof(saved));
+	saved_state = g_roles_state;
+	if (g_roles_state == ROLES_INVALID)
+		memset(g_roles, 0, sizeof(g_roles));	/* a set repairs a corrupt store from nothing */
+	l = role_find(ticket);
+	if (strcmp(what, "inherit") == 0) {
+		if (l)
+			memset(l, 0, sizeof(*l));
+	} else {
+		enum virt_iav_role role = strcmp(what, "primary") == 0 ? VIRT_IAV_ROLE_PRIMARY : VIRT_IAV_ROLE_CONSUMER;
+
+		if (role == VIRT_IAV_ROLE_PRIMARY) {
+			/* at most one primary: every other primary line goes */
+			for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+				if (g_roles[i].in_use && g_roles[i].role == VIRT_IAV_ROLE_PRIMARY &&
+				    strcmp(g_roles[i].ticket, ticket) != 0)
+					memset(&g_roles[i], 0, sizeof(g_roles[i]));
+			}
+		}
+		if (!l) {
+			for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES && !l; i++) {
+				if (!g_roles[i].in_use)
+					l = &g_roles[i];
+			}
+		}
+		if (!l) {
+			memcpy(g_roles, saved, sizeof(saved));
+			pthread_mutex_unlock(&g_lock);
+			snprintf(resp, resp_len, "ERR PERSIST\n");
+			return;
+		}
+		l->in_use = 1;
+		{
+			size_t tl = strnlen(ticket, VIRT_CAMERA_TICKET_MAX);
+
+			memcpy(l->ticket, ticket, tl);
+			l->ticket[tl] = '\0';
+		}
+		l->role = role;
+	}
+	if (role_save_locked() != 0) {
+		memcpy(g_roles, saved, sizeof(saved));
+		g_roles_state = saved_state;
+		snprintf(resp, resp_len, "ERR PERSIST\n");
+	} else {
+		g_roles_state = ROLES_VALID;
+		snprintf(resp, resp_len, "OK\n");
+	}
+	pthread_mutex_unlock(&g_lock);
+}
+
+static int role_listed(char seen[][VIRT_CAMERA_TICKET_MAX + 1], unsigned int n, const char *t)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		if (strcmp(seen[i], t) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* GET_ROLE [<ticket>]: the store lines, the default primary, and every ticket a reserve has named. */
+static void role_get(const char *ticket, char *resp, size_t resp_len)
+{
+	char seen[VIRT_CAMERA_MAX_ENTRIES * 2 + 1][VIRT_CAMERA_TICKET_MAX + 1];
+	char body[2048];
+	unsigned int n = 0, count = 0, i;
+	size_t pos = 0;
+	int truncated = 0;
+
+	pthread_mutex_lock(&g_lock);
+	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+		if (g_roles[i].in_use)
+			snprintf(seen[n++], sizeof(seen[0]), "%s", g_roles[i].ticket);
+	}
+	if (!role_listed(seen, n, VIRT_IAV_DEFAULT_PRIMARY))
+		snprintf(seen[n++], sizeof(seen[0]), "%s", VIRT_IAV_DEFAULT_PRIMARY);
+	for (i = 0; i < VIRT_CAMERA_MAX_ENTRIES; i++) {
+		if (g_entries[i].in_use && !role_listed(seen, n, g_entries[i].ticket))
+			snprintf(seen[n++], sizeof(seen[0]), "%s", g_entries[i].ticket);
+	}
+	body[0] = '\0';
+	for (i = 0; i < n; i++) {
+		int from_store, w;
+		enum virt_iav_role r;
+
+		if (ticket && strcmp(seen[i], ticket) != 0)
+			continue;
+		r = role_of_locked(seen[i], &from_store);
+		if (count >= VIRT_CAMERA_GET_MAX_LINES) {
+			truncated = 1;
+			continue;
+		}
+		w = snprintf(body + pos, sizeof(body) - pos, "ROLE %s role=%s source=%s\n", seen[i], virt_iav_role_name(r),
+			     g_roles_state == ROLES_INVALID ? "invalid-store" : from_store ? "store" : "default");
+		if (w < 0 || (size_t)w >= sizeof(body) - pos) {
+			truncated = 1;
+			continue;
+		}
+		pos += (size_t)w;
+		count++;
+	}
+	snprintf(resp, resp_len, "OK COUNT %u store=%s\n%s%s", count,
+		 g_roles_state == ROLES_VALID ? "valid" : g_roles_state == ROLES_INVALID ? "invalid" : "missing", body,
+		 truncated ? "TRUNCATED\n" : "");
+	pthread_mutex_unlock(&g_lock);
+}
+
 int virt_camera_policy_admin(const char *req, char *resp, size_t resp_len)
 {
 	char cmd[64], a1[64], a2[64], a3[64];
@@ -515,19 +834,53 @@ int virt_camera_policy_admin(const char *req, char *resp, size_t resp_len)
 		get_locked(fields == 2 ? a1 : NULL, resp, resp_len);
 		pthread_mutex_unlock(&g_lock);
 	} else if (fields >= 1 && strcmp(cmd, "CAMERA_STATUS") == 0) {
+		char st[1024];
+		int (*fn)(char *, size_t);
+		const char *pin = "unknown";
+
 		if (fields != 1) {
 			snprintf(resp, resp_len, "ERR INVAL\n");
 			return 0;
 		}
 		pthread_mutex_lock(&g_lock);
-		snprintf(resp, resp_len, "OK windows=%s dsp=%llu bsb=%llu dec=%llu ovl=%llu ready_ms=%llu\n",
+		fn = g_iav_status;
+		pthread_mutex_unlock(&g_lock);
+		if (fn && fn(st, sizeof(st)) > 0)
+			pin = strstr(st, "windows=stale") ? "stale" : "pinned";
+		pthread_mutex_lock(&g_lock);
+		snprintf(resp, resp_len, "OK windows=%s dsp=%llu bsb=%llu dec=%llu ovl=%llu ready_ms=%llu pinning=%s\n",
 			 g_windows_ready ? "ready" : "none",
 			 (unsigned long long)g_size[AMBA_VIRT_IAV_WIN_DSP],
 			 (unsigned long long)g_size[AMBA_VIRT_IAV_WIN_BSB],
 			 (unsigned long long)g_size[AMBA_VIRT_IAV_WIN_DEC],
 			 (unsigned long long)g_size[AMBA_VIRT_IAV_WIN_OVL],
-			 (unsigned long long)g_ready_ms);
+			 (unsigned long long)g_ready_ms, pin);
 		pthread_mutex_unlock(&g_lock);
+	} else if (fields >= 1 && strcmp(cmd, "SET_ROLE") == 0) {
+		if (fields != 3 || !virt_camera_ticket_ok(a1) ||
+		    (strcmp(a2, "primary") != 0 && strcmp(a2, "consumer") != 0 && strcmp(a2, "inherit") != 0)) {
+			snprintf(resp, resp_len, "ERR INVAL\n");
+			return 0;
+		}
+		role_set(a1, a2, resp, resp_len);
+	} else if (fields >= 1 && strcmp(cmd, "GET_ROLE") == 0) {
+		if (fields > 2 || (fields == 2 && !virt_camera_ticket_ok(a1))) {
+			snprintf(resp, resp_len, "ERR INVAL\n");
+			return 0;
+		}
+		role_get(fields == 2 ? a1 : NULL, resp, resp_len);
+	} else if (fields >= 1 && strcmp(cmd, "IAV_STATUS") == 0) {
+		int (*fn)(char *, size_t);
+
+		if (fields != 1) {
+			snprintf(resp, resp_len, "ERR INVAL\n");
+			return 0;
+		}
+		pthread_mutex_lock(&g_lock);
+		fn = g_iav_status;
+		pthread_mutex_unlock(&g_lock);
+		if (!fn || fn(resp, resp_len) <= 0)
+			snprintf(resp, resp_len, "ERR NO_BROKER\n");
 	} else {
 		snprintf(resp, resp_len, "ERR UNKNOWN_CMD\n");
 	}

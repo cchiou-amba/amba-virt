@@ -110,7 +110,7 @@ def main():
         risky_fields[n] = re.findall(r"'([\w.]+):", mm.group(1)) if mm else []
     allow, denied, fp, other, nm = [], [], [], 0, []
     for line in open(table):
-        m = re.match(r"IAV_IOCTL\((\w+), (\w+), (\w+), (\w+), (.*?), ([\w|]+), ([\w|0]+)\)", line)
+        m = re.match(r"IAV_IOCTL\((\w+), (\w+), (\w+), (\w+), (.*?), ([\w|]+), ([\w|0]+)(?:, (.*))?\)\s*$", line)
         if not m:
             continue
         name, cls, flags = m.group(1), m.group(6), m.group(7)

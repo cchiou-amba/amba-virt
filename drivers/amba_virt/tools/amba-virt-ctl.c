@@ -37,6 +37,10 @@ static void usage(const char *prog)
 	fprintf(stderr, "  set-camera <ticket> <on|off|inherit> Per-ticket camera window override (persisted)\n");
 	fprintf(stderr, "  get-camera [<ticket>]                Show camera overrides, last seen intent, effective\n");
 	fprintf(stderr, "  camera-status                        Show the configured camera windows and when\n");
+	fprintf(stderr, "  set-role <ticket> <primary|consumer|inherit>\n");
+	fprintf(stderr, "                                       Per-ticket virtual /dev/iav role (persisted; one primary)\n");
+	fprintf(stderr, "  get-role [<ticket>]                  Show the IAV role of each known ticket and its source\n");
+	fprintf(stderr, "  iav-status                           Show the IAV broker: window pinning, negotiated guests\n");
 	fprintf(stderr, "  set-bounds <cid> <dev> <off> <sizeM> Forcefully set device partition\n");
 	fprintf(stderr, "  evict <cid>                          Immediately quarantine and evict tenant\n");
 	fprintf(stderr, "  policy reload                        Reload policies from JSON file\n");
@@ -261,6 +265,41 @@ int main(int argc, char **argv)
 
 	if (strcmp(action, "camera-status") == 0) {
 		snprintf(cmd_buf, sizeof(cmd_buf), "CAMERA_STATUS\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return strncmp(resp_buf, "OK", 2) == 0 ? 0 : 1;
+	}
+
+	if (strcmp(action, "set-role") == 0) {
+		if (argc != 4) {
+			fprintf(stderr, "Usage: %s set-role <ticket> <primary|consumer|inherit>\n", argv[0]);
+			return 1;
+		}
+		snprintf(cmd_buf, sizeof(cmd_buf), "SET_ROLE %s %s\n", argv[2], argv[3]);
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return strncmp(resp_buf, "OK", 2) == 0 ? 0 : 1;
+	}
+
+	if (strcmp(action, "get-role") == 0) {
+		if (argc > 3) {
+			fprintf(stderr, "Usage: %s get-role [<ticket>]\n", argv[0]);
+			return 1;
+		}
+		if (argc == 3)
+			snprintf(cmd_buf, sizeof(cmd_buf), "GET_ROLE %s\n", argv[2]);
+		else
+			snprintf(cmd_buf, sizeof(cmd_buf), "GET_ROLE\n");
+		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
+			return 1;
+		printf("%s", resp_buf);
+		return strncmp(resp_buf, "OK", 2) == 0 ? 0 : 1;
+	}
+
+	if (strcmp(action, "iav-status") == 0) {
+		snprintf(cmd_buf, sizeof(cmd_buf), "IAV_STATUS\n");
 		if (send_admin_cmd(cmd_buf, resp_buf, sizeof(resp_buf)) < 0)
 			return 1;
 		printf("%s", resp_buf);

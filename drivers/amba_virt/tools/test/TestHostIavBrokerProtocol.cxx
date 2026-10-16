@@ -72,7 +72,7 @@ TEST(IavBrokerProtocol, WrongProtocolVersion)
 
 TEST(IavBrokerProtocol, UnknownOperations)
 {
-    uint32_t ops[] = {0, 7, 8, 100, 0x7fffffffu, 0xffffffffu};
+    uint32_t ops[] = {0, 10, 11, 100, 0x7fffffffu, 0xffffffffu};
 
     for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         std::vector<uint8_t> v = IavBrokerHarness::build(ops[i], handle, 0, 0, 0, NULL, 0);
