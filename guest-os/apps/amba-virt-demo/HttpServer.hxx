@@ -30,12 +30,13 @@ enum http_method {
 
 enum http_route {
     HTTP_ROUTE_UNKNOWN = 0,
-    HTTP_ROUTE_ROOT,         /* GET / or /index.html */
-    HTTP_ROUTE_API_INFO,     /* GET /api/info or /health */
-    HTTP_ROUTE_LIVE_STREAM,  /* GET /live/stream */
-    HTTP_ROUTE_LIVE_PARAMS,  /* POST /live/params */
-    HTTP_ROUTE_INFER,        /* POST /infer */
-    HTTP_ROUTE_OPTIONS       /* OPTIONS * */
+    HTTP_ROUTE_ROOT,            /* GET / or /index.html */
+    HTTP_ROUTE_API_INFO,        /* GET /api/info or /health */
+    HTTP_ROUTE_API_GUEST_PROPS, /* GET /api/guest-props */
+    HTTP_ROUTE_LIVE_STREAM,     /* GET /live/stream */
+    HTTP_ROUTE_LIVE_PARAMS,     /* POST /live/params */
+    HTTP_ROUTE_INFER,           /* POST /infer */
+    HTTP_ROUTE_OPTIONS          /* OPTIONS * */
 };
 
 struct http_request {

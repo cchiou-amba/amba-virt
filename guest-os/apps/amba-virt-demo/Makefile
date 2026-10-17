@@ -51,7 +51,8 @@ CFLAGS := -V$(QNX_TARGET_ARCH) -D_QNX_SOURCE -O2 -Wall \
 	-I$(NNCTRL_DIR)/src \
 	-I$(NNCTRL_DIR)/dep/ambacnn \
 	-I$(NANOPB_DIR) \
-	-I$(PROTO_DIR)
+	-I$(PROTO_DIR) \
+	-I$(ROOT_DIR)/guest-os/client
 
 LDFLAGS := -V$(QNX_TARGET_ARCH) -lsocket -lm
 TARGETS := amba_virt_demo
@@ -72,7 +73,8 @@ CFLAGS := -O2 -Wall \
 	-I$(NNCTRL_DIR)/src \
 	-I$(NNCTRL_DIR)/dep/ambacnn \
 	-I$(NANOPB_DIR) \
-	-I$(PROTO_DIR)
+	-I$(PROTO_DIR) \
+	-I$(ROOT_DIR)/guest-os/client
 
 LDFLAGS := -lpthread -lm
 TARGETS := amba_virt_demo amba_virt_demo-musl amba_virt_demo-alpine
@@ -86,7 +88,7 @@ CXX := $(CROSS_COMPILE)g++
 CXXFLAGS := $(CFLAGS) -std=c++17
 
 DEMO_CXX_SRCS := AmbaVirtDemo.cxx HttpServer.cxx StreamBroadcaster.cxx YoloGeometry.cxx YoloPostprocess.cxx UsbCameraCapture.cxx \
-	UsbJpeg.cxx UsbIavDecoder.cxx UsbWebcamControl.cxx
+	UsbJpeg.cxx UsbIavDecoder.cxx UsbWebcamControl.cxx GuestProps.cxx
 
 amba_virt_demo: $(DEMO_CXX_SRCS) $(COMMON_SRCS) $(IAV_QUAL_SRCS)
 	$(CC) $(CFLAGS) $(IAV_QUAL_FLAGS) -o $@ $^ $(CPPUTEST_LIBS) $(LDFLAGS) -lstdc++
@@ -126,10 +128,13 @@ TEST_CXX_SRCS := test/test_main.cxx \
 	test/TestUsbCameraCapture.cxx \
 	test/TestUsbJpeg.cxx \
 	test/TestUsbWebcamControl.cxx \
+	test/TestGuestProps.cxx \
+	test/TestDashboardHtml.cxx \
 	YoloGeometry.cxx \
 	UsbCameraCapture.cxx \
 	UsbJpeg.cxx \
 	UsbWebcamControl.cxx \
+	GuestProps.cxx \
 	YoloPostprocess.cxx \
 	HttpServer.cxx \
 	StreamBroadcaster.cxx
@@ -147,11 +152,15 @@ TEST_CXX_FLAGS := -O2 -Wall -Wextra -std=c++17 -fsanitize=address,undefined \
 	-I$(NNCTRL_DIR)/src \
 	-I$(NNCTRL_DIR)/dep/ambacnn \
 	-I$(ROOT_DIR)/drivers/cavalry/include/cavalry_v3 \
-	-I$(NANOPB_DIR) -I$(PROTO_DIR)
+	-I$(NANOPB_DIR) -I$(PROTO_DIR) \
+	-I$(ROOT_DIR)/guest-os/client
 TEST_LDFLAGS := -lCppUTest -lCppUTestExt -lpthread -lm -fsanitize=address,undefined
 
 test_yolo: $(HOST_C_OBJS) $(TEST_CXX_SRCS)
 	$(HOST_CXX) $(TEST_CXX_FLAGS) -o $@ $^ $(TEST_LDFLAGS)
+
+dump_dashboard_html: test/DumpDashboardHtml.cxx DashboardHtml.hxx
+	$(HOST_CXX) -O2 -Wall -Wextra -std=c++17 -I. -o $@ test/DumpDashboardHtml.cxx
 
 TARGET_C_OBJS := $(patsubst %.c, %.target.o, $(HOST_C_SRCS))
 
@@ -165,4 +174,4 @@ test: test_yolo
 	./test_yolo -v
 
 clean:
-	rm -f $(TARGETS) test_yolo test_yolo_arm64 *.o
+	rm -f $(TARGETS) test_yolo test_yolo_arm64 dump_dashboard_html *.o

@@ -60,6 +60,7 @@ extern "C" {
 #include "UsbIavDecoder.hxx"
 #include "UsbJpeg.hxx"
 #include "UsbWebcamControl.hxx"
+#include "GuestProps.hxx"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -1119,6 +1120,12 @@ static void HandleClientConnection(int client_fd, YoloRuntime *rt)
         char resp_buf[2048];
         int rlen = http_format_200_json(resp_buf, sizeof(resp_buf), json_buf);
         http_send_all(client_fd, resp_buf, rlen);
+        close(client_fd);
+    } else if (req.route == HTTP_ROUTE_API_GUEST_PROPS) {
+        GuestProperties props;
+        GuestPropsService::Query(props);
+        std::string resp = GuestPropsHttpResponse(props);
+        http_send_all(client_fd, resp.data(), resp.size());
         close(client_fd);
     } else if (req.route == HTTP_ROUTE_LIVE_PARAMS) {
         struct http_live_params params{};

@@ -20,56 +20,20 @@
 
 #include "amba_virt.h"
 #include "amba_virt_dev.hxx"
+#include "AmbaVirtLayout.hxx"
 
 namespace {
 
 const char *getDevTypeName(uint32_t devType) {
-    switch (devType) {
-    case AMBA_VIRT_DEV_TYPE_CAVALRY: return "CAVALRY (NPU)";
-    case AMBA_VIRT_DEV_TYPE_GDMA:    return "GDMA";
-    case AMBA_VIRT_DEV_TYPE_IAV:     return "IAV";
-    case AMBA_VIRT_DEV_TYPE_SCRATCH: return "SCRATCH";
-    default:                         return "UNKNOWN";
-    }
+    return ambaVirtGetDevTypeName(devType);
 }
 
 std::string formatCaps(uint32_t caps) {
-    std::vector<std::string> names;
-    if (caps & AMBA_VIRT_CAP_PING)           names.push_back("PING");
-    if (caps & AMBA_VIRT_CAP_QUERY_SELF)     names.push_back("QUERY_SELF");
-    if (caps & AMBA_VIRT_CAP_QUERY_PEERS)    names.push_back("QUERY_PEERS");
-    if (caps & AMBA_VIRT_CAP_QUERY_TOPO)     names.push_back("QUERY_TOPO");
-    if (caps & AMBA_VIRT_CAP_MEM_ALLOC)      names.push_back("MEM_ALLOC");
-    if (caps & AMBA_VIRT_CAP_MEM_RESIZE)     names.push_back("MEM_RESIZE");
-    if (caps & AMBA_VIRT_CAP_DEV_CONFIG)     names.push_back("DEV_CONFIG");
-    if (caps & AMBA_VIRT_CAP_GDMA_COPY)      names.push_back("GDMA_COPY");
-    if (caps & AMBA_VIRT_CAP_GDMA_PITCH)     names.push_back("GDMA_PITCH");
-    if (caps & AMBA_VIRT_CAP_CAVALRY_PATH_B) names.push_back("CAVALRY_PATH_B");
-    if (caps & AMBA_VIRT_CAP_CAVALRY_PATH_A) names.push_back("CAVALRY_PATH_A");
-    if (caps & AMBA_VIRT_CAP_CAVALRY_REGISTER) names.push_back("CAVALRY_REGISTER");
-    if (caps & AMBA_VIRT_CAP_IAV_STREAM)     names.push_back("IAV_STREAM");
-
-    if (names.empty())
-        return "NONE";
-
-    std::ostringstream oss;
-    for (size_t i = 0; i < names.size(); ++i) {
-        if (i > 0) oss << ", ";
-        oss << names[i];
-    }
-    return oss.str();
+    return ambaVirtFormatCaps(caps);
 }
 
 std::string toHex(uint32_t val) {
-    std::ostringstream oss;
-    oss << "0x" << std::hex << std::setw(8) << std::setfill('0') << val;
-    return oss.str();
-}
-
-std::string toMb(uint32_t bytes) {
-    std::ostringstream oss;
-    oss << (bytes / (1024 * 1024)) << " MB";
-    return oss.str();
+    return ambaVirtToHex(val);
 }
 
 void showLayout(AmbaVirtDevice &dev, bool json) {
@@ -131,101 +95,7 @@ void showLayout(AmbaVirtDevice &dev, bool json) {
         return;
     }
 
-    double allocMb = static_cast<double>(totalAllocatedBytes) / (1024.0 * 1024.0);
-    double barMb = static_cast<double>(barSize) / (1024.0 * 1024.0);
-    double utilPct = (barMb > 0.0) ? (allocMb / barMb * 100.0) : 0.0;
-
-    std::cout << "================================================================================\n"
-              << " Ambarella Virtualization Guest Memory Layout (/dev/amba_virt)\n"
-              << "================================================================================\n"
-              << " Tenant CID:       " << selfDesc.cid << "\n"
-              << " Status:           " << (selfDesc.status == 1 ? "ONLINE" : "OFFLINE") << "\n"
-              << " ivshmem BAR Size: " << std::fixed << std::setprecision(0) << barMb << " MB ("
-              << toHex(barSize) << ")\n"
-              << " Memory In Use:    " << std::fixed << std::setprecision(1) << allocMb << " MB / "
-              << barMb << " MB (" << std::setprecision(1) << utilPct << "% utilized, "
-              << (barMb - allocMb) << " MB free)\n"
-              << " Capabilities:     " << toHex(selfDesc.caps) << " [" << formatCaps(selfDesc.caps) << "]\n"
-              << "--------------------------------------------------------------------------------\n"
-              << " Virtual Device Partitions:\n"
-              << "--------------------------------------------------------------------------------\n"
-              << " Dev ID  Device Type    BAR Offset      End Offset      Size       RPC Arena\n";
-
-    if (devs.empty()) {
-        std::cout << " (no active virtual device partitions registered)\n";
-    } else {
-        for (const auto &d : devs) {
-            uint32_t endOff = d.base_offset + d.size;
-            std::cout << " [" << d.dev_type << "]     "
-                      << std::left << std::setw(14) << std::setfill(' ') << getDevTypeName(d.dev_type) << " "
-                      << toHex(d.base_offset) << "      "
-                      << toHex(endOff) << "      "
-                      << std::right << std::setw(8) << std::setfill(' ') << toMb(d.size) << "   ";
-            if (d.rpc_arena_size > 0) {
-                std::cout << toHex(d.rpc_arena_offset)
-                          << " (" << (d.rpc_arena_size / 1024) << " KB)\n";
-            } else {
-                std::cout << "N/A\n";
-            }
-        }
-    }
-
-    struct Extent {
-        uint32_t start;
-        uint32_t end;
-        std::string name;
-    };
-
-    std::vector<Extent> extents;
-    for (const auto &d : devs) {
-        Extent e;
-        e.start = d.base_offset;
-        e.end = d.base_offset + d.size;
-        e.name = std::string(getDevTypeName(d.dev_type)) + " Buffer";
-        extents.push_back(e);
-
-        if (d.rpc_arena_size > 0) {
-            Extent a;
-            a.start = d.rpc_arena_offset;
-            a.end = d.rpc_arena_offset + d.rpc_arena_size;
-            a.name = std::string(getDevTypeName(d.dev_type)) + " RPC Arena";
-            extents.push_back(a);
-        }
-    }
-
-    std::sort(extents.begin(), extents.end(), [](const Extent &a, const Extent &b) {
-        return a.start < b.start;
-    });
-
-    std::cout << "--------------------------------------------------------------------------------\n"
-              << " Memory Extent Map:\n"
-              << " Status  Usage                  Start Offset    End Offset      Size\n";
-
-    uint32_t cur = 0;
-    for (const auto &e : extents) {
-        if (e.start > cur) {
-            uint32_t freeSz = e.start - cur;
-            std::cout << " [FREE]  UNALLOCATED            "
-                      << toHex(cur) << "      "
-                      << toHex(e.start) << "      "
-                      << std::right << std::setw(8) << std::setfill(' ') << toMb(freeSz) << "\n";
-        }
-        uint32_t sz = e.end - e.start;
-        std::cout << " [ALLOC] "
-                  << std::left << std::setw(22) << std::setfill(' ') << e.name << " "
-                  << toHex(e.start) << "      "
-                  << toHex(e.end) << "      "
-                  << std::right << std::setw(8) << std::setfill(' ') << toMb(sz) << "\n";
-        cur = (e.end > cur) ? e.end : cur;
-    }
-    if (cur < barSize) {
-        uint32_t freeSz = barSize - cur;
-        std::cout << " [FREE]  UNALLOCATED            "
-                  << toHex(cur) << "      "
-                  << toHex(barSize) << "      "
-                  << std::right << std::setw(8) << std::setfill(' ') << toMb(freeSz) << "\n";
-    }
-    std::cout << "================================================================================\n";
+    std::cout << ambaVirtFormatLayout(selfDesc, devs, barSize);
 }
 
 void showInfo(AmbaVirtDevice &dev, bool json) {

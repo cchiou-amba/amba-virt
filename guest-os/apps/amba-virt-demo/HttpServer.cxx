@@ -103,6 +103,8 @@ int http_parse_request(const char *buf, size_t len, struct http_request *req)
             req->route = HTTP_ROUTE_ROOT;
         } else if (strcmp(req->uri, "/api/info") == 0 || strcmp(req->uri, "/health") == 0) {
             req->route = HTTP_ROUTE_API_INFO;
+        } else if (strcmp(req->uri, "/api/guest-props") == 0) {
+            req->route = HTTP_ROUTE_API_GUEST_PROPS;
         } else if (strcmp(req->uri, "/live/stream") == 0) {
             req->route = HTTP_ROUTE_LIVE_STREAM;
         } else {

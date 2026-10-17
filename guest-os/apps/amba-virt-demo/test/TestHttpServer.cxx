@@ -7,11 +7,14 @@
 #include "CppUTest/TestHarness.h"
 #include "../HttpServer.hxx"
 #include "../StreamBroadcaster.hxx"
+#include "../GuestProps.hxx"
 #include "stb/stb_image.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <vector>
@@ -742,6 +745,188 @@ TEST(HttpServer, EndToEndLoopbackStreamSaturation)
     close(fds[1]);
     for (int i = 0; i < 4; i++) stream_broadcaster_unregister(&sb, subs[i]);
     stream_broadcaster_destroy(&sb);
+}
+
+TEST(HttpServer, GuestPropsRouteDispatch)
+{
+    struct http_request req;
+
+    /* GET /api/guest-props -> HTTP_ROUTE_API_GUEST_PROPS */
+    const char *get_props = "GET /api/guest-props HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(get_props, strlen(get_props), &req));
+    LONGS_EQUAL(HTTP_METHOD_GET, req.method);
+    LONGS_EQUAL(HTTP_ROUTE_API_GUEST_PROPS, req.route);
+    STRCMP_EQUAL("/api/guest-props", req.uri);
+    STRCMP_EQUAL("", req.query);
+
+    /* GET /api/guest-props with query string -> HTTP_ROUTE_API_GUEST_PROPS */
+    const char *get_props_query = "GET /api/guest-props?foo=1&bar=2 HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(get_props_query, strlen(get_props_query), &req));
+    LONGS_EQUAL(HTTP_METHOD_GET, req.method);
+    LONGS_EQUAL(HTTP_ROUTE_API_GUEST_PROPS, req.route);
+    STRCMP_EQUAL("/api/guest-props", req.uri);
+    STRCMP_EQUAL("foo=1&bar=2", req.query);
+
+    /* POST /api/guest-props -> HTTP_ROUTE_UNKNOWN */
+    const char *post_props = "POST /api/guest-props HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 0\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(post_props, strlen(post_props), &req));
+    LONGS_EQUAL(HTTP_METHOD_POST, req.method);
+    LONGS_EQUAL(HTTP_ROUTE_UNKNOWN, req.route);
+
+    /* GET /api/guest-props/x -> HTTP_ROUTE_UNKNOWN */
+    const char *get_props_sub = "GET /api/guest-props/x HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(get_props_sub, strlen(get_props_sub), &req));
+    LONGS_EQUAL(HTTP_METHOD_GET, req.method);
+    LONGS_EQUAL(HTTP_ROUTE_UNKNOWN, req.route);
+
+    /* Existing routes remain unchanged */
+    const char *get_root = "GET / HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(get_root, strlen(get_root), &req));
+    LONGS_EQUAL(HTTP_ROUTE_ROOT, req.route);
+
+    const char *get_info = "GET /api/info HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(get_info, strlen(get_info), &req));
+    LONGS_EQUAL(HTTP_ROUTE_API_INFO, req.route);
+
+    const char *get_stream = "GET /live/stream HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(get_stream, strlen(get_stream), &req));
+    LONGS_EQUAL(HTTP_ROUTE_LIVE_STREAM, req.route);
+
+    const char *post_params = "POST /live/params HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 0\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(post_params, strlen(post_params), &req));
+    LONGS_EQUAL(HTTP_ROUTE_LIVE_PARAMS, req.route);
+
+    const char *post_infer = "POST /infer HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 0\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(post_infer, strlen(post_infer), &req));
+    LONGS_EQUAL(HTTP_ROUTE_INFER, req.route);
+
+    const char *options_props = "OPTIONS /api/guest-props HTTP/1.1\r\nHost: localhost:8080\r\n\r\n";
+    LONGS_EQUAL(0, http_parse_request(options_props, strlen(options_props), &req));
+    LONGS_EQUAL(HTTP_ROUTE_OPTIONS, req.route);
+}
+
+static void VerifyAndExtractHttpBody(const std::string &http_resp,
+                                     const std::string &expected_body,
+                                     std::string *extracted_body)
+{
+    CHECK(http_resp.rfind("HTTP/1.1 200 OK\r\n", 0) == 0);
+
+    size_t hdr_end = http_resp.find("\r\n\r\n");
+    CHECK(hdr_end != std::string::npos);
+
+    std::string headers = http_resp.substr(0, hdr_end + 2);
+    std::string body = http_resp.substr(hdr_end + 4);
+
+    CHECK(headers.find("\r\nContent-Type: application/json\r\n") != std::string::npos);
+    CHECK(headers.find("\r\nCache-Control: no-store\r\n") != std::string::npos);
+    CHECK(headers.find("\r\nAccess-Control-Allow-Origin: *\r\n") != std::string::npos);
+    CHECK(headers.find("\r\nConnection: close\r\n") != std::string::npos);
+
+    char expected_cl[64];
+    snprintf(expected_cl, sizeof(expected_cl), "\r\nContent-Length: %zu\r\n", body.size());
+    CHECK(headers.find(expected_cl) != std::string::npos);
+
+    LONGS_EQUAL(expected_body.size(), body.size());
+    STRCMP_EQUAL(expected_body.c_str(), body.c_str());
+
+    if (extracted_body) {
+        *extracted_body = body;
+    }
+}
+
+static void WriteGateJsonFileIfPresent(const char *filename, const std::string &json_body)
+{
+    const char *candidate_dirs[] = {
+        "../../../plan/plan_guest_properties_tab.artifacts/gates/E2-route",
+        "plan/plan_guest_properties_tab.artifacts/gates/E2-route"
+    };
+
+    for (size_t i = 0; i < sizeof(candidate_dirs) / sizeof(candidate_dirs[0]); ++i) {
+        struct stat st{};
+        if (stat(candidate_dirs[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+            std::string path = std::string(candidate_dirs[i]) + "/" + filename;
+            FILE *fp = fopen(path.c_str(), "wb");
+            CHECK(fp != nullptr);
+            size_t written = fwrite(json_body.data(), 1, json_body.size(), fp);
+            fclose(fp);
+            LONGS_EQUAL(json_body.size(), written);
+        }
+    }
+}
+
+TEST(HttpServer, GuestPropsHttpResponseAssemblyAndLargeBody)
+{
+    const size_t kHdrLen = offsetof(struct amba_virt_query_resp, payload);
+    const uint32_t mb = 1024U * 1024U;
+    const uint32_t bar_size = 256U * mb;
+
+    struct amba_virt_query_resp self_resp{};
+    self_resp.query_op = AMBA_VIRT_QUERY_SELF;
+    self_resp.status = 0;
+    self_resp.count = 1;
+    struct amba_virt_peer_desc self_desc{};
+    self_desc.cid = 12;
+    self_desc.tenant_idx = 0;
+    self_desc.status = 1;
+    self_desc.mem_allocated_mb = 88;
+    self_desc.caps = AMBA_VIRT_CAP_PING | AMBA_VIRT_CAP_QUERY_SELF |
+                     AMBA_VIRT_CAP_DMA_SLAVE | AMBA_VIRT_CAP_IAV_DEV;
+    memcpy(self_resp.payload, &self_desc, sizeof(self_desc));
+
+    const uint32_t types[8] = {
+        AMBA_VIRT_DEV_TYPE_IAV,
+        AMBA_VIRT_DEV_TYPE_CAVALRY,
+        AMBA_VIRT_DEV_TYPE_SCRATCH,
+        AMBA_VIRT_DEV_TYPE_GDMA,
+        99U,
+        AMBA_VIRT_DEV_TYPE_CAVALRY,
+        AMBA_VIRT_DEV_TYPE_GDMA,
+        AMBA_VIRT_DEV_TYPE_SCRATCH
+    };
+
+    struct amba_virt_query_resp dev_mem_resp{};
+    dev_mem_resp.query_op = AMBA_VIRT_QUERY_DEV_MEM;
+    dev_mem_resp.status = 0;
+    dev_mem_resp.count = 8;
+
+    struct amba_virt_dev_mem_desc devs[8]{};
+    for (uint32_t i = 0; i < 8; ++i) {
+        devs[i].dev_type = types[i];
+        devs[i].base_offset = (i * 24U + 4U) * mb;
+        devs[i].size = 12U * mb;
+        devs[i].rpc_arena_offset = (i * 24U + 2U) * mb;
+        devs[i].rpc_arena_size = 1U * mb;
+        devs[i].flags = i;
+    }
+    memcpy(dev_mem_resp.payload, devs, sizeof(devs));
+
+    GuestProperties props8;
+    int rc = GuestPropsService::Decode(
+        0, 0, bar_size,
+        0, self_resp, static_cast<uint32_t>(kHdrLen + sizeof(self_desc)),
+        0, dev_mem_resp, static_cast<uint32_t>(kHdrLen + sizeof(devs)),
+        props8);
+    LONGS_EQUAL(0, rc);
+    LONGS_EQUAL(8U, props8.devices.size());
+
+    std::string resp8 = GuestPropsHttpResponse(props8);
+    std::string expected8 = GuestPropsService::ToJson(props8);
+    std::string body8;
+    VerifyAndExtractHttpBody(resp8, expected8, &body8);
+    WriteGateJsonFileIfPresent("guest_props_8part.json", body8);
+
+    /* Over 64 KiB body: synthetic 70,000-byte error string */
+    GuestProperties props_large;
+    props_large.online = false;
+    props_large.query_status = -EIO;
+    props_large.error = std::string(70000, 'E');
+
+    std::string resp_large = GuestPropsHttpResponse(props_large);
+    std::string expected_large = GuestPropsService::ToJson(props_large);
+    std::string body_large;
+    VerifyAndExtractHttpBody(resp_large, expected_large, &body_large);
+    CHECK(body_large.size() > 65536U);
+    WriteGateJsonFileIfPresent("guest_props_70k.json", body_large);
 }
 
 /*
