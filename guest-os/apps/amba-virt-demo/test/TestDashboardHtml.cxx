@@ -233,6 +233,31 @@ TEST(DashboardHtml, ResponsiveMobileCssAndViewerProfile)
     CHECK(html.find("mobile-view") != std::string::npos);
 }
 
+TEST(DashboardHtml, ViewportTopAnchoredAndStableHeight)
+{
+    size_t mainCss = html.find("main {");
+    size_t propsViewCss = html.find(".props-view {");
+    CHECK(mainCss != std::string::npos);
+    CHECK(propsViewCss != std::string::npos);
+    std::string mainBlock = html.substr(mainCss, propsViewCss - mainCss);
+    CHECK(mainBlock.find("align-items: start;") != std::string::npos);
+
+    size_t detListCss = html.find(".det-list {");
+    size_t detItemCss = html.find(".det-item {");
+    CHECK(detListCss != std::string::npos);
+    CHECK(detItemCss != std::string::npos);
+    std::string detListBlock = html.substr(detListCss, detItemCss - detListCss);
+    CHECK(detListBlock.find("height: 220px;") != std::string::npos);
+
+    size_t canvasContainerCss = html.find(".canvas-container {");
+    size_t liveCanvasCss = html.find("#liveCanvas {");
+    CHECK(canvasContainerCss != std::string::npos);
+    CHECK(liveCanvasCss != std::string::npos);
+    std::string canvasContainerBlock = html.substr(canvasContainerCss, liveCanvasCss - canvasContainerCss);
+    CHECK(canvasContainerBlock.find("align-items: flex-start;") != std::string::npos);
+    CHECK(canvasContainerBlock.find("flex: 1;") == std::string::npos);
+}
+
 /*
  * Local variables:
  * mode: C++
