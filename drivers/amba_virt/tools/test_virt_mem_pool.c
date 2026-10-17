@@ -448,11 +448,102 @@ static void test_unregistered_and_uninitialised(void)
 	printf(" PASS\n");
 }
 
+static void test_collision_retry_with_arena(void)
+{
+	struct amba_virt_dev_bounds_req req;
+	struct amba_virt_dev_bounds_resp resp;
+	int ret;
+
+	printf("Running %s...", __func__);
+	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+
+	/* 1. Register GDMA at [0x0, 0x04000000) (64 MiB) */
+	memset(&req, 0, sizeof(req));
+	req.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+	req.requested_size = 64 * 1024 * 1024;
+	req.preferred_offset = 0x00000000;
+	req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+	ret = virt_mem_pool_set_device_bounds(TEST_CID, &req, &resp, NULL);
+	assert(ret == 0);
+	assert(resp.status == 0);
+	assert(resp.granted_offset == 0);
+
+	/* 2. Request Cavalry at 0x02000000 (64 MiB, 1 MiB arena) -> Collides with GDMA */
+	memset(&req, 0, sizeof(req));
+	req.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+	req.requested_size = 64 * 1024 * 1024;
+	req.preferred_offset = 0x02000000;
+	req.rpc_arena_size = 1 * 1024 * 1024;
+	req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+	ret = virt_mem_pool_set_device_bounds(TEST_CID, &req, &resp, NULL);
+	assert(ret == 0);
+	assert(resp.status == -EEXIST);
+	assert(resp.err_code == AMBA_VIRT_ERR_OFFSET_COLLISION);
+	assert(resp.colliding_dev == AMBA_VIRT_DEV_TYPE_GDMA);
+	assert(resp.suggested_offset == 0x04000000);
+
+	/* 3. Retry at suggested_offset (0x04000000) -> Must SUCCEED with arena at 0x08000000 */
+	req.preferred_offset = resp.suggested_offset;
+	ret = virt_mem_pool_set_device_bounds(TEST_CID, &req, &resp, NULL);
+	assert(ret == 0);
+	assert(resp.status == 0);
+	assert(resp.granted_offset == 0x04000000);
+	assert(resp.granted_size == 64 * 1024 * 1024);
+	assert(resp.rpc_arena_offset == 0x08000000);
+
+	virt_mem_pool_cleanup();
+	printf(" PASS\n");
+}
+
+static void test_explicit_arena_at_bar_end(void)
+{
+	struct amba_virt_dev_bounds_req req;
+	struct amba_virt_dev_bounds_resp resp;
+	int ret;
+
+	printf("Running %s...", __func__);
+	virt_mem_pool_init(1024 * 1024 * 1024);
+	virt_mem_pool_register_tenant(TEST_CID, 0, 1024 * 1024 * 1024, 1024 * 1024 * 1024);
+
+	/* 1. Request Cavalry at 0x3FE00000 (2 MiB, 1 MiB arena) -> Arena crosses 1 GiB BAR end */
+	memset(&req, 0, sizeof(req));
+	req.dev_type = AMBA_VIRT_DEV_TYPE_CAVALRY;
+	req.requested_size = 2 * 1024 * 1024;
+	req.rpc_arena_size = 1 * 1024 * 1024;
+	req.preferred_offset = 0x3FE00000;
+	req.align = 0;
+	req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+	ret = virt_mem_pool_set_device_bounds(TEST_CID, &req, &resp, NULL);
+	assert(ret == 0);
+	assert(resp.status == -ERANGE);
+	assert(resp.err_code == AMBA_VIRT_ERR_BAR_OVERFLOW);
+
+	/* 2. Register GDMA at offset 0 for 4 KiB to prove the rejected call committed nothing */
+	memset(&req, 0, sizeof(req));
+	req.dev_type = AMBA_VIRT_DEV_TYPE_GDMA;
+	req.requested_size = 4096;
+	req.preferred_offset = 0;
+	req.flags = AMBA_VIRT_DEV_F_EXACT;
+
+	ret = virt_mem_pool_set_device_bounds(TEST_CID, &req, &resp, NULL);
+	assert(ret == 0);
+	assert(resp.status == 0);
+
+	virt_mem_pool_cleanup();
+	printf(" PASS\n");
+}
+
 int main(void)
 {
 	printf("=== Starting virt_mem_pool unit test suite ===\n");
 	test_auto_offset();
 	test_collision_and_suggested_offset();
+	test_collision_retry_with_arena();
+	test_explicit_arena_at_bar_end();
 	test_quota_exceeded_exact_fails();
 	test_quota_exceeded_best_effort_clamps();
 	test_duplicate_registration();

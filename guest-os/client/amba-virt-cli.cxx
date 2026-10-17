@@ -118,17 +118,18 @@ void showInfo(AmbaVirtDevice &dev, bool json) {
                   << "  \"caps\": \"0x" << std::hex << std::setw(8) << std::setfill('0') << selfDesc.caps << std::dec << "\",\n"
                   << "  \"vsock_port\": " << info.vsock_port << ",\n"
                   << "  \"protocol_version\": " << info.proto << ",\n"
-                  << "  \"bar_size_bytes\": " << info.shm_size << "\n"
+                  << "  \"bar_size_bytes\": " << info.shm_size << ",\n"
+                  << "  \"bar_size_mb\": " << (info.shm_size / (1024 * 1024)) << "\n"
                   << "}\n";
         return;
     }
 
     std::cout << "Ambarella Virtualization Guest Tenant Status:\n"
               << "  Tenant CID:         " << selfDesc.cid << "\n"
-              << "  Tenant Index:       " << selfDesc.tenant_idx << "\n"
+              << "  Slice Index:        " << selfDesc.tenant_idx << "\n"
               << "  Tenant Status:      " << (selfDesc.status == 1 ? "ONLINE" : "OFFLINE") << "\n"
               << "  Memory Allocated:   " << selfDesc.mem_allocated_mb << " MB\n"
-              << "  ivshmem BAR Size:   " << (info.shm_size / (1024 * 1024)) << " MB\n"
+              << "  Slice Usable Size:  " << info.shm_size << " bytes (" << (info.shm_size / (1024 * 1024)) << " MB)\n"
               << "  Vsock Server Port:  " << info.vsock_port << "\n"
               << "  Protocol Version:   " << info.proto << "\n"
               << "  Capabilities:       0x" << std::hex << std::setw(8) << std::setfill('0')

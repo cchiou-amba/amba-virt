@@ -25,12 +25,18 @@ make OS=qnx
 
 ## Running Tests & Benchmarks
 
-### Functional Tests (CppUTest)
+Opening `/dev/amba_virt` requires root privileges (`0600`), so `amba-virt-client` and `amba-virt-cli` must be run under `sudo` on Linux guests.
+
+### Full 47-Test Suite (Automatic Environment Detection)
+At startup, `amba-virt-client` inspects the guest's active BAR partitions (`queryDevMem()`). All 47 tests across all 13 groups run directly via bare `sudo ./amba-virt-client` (or `sudo amba-virt-client -v`) whether `amba-virt-demo` and `amba_cavalry` are active (`live-coexistence` mode) or stopped (`clean-pool` mode):
 ```bash
-./amba-virt-client -v
+sudo ./amba-virt-client
+sudo ./amba-virt-client -v
 ```
 
-### IPC Latency and Throughput Benchmark
+Group filter flags (`-g <group>`, `-sg <substr>`, `-xg <substr>`) remain available for selective runs.
+
+### IPC, ivshmem Handoff, and GDMA Benchmark
 ```bash
-./amba-virt-client -bench
+sudo ./amba-virt-client -bench -json bench.json
 ```

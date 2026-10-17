@@ -553,6 +553,90 @@ create_node:
         return 0;
     }
 
+    int gdmaCopy(uint32_t srcOff, uint32_t dstOff, uint32_t len,
+                 struct amba_virt_gdma_copy *outResp = nullptr, uint32_t seq = 1) {
+        struct amba_virt_gdma_copy req;
+        memset(&req, 0, sizeof(req));
+        req.src_off = srcOff;
+        req.dst_off = dstOff;
+        req.len = len;
+        req.flags = AMBA_VIRT_GDMA_F_NONE;
+        struct amba_virt_gdma_copy resp;
+        memset(&resp, 0, sizeof(resp));
+        uint32_t payloadLen = 0;
+        int ret = rpcTransaction(AMBA_VIRT_MSG_GDMA_COPY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_GDMA_COPY_RESP,
+                                 &resp, sizeof(resp), &payloadLen);
+        if (ret < 0)
+            return ret;
+        if (payloadLen < sizeof(resp))
+            return -EBADMSG;
+        if (outResp)
+            *outResp = resp;
+        return resp.status;
+    }
+
+    int gdmaPitch(uint32_t srcOff, uint32_t dstOff,
+                  uint16_t width, uint16_t height, uint16_t srcPitch, uint16_t dstPitch,
+                  struct amba_virt_gdma_copy *outResp = nullptr, uint32_t seq = 1) {
+        struct amba_virt_gdma_copy req;
+        memset(&req, 0, sizeof(req));
+        req.src_off = srcOff;
+        req.dst_off = dstOff;
+        req.flags = AMBA_VIRT_GDMA_F_PITCH;
+        req.src_pitch = srcPitch;
+        req.dst_pitch = dstPitch;
+        req.width = width;
+        req.height = height;
+        struct amba_virt_gdma_copy resp;
+        memset(&resp, 0, sizeof(resp));
+        uint32_t payloadLen = 0;
+        int ret = rpcTransaction(AMBA_VIRT_MSG_GDMA_PITCH_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_GDMA_PITCH_RESP,
+                                 &resp, sizeof(resp), &payloadLen);
+        if (ret < 0)
+            return ret;
+        if (payloadLen < sizeof(resp))
+            return -EBADMSG;
+        if (outResp)
+            *outResp = resp;
+        return resp.status;
+    }
+
+    int cavalryRpc(const struct amba_virt_cavalry_rpc &req,
+                   struct amba_virt_cavalry_rpc &resp, uint32_t seq = 1) {
+        memset(&resp, 0, sizeof(resp));
+        uint32_t payloadLen = 0;
+        int ret = rpcTransaction(AMBA_VIRT_MSG_CAVALRY_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_CAVALRY_RESP,
+                                 &resp, sizeof(resp), &payloadLen);
+        if (ret < 0)
+            return ret;
+        if (payloadLen < sizeof(resp))
+            return -EBADMSG;
+        return resp.status;
+    }
+
+    int claimSlice(uint64_t nonce, struct amba_virt_slice_claim_resp &resp, uint32_t seq = 1) {
+        struct amba_virt_slice_claim_req req;
+        memset(&req, 0, sizeof(req));
+        req.nonce = nonce;
+        memset(&resp, 0, sizeof(resp));
+        uint32_t payloadLen = 0;
+        int ret = rpcTransaction(AMBA_VIRT_MSG_SLICE_CLAIM_REQ, seq,
+                                 &req, sizeof(req),
+                                 AMBA_VIRT_MSG_SLICE_CLAIM_RESP,
+                                 &resp, sizeof(resp), &payloadLen);
+        if (ret < 0)
+            return ret;
+        if (payloadLen < sizeof(resp))
+            return -EBADMSG;
+        return resp.status;
+    }
+
 private:
     std::string _path;
     int _fd;
@@ -564,3 +648,13 @@ private:
 };
 
 #endif /* AMBA_VIRT_DEV_HXX */
+
+/*
+ * Local variables:
+ * mode: C++
+ * c-file-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

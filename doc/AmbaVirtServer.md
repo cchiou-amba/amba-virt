@@ -570,6 +570,8 @@ When multiple drivers inside the same guest (or across different guests) request
 | **8. Permission / ACL Violation** | Untrusted guest CID attempts to configure a device aperture without holding `AMBA_VIRT_CAP_DEV_CONFIG`. | Server drops request immediately and logs security event. | `status = -EPERM`<br>`err_code = AMBA_VIRT_ERR_PERM_DENIED` |
 | **9. Total BAR Aperture Overflow** | Requested offset + size exceeds the physical ivshmem BAR2 window provisioned by the hypervisor. | Server rejects request as physically unmappable. | `status = -ERANGE`<br>`err_code = AMBA_VIRT_ERR_BAR_OVERFLOW` |
 
+When an explicit `preferred_offset` is requested, the server places any dedicated RPC arena immediately after the device aperture (`[preferred_offset + granted_size, preferred_offset + granted_size + rpc_arena_size)`); when `AMBA_VIRT_OFFSET_AUTO` is requested, the server places the RPC arena first and the device aperture immediately after it; on collision, `suggested_offset` is the recommended next device base, and drivers must always read `rpc_arena_offset` from the response.
+
 ### 6.3 Structured Protocol Framing & Error Return Protocol
 
 ```c
@@ -909,7 +911,12 @@ To guarantee robust isolation and zero cross-tenant leakage in a multi-tenant ed
 
 ## 11. Comprehensive Test Specification (CppUTest)
 
-The functional validation suite is implemented using **CppUTest** within `guest-os/client/amba-virt-client.cxx`.
+The functional validation suite is implemented using **CppUTest** (and the portable fallback runner in `guest-os/client/compat/CppUTest/`) within `guest-os/client/amba-virt-client.cxx`. Opening `/dev/amba_virt` requires root (`0600`), so the suite is executed under `sudo`.
+
+At startup, `amba-virt-client` inspects the guest's active BAR registrations (`queryDevMem()`) to detect the operating environment and run all 47 tests across all 13 groups (`VFS`, `Vsock`, `SHM`, `MultiFD`, `InBandDeviceConfig`, `IntrospectionAPI`, `DynamicMemory`, `AccessControlList`, `GDMA`, `CavalryPathB`, `DriverCaps`, `DynamicSlice`, `DynamicMemoryStress`) directly via `sudo ./amba-virt-client` (or `sudo amba-virt-client -v`):
+- **Live-Coexistence Mode** (`amba_cavalry` loaded / `amba-virt-demo` active): `InBandDeviceConfig` and `DynamicMemoryStress` compute `_freeBase` and remaining quota from `queryDevMem()` and `getShmSize()`, operating strictly within the free BAR tail using `AMBA_VIRT_DEV_TYPE_GDMA` and `AMBA_VIRT_DEV_TYPE_SCRATCH` without touching `AMBA_VIRT_DEV_TYPE_CAVALRY`.
+- **Clean-Pool Mode** (`amba-virt-demo` stopped and `amba_cavalry` unloaded): `InBandDeviceConfig` and `DynamicMemoryStress` exercise full-BAR device registrations (`GDMA` and `CAVALRY` across the 1 GiB BAR) and full-pool quota exhaustion.
+- Group filter flags (`-g`, `-sg`, `-xg`) remain available for selective runs.
 
 ### 11.1 VFS System Call Compliance (`TEST_GROUP(VFS)`)
 
@@ -921,7 +928,7 @@ The functional validation suite is implemented using **CppUTest** within `guest-
 | `lseek()` | `lseek(fd, 0, SEEK_SET)`, `SEEK_CUR`, `SEEK_END` | Character device returns `-ESPIPE` (illegal seek) |
 | `ioctl()` | `AMBA_VIRT_IOC_GET_INFO`, `AMBA_VIRT_IOC_CONNECT`, `AMBA_VIRT_IOC_SEND`, `AMBA_VIRT_IOC_RECV` | Valid inputs return 0; invalid pointer arguments return `-EFAULT`; unmapped commands return `-ENOTTY` |
 | `mmap()` | Map full `shm_size`, map 4KB/64KB pages, unaligned offsets, boundary mapping, over-allocation | Maps PCI BAR 2 pages into user space with `PROT_READ | PROT_WRITE`; over-allocation returns `-EINVAL` |
-| `munmap()` / `msync()` | Unmap active pages, invoke `msync(MS_SYNC)` / `msync(MS_ASYNC)` across mapped bounds | Unmaps pages without faulting; memory synchronizes cleanly |
+| `munmap()` / `msync()` | Allocate an owned 4 KB extent, map and write only that extent, invoke `msync(MS_SYNC)`, unmap and free | Unmaps and frees owned extent cleanly without writing unowned BAR offsets |
 | `fcntl()` | Toggle `O_NONBLOCK`, verify `F_GETFL`/`F_SETFL`, descriptor duplication via `dup()`, `dup2()` | Properly duplicates descriptor; shares underlying kernel file object |
 | `poll()` / `select()` | Edge-triggered and level-triggered polling on `/dev/amba_virt` | Returns readability/writability mask based on vsock queue occupancy |
 
@@ -935,13 +942,9 @@ The functional validation suite is implemented using **CppUTest** within `guest-
 - **Connection Churn**: Rapid open/connect/close bursts (1,000 cycles) to verify socket descriptor reclamation in both guest and host kernels.
 
 ### 11.3 ivshmem Shared Memory Integrity (`TEST_GROUP(SHM)`)
-- **Pattern Verification**: End-to-end writes across multi-megabyte buffers using pseudo-random bit sequences (PRBS31), incremental 64-bit integer counters, and walking-one bit patterns.
-- **Cacheline & Page Alignments**: Reads and writes across 64-byte cacheline boundaries, 4KB page boundaries, and unaligned offsets.
-- **Notification Handshake**:
-  1. Client writes structured payload into shared memory slice at `shm_offset`.
-  2. Client issues `AMBA_VIRT_IOC_SEND` containing `shm_offset`, `len`, and `FLAG_SHM_NOTIFY`.
-  3. Server verifies data integrity, performs an in-place transformation, and replies with `FLAG_SHM_ACK`.
-  4. Client verifies the modified pattern matches expected transformed state.
+- **Owned Extent Isolation**: Allocates a 64 KiB owned test extent in `setup()` and frees it in `teardown()`, ensuring no writes occur at BAR offset 0 when owned by a kernel driver.
+- **Pattern Verification**: End-to-end writes across owned buffers using pseudo-random bit sequences (PRBS31) and incremental byte counters.
+- **Cacheline & Page Alignments**: Reads and writes across 64-byte cacheline boundaries, 4KB page boundaries, unaligned offsets, and the tail boundary of the owned extent.
 
 ### 11.4 Multi-FD Concurrency & Scaling (`TEST_GROUP(MultiFD)`)
 - Multiple file descriptors opened concurrently by independent threads within a single process.
@@ -949,24 +952,38 @@ The functional validation suite is implemented using **CppUTest** within `guest-
 - Measures serialization overhead and verifies that mutex locks protect the transport without deadlocking.
 
 ### 11.5 In-Band Device Configuration & Conflict Resolution (`TEST_GROUP(InBandDeviceConfig)`)
+- Tracks only device types registered and extents allocated by the current test, releasing only owned resources in `teardown()` and failing upfront if a required device type is already registered. Adapts vectors between live-coexistence mode (`[_freeBase, shm_size)` using `GDMA` and `SCRATCH`) and clean-pool mode (full 1 GiB BAR using `GDMA` and `CAVALRY`).
 - **`TEST(InBandDeviceConfig, SuccessAutoOffset)`**: Asserts `preferred_offset = AMBA_VIRT_OFFSET_AUTO` successfully returns aligned, disjoint offsets.
-- **`TEST(InBandDeviceConfig, CollisionReturnsSuggestedOffset)`**: Registers GDMA at `[0x00000000, 0x04000000)`; asserts explicit request at `0x02000000` returns `status = -EEXIST`, `err_code = AMBA_VIRT_ERR_OFFSET_COLLISION`, and valid `suggested_offset`.
-- **`TEST(InBandDeviceConfig, QuotaExceededExactFails)`**: Asserts requesting size exceeding quota with `F_EXACT` returns `-ENOMEM` with `max_avail_size`.
+- **`TEST(InBandDeviceConfig, CollisionReturnsSuggestedOffset)`**: In clean-pool mode, registers GDMA at `[0x00000000, 0x04000000)` and verifies explicit Cavalry request (with 1 MiB RPC arena) at `0x02000000` returns `-EEXIST` with `suggested_offset = 0x04000000` and succeeds on retry (`granted_offset = 0x04000000`, `rpc_arena_offset = 0x08000000`). In live-coexistence mode, registers GDMA at `[_freeBase, _freeBase + 8 MiB)` and verifies explicit SCRATCH request (8 MiB + 1 MiB RPC arena) colliding at `_freeBase + 4 MiB` returns `-EEXIST` with `suggested_offset = _freeBase + 8 MiB` and succeeds on retry (`granted_offset = _freeBase + 8 MiB`, `rpc_arena_offset = _freeBase + 16 MiB`).
+- **`TEST(InBandDeviceConfig, QuotaExceededExactFails)`**: Asserts requesting size exceeding BAR ceiling returns `-ERANGE` (`AMBA_VIRT_ERR_BAR_OVERFLOW`), and requesting size exceeding remaining quota with `F_EXACT` returns `-ENOMEM` (`AMBA_VIRT_ERR_QUOTA_EXCEEDED`) with `max_avail_size`.
 - **`TEST(InBandDeviceConfig, QuotaExceededBestEffortClamps)`**: Asserts safe scratch requests with `F_BEST_EFFORT` clamp to `max_avail_size`.
 - **`TEST(InBandDeviceConfig, DuplicateWithoutReplaceFails)`**: Asserts duplicate registration without `F_REPLACE` returns `-EBUSY`.
 - **`TEST(InBandDeviceConfig, DuplicateWithReplaceSucceeds)`**: Asserts duplicate registration with `F_REPLACE` tears down prior allocation and registers cleanly.
-- **`TEST(InBandDeviceConfig, PermissionDeniedWithoutCap)`**: Asserts unprivileged tenant lacking `AMBA_VIRT_CAP_DEV_CONFIG` receives `-EPERM`.
+- **`TEST(InBandDeviceConfig, PermissionDeniedWithoutCap)`**: Asserts unprivileged tenant lacking `AMBA_VIRT_CAP_QUERY_PEERS` receives `-EPERM`.
 
 ### 11.6 Introspection & Query API Verification (`TEST_GROUP(IntrospectionAPI)`)
-- **`TEST(IntrospectionAPI, QuerySelfReportsCorrectBounds)`**: Validates `QUERY_SELF` returns caller CID, assigned tenant index, memory quota, and active device apertures.
-- **`TEST(IntrospectionAPI, PeerVisibilityRestrictedByACL)`**: Asserts tenant lacking `AMBA_VIRT_CAP_QUERY_PEERS` receives `-EPERM`, while authorized tenant retrieves peer descriptor list.
-- **`TEST(IntrospectionAPI, TopologyQueryRedactsPhysicalAddresses)`**: Asserts `QUERY_DEV_TOPOLOGY` populates chip ID, core counts, and frequencies, but leaves `phys_addr = 0` to prevent HPA disclosure.
+- **`TEST(IntrospectionAPI, QuerySelf)`**: Validates `QUERY_SELF` returns caller CID, assigned slice index, online status, and capability mask.
+- **`TEST(IntrospectionAPI, QueryDevMem)`**: Verifies `AMBA_VIRT_DEV_TYPE_SCRATCH` is not already registered, registers an owned 4 MiB `SCRATCH` partition with `AMBA_VIRT_OFFSET_AUTO`, verifies `queryDevMem` reports the granted offset and size, and releases the registration in `teardown()`.
+- **`TEST(IntrospectionAPI, QueryTopology)`**: Asserts `QUERY_DEV_TOPOLOGY` populates chip ID and core counts while masking `host_phys_addr = 0` (or returns `-EPERM` when unauthorized).
+- **`TEST(IntrospectionAPI, QueryPeers)`**: Asserts `QUERY_PEERS` returns `-EPERM` without `AMBA_VIRT_CAP_QUERY_PEERS` or returns active peer descriptors when authorized.
 
-### 11.7 Access Control List Enforcement (`TEST_GROUP(AccessControlList)`)
-- Validates bitmask checking across all capability boundaries.
-- Asserts that untrusted tenants cannot invoke legacy Path A or modify host memory partitions.
+### 11.7 Dynamic Memory, Stress, and Access Control (`TEST_GROUP(DynamicMemory)`, `TEST_GROUP(DynamicMemoryStress)`, `TEST_GROUP(AccessControlList)`)
+- **`DynamicMemory`**: Verifies 4 MiB extent allocation/free and `-ERANGE` rejection when requesting an extent larger than the BAR.
+- **`DynamicMemoryStress`**:
+  - `FragmentationAndChurn`: 200 rounds of allocating `{1 MiB, 4 MiB, 16 MiB}` extents and freeing them in shuffled order (`std::mt19937(0xC0FFEEU)`), verifying `mem_allocated_mb` returns to its starting value.
+  - `HighWaterQuotaExhaustion`: Computes `freeBase` from `queryDevMem()`, fills any unaligned gap below `freeBase`, allocates `align_up(ceil((shm_size - freeBase) / 16), 2 MiB)` chunks until `-ENOMEM`, verifies `total_free < chunkSize`, frees all owned extents, and verifies `mem_allocated_mb` returns to its starting value.
+- **`AccessControlList`**: Validates standard tenant capabilities (`PING`, `QUERY_SELF`, `DEV_CONFIG`, `MEM_ALLOC`).
 
-### 11.8 Host Regression Suites (`make -C drivers/amba_virt/tools test`)
+### 11.8 GDMA, Cavalry Path B, Driver Capabilities, and Dynamic Slice (`TEST_GROUP(GDMA)`, `TEST_GROUP(CavalryPathB)`, `TEST_GROUP(DriverCaps)`, `TEST_GROUP(DynamicSlice)`)
+- **`GDMA`**: Allocates an owned 2 MiB test extent (`src` at `+0`, `dst` at `+1 MiB`) and verifies:
+  - `LinearCopyPattern`: 64 KiB PRBS31 hardware DMA copy bit-exact match with a 4 KiB post-destination guard check.
+  - `Pitch2DCopyPattern`: 64x64 2D pitch copy (`srcPitch = 512`, `dstPitch = 256`) preserving inter-row destination gap bytes.
+  - `RejectsInvalid`: `-EINVAL` on zero length, odd length, overlapping ranges, zero width, `width > srcPitch`, and `width > 4096`; `-ERANGE` when source or pitch bounds exceed usable slice size.
+- **`CavalryPathB`**: Exercises `VCAV_OP_GET_VERSION`, `VCAV_OP_GET_CHIP_ID` (non-zero chip ID), `VCAV_OP_GET_STATUS` (`0` or `1`), and `VCAV_OP_RUN_REGISTERED_DAG` rejection (`-EMSGSIZE` on zero `arena_len`, `-EINVAL` on out-of-range `bar_offset`) without touching active sessions, handles, or DAGs.
+- **`DriverCaps`**: Validates `AMBA_VIRT_QUERY_DRIVER_CAPS` entry count ($\le 8$), NUL-terminated `dev_name`, valid `ONLINE`/`OFFLINE` state, and consistency between `ONLINE` state and `host_mod_mask`.
+- **`DynamicSlice`**: Verifies `AMBA_VIRT_MSG_SLICE_CLAIM_REQ` rejects invalid nonces (`0` and `0xFFFFFFFFFFFFFFFF`) with `-ENOENT` while leaving the caller's existing `tenant_idx` and `shm_size` untouched.
+
+### 11.9 Host Regression Suites (`make -C drivers/amba_virt/tools test`)
 Host-side suites run natively with AddressSanitizer and UBSan. They include boundary and limit
 stress (`test_boundary_stress`), desync and state reconciliation (`test_state_desync`), fuzzing
 and corruption protection (`test_fuzz_corruption`), rogue-HVM exploits
